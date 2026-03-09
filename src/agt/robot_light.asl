@@ -85,6 +85,7 @@ carrying(none).      // Contenedor que está cargando
 // Recibir tarea del scheduler
 +task(CId, ShelfId) : state(idle) <-
     .print("✅ Tarea asignada: Transportar ", CId, " a ", ShelfId);
+    accept_task(CId);
     -+state(working);
     -+carrying(CId);
     !execute_task(CId, ShelfId).
@@ -122,31 +123,49 @@ carrying(none).      // Contenedor que está cargando
     .print("✨ Tarea completada: ", CId);
     -+state(idle);
     -+carrying(none);
-    -task(CId, ShelfId).
+    .abolish(task(CId, ShelfId)).
 
-// Navegar a la estantería (simplificado - zona de estanterías)
+// LIGHT: se coloca en (SX+2, SY-1) — encima del shelf, dist=3, celda distinta
 +!navigate_to_shelf(ShelfId) : true <-
-    // Las estanterías están en la zona x=10-18, y=2-12
-    .print("YENDO A LA SHELFFFFFF");
-    move_to(12, 3);  // Posición aproximada en zona de estanterías pequeñas
-    .wait(500).
+    get_shelf_position(ShelfId);
+    ?shelf_pos(ShelfId, SX, SY);
+    !try_move_to_shelf(SX + 2, SY - 1).
+
++!try_move_to_shelf(X, Y) : true <-
+    move_to(X, Y).
+
+-!try_move_to_shelf(X, Y) : true <-
+    .wait(2000);
+    !try_move_to_shelf(X, Y).
 
 /* ============================================================================
- * MANEJO DE ERRORES
+ * MANEJO DE ERRORES Y FALLOS DE PLANES
  * ============================================================================ */
+
+// Plan de fallo esencial (DEBUGGING.md): sin esto Jason no puede recuperarse
+-!execute_task(CId, ShelfId) : true <-
+    .print("⚠️ Fallo en execute_task para ", CId, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none);
+    release_task(CId);
+    .abolish(task(CId, ShelfId)).
 
 // Error al recoger contenedor (muy pesado o grande)
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);
     -+state(idle);
     -+carrying(none);
-    -task(CId, _).
+    .abolish(task(CId, _)).
 
 +error(container_too_big, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy grande - ", Data);
     -+state(idle);
     -+carrying(none);
-    -task(CId, _).
+    .abolish(task(CId, _)).
+
++error(destination_conflict, Data) : true <-
+    .print("⚠️ Conflicto de destino, esperando y reintentando...");
+    .wait(800).
 
 // Error general
 +error(ErrorType, Data) : true <-

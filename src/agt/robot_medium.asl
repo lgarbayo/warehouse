@@ -75,6 +75,7 @@ carrying(none).      // Contenedor que está cargando
 // Recibir tarea del scheduler
 +task(CId, ShelfId) : state(idle) <-
     .print("✅ Tarea asignada: Transportar ", CId, " a ", ShelfId);
+    accept_task(CId);
     -+state(working);
     -+carrying(CId);
     !execute_task(CId, ShelfId).
@@ -87,8 +88,9 @@ carrying(none).      // Contenedor que está cargando
     .print("🚀 Iniciando tarea: ", CId);
     
     // Fase 1: Ir al área de entrada
+    // Usamos (0,1) para evitar conflicto de destino con robot_heavy que usa (2,1)
     .print("📍 Fase 1: Moviéndose al área de entrada");
-    move_to(1, 1);
+    move_to(0, 1);
     .wait(600);  // Robot medio es más lento
     
     // Fase 2: Recoger el contenedor
@@ -114,28 +116,47 @@ carrying(none).      // Contenedor que está cargando
     -+carrying(none);
     -task(CId, ShelfId).
 
-// Navegar a la estantería (zona de estanterías medianas)
+// MEDIUM: se coloca en (SX+1, SY-1) — encima del shelf, dist=2, celda distinta a heavy
 +!navigate_to_shelf(ShelfId) : true <-
-    // Estanterías medianas están en y=6-7
-    .print("YENDO A LA SHELFFFFFF");
-    move_to(12, 6);
-    .wait(600).
+    get_shelf_position(ShelfId);
+    ?shelf_pos(ShelfId, SX, SY);
+    !try_move_to_shelf(SX + 1, SY - 1).
+
++!try_move_to_shelf(X, Y) : true <-
+    move_to(X, Y).
+
+-!try_move_to_shelf(X, Y) : true <-
+    .wait(2000);
+    !try_move_to_shelf(X, Y).
 
 /* ============================================================================
- * MANEJO DE ERRORES
+ * MANEJO DE ERRORES Y FALLOS DE PLANES
  * ============================================================================ */
+
+// Plan de fallo para execute_task: esencial según DEBUGGING.md
+// Se activa cuando una acción dentro de execute_task falla (pickup, drop_at...)
+-!execute_task(CId, ShelfId) : true <-
+    .print("⚠️ Fallo en execute_task para ", CId, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none);
+    release_task(CId);
+    .abolish(task(CId, ShelfId)).
 
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);
     -+state(idle);
     -+carrying(none);
-    -task(CId, _).
+    .abolish(task(CId, _)).
 
 +error(container_too_big, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy grande - ", Data);
     -+state(idle);
     -+carrying(none);
-    -task(CId, _).
+    .abolish(task(CId, _)).
+
++error(destination_conflict, Data) : true <-
+    .print("⚠️ Conflicto de destino, esperando y reintentando...");
+    .wait(1000).
 
 +error(ErrorType, Data) : true <-
     .print("⚠️ Error detectado: ", ErrorType, " - ", Data);

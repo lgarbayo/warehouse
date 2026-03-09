@@ -48,12 +48,15 @@ pending_containers(0).
 +free_shelf(CId, ShelfId) : container_info(CId, W, H, Weight, Type) <-
     .print("Estantería: ", ShelfId, " asignada a ", CId);
     
-    // Asignar a robot apropiado según su capacidad
-    if (Weight <= 10) {
+    // Asignar a robot apropiado según su capacidad (peso Y tamaño)
+    // robot_light:  max 10kg, 1x1
+    // robot_medium: max 30kg, 1x2
+    // robot_heavy:  max 100kg, 2x3
+    if (Weight <= 10 & W <= 1 & H <= 1) {
         .print("Asignando al robot ligero: ", CId);
         .send(robot_light, tell, task(CId, ShelfId));
     } else {
-        if (Weight <= 30) {
+        if (Weight <= 30 & W <= 1 & H <= 2) {
             .print("Asignando al robot mediano: ", CId);
             .send(robot_medium, tell, task(CId, ShelfId));
         } else {
