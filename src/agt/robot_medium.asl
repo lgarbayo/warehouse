@@ -116,11 +116,11 @@ carrying(none).      // Contenedor que está cargando
     -+carrying(none);
     -task(CId, ShelfId).
 
-// MEDIUM: se coloca en (SX+1, SY-1) — encima del shelf, dist=2, celda distinta a heavy
+// MEDIUM: se coloca en (SX, SY-1) — encima del shelf (centro)
 +!navigate_to_shelf(ShelfId) : true <-
     get_shelf_position(ShelfId);
     ?shelf_pos(ShelfId, SX, SY);
-    !try_move_to_shelf(SX + 1, SY - 1).
+    !try_move_to_shelf(SX, SY - 1).
 
 +!try_move_to_shelf(X, Y) : true <-
     move_to(X, Y).

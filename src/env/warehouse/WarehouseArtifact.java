@@ -421,6 +421,9 @@ public class WarehouseArtifact extends Environment {
 
                     if (nuevaRuta.isEmpty()) {
                         addError(agName, "path_blocked", "Ruta totalmente bloqueada, imposible avanzar.");
+                        if (activeDestinations != null) {
+                            activeDestinations.remove(destKey, agName);
+                        }
                         return false;
                     }
 
@@ -465,7 +468,7 @@ public class WarehouseArtifact extends Environment {
             return false;
         } finally {
             if (activeDestinations != null) {
-                activeDestinations.remove(agName);
+                activeDestinations.remove(destKey);
             }
         }
     }
@@ -753,15 +756,41 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
-     * Encuentra la mejor estantería para un contenedor
+     * Encuentra la mejor estantería para un contenedor, priorizando por tipo de
+     * carga.
+     * - Ligero (<= 10kg, 1x1): shelves 1-4 (pequeñas)
+     * - Mediano (<= 30kg, <= 1x2): shelves 5-7 (medianas)
+     * - Pesado (> 30kg o grande): shelves 8-9 (grandes)
      */
     private Shelf findBestShelf(Container container) {
+        List<String> preferredShelves;
+        if (container.getWeight() <= 10 && container.getWidth() <= 1 && container.getHeight() <= 1) {
+            preferredShelves = Arrays.asList("shelf_1", "shelf_2", "shelf_3", "shelf_4");
+        } else if (container.getWeight() <= 30 && container.getWidth() <= 1 && container.getHeight() <= 2) {
+            preferredShelves = Arrays.asList("shelf_5", "shelf_6", "shelf_7");
+        } else {
+            preferredShelves = Arrays.asList("shelf_8", "shelf_9");
+        }
+
+        // 1. Intentar buscar en las estanterías preferidas
         List<Shelf> availableShelves = shelves.values().stream()
+                .filter(s -> preferredShelves.contains(s.getId()))
                 .filter(s -> s.canStore(container))
                 .sorted(Comparator.comparingDouble(Shelf::getOccupancyPercentage))
                 .collect(Collectors.toList());
 
-        return availableShelves.isEmpty() ? null : availableShelves.get(0);
+        if (!availableShelves.isEmpty()) {
+            return availableShelves.get(0);
+        }
+
+        // 2. Fallback: Si no hay espacio en las preferidas, buscar en cualquier otra
+        // (evita starvation)
+        List<Shelf> fallbackShelves = shelves.values().stream()
+                .filter(s -> s.canStore(container))
+                .sorted(Comparator.comparingDouble(Shelf::getOccupancyPercentage))
+                .collect(Collectors.toList());
+
+        return fallbackShelves.isEmpty() ? null : fallbackShelves.get(0);
     }
 
     /**

@@ -42,16 +42,21 @@ pending_containers(0).
 +container_info(CId, W, H, Weight, Type) : true <-
     .print("Info: ", CId, " - ", Weight, "kg. Solicitando estantería...");
     +pending_container(CId, Weight);
+    !assign_shelf(CId).
+
++!assign_shelf(CId) : true <-
     get_free_shelf(CId).
+
+-!assign_shelf(CId) : true <-
+    .print("⚠️ [SCHEDULER] Estanterías llenas para ", CId, ". Reintentando en 5s...");
+    .wait(5000);
+    !assign_shelf(CId).
 
 // 3. Recibir estantería libre y asignar la tarea (estantería + contenedor) al robot
 +free_shelf(CId, ShelfId) : container_info(CId, W, H, Weight, Type) <-
     .print("Estantería: ", ShelfId, " asignada a ", CId);
     
     // Asignar a robot apropiado según su capacidad (peso Y tamaño)
-    // robot_light:  max 10kg, 1x1
-    // robot_medium: max 30kg, 1x2
-    // robot_heavy:  max 100kg, 2x3
     if (Weight <= 10 & W <= 1 & H <= 1) {
         .print("Asignando al robot ligero: ", CId);
         .send(robot_light, tell, task(CId, ShelfId));

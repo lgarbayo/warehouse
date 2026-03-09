@@ -125,11 +125,11 @@ carrying(none).      // Contenedor que está cargando
     -+carrying(none);
     .abolish(task(CId, ShelfId)).
 
-// LIGHT: se coloca en (SX+2, SY-1) — encima del shelf, dist=3, celda distinta
+// LIGHT: se coloca en (SX, SY-1) — encima del shelf (centro)
 +!navigate_to_shelf(ShelfId) : true <-
     get_shelf_position(ShelfId);
     ?shelf_pos(ShelfId, SX, SY);
-    !try_move_to_shelf(SX + 2, SY - 1).
+    !try_move_to_shelf(SX, SY - 1).
 
 +!try_move_to_shelf(X, Y) : true <-
     move_to(X, Y).
