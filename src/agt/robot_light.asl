@@ -69,9 +69,8 @@ carrying(none).      // Contenedor que está cargando
 
 // Ciclo de trabajo principal
 +!work_cycle : state(idle) <-
-    .print("Solicitando nueva tarea...");
-    request_task;
-    .wait(3000);  // Esperar 3 segundos antes de solicitar otra
+    .print("[LIGHT] Esperando tarea del planificador central...");
+    .wait(3000);  // Esperar 3 segundos
     !work_cycle.
 
 +!work_cycle : not state(idle) <-
@@ -91,15 +90,22 @@ carrying(none).      // Contenedor que está cargando
     !execute_task(CId, ShelfId).
 
 +task(CId, ShelfId) : not state(idle) <-
-    .print("⚠️ Ocupado, no puedo aceptar tarea: ", CId).
+    .print("⚠️ Ocupado, encolando tarea: ", CId).
+
++state(idle) : task(CId, ShelfId) <-
+    .print("✅ Procesando tarea encolada: ", CId, " a ", ShelfId);
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
 
 // Ejecutar la tarea completa
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 Iniciando tarea: ", CId);
     
-    // Fase 1: Ir al área de entrada (donde están los contenedores)
+    // Fase 1: Ir al área de entrada sin pisar el contenedor (1,1)
     .print("📍 Fase 1: Moviéndose al área de entrada");
-    move_to(1, 1);
+    move_to(1, 0);
     .wait(500);
     
     // Fase 2: Recoger el contenedor
@@ -148,6 +154,7 @@ carrying(none).      // Contenedor que está cargando
     -+state(idle);
     -+carrying(none);
     release_task(CId);
+    .send(scheduler, tell, task_failed(CId));
     .abolish(task(CId, ShelfId)).
 
 // Error al recoger contenedor (muy pesado o grande)

@@ -69,3 +69,10 @@ pending_containers(0).
             .send(robot_heavy, tell, task(CId, ShelfId));
         }
     }.
+
+// 4. Manejo de fallos reportados por robots
++task_failed(CId)[source(Robot)] : true <-
+    .print("⚠️ ", Robot, " reportó fallo con ", CId, ". Reasignando...");
+    -task_failed(CId)[source(Robot)];
+    // Volvemos a pedir info para reiniciar el ciclo de asignación
+    get_container_info(CId).

@@ -589,8 +589,10 @@ public class WarehouseArtifact extends Environment {
                 return false;
             }
 
-            // Verificar distancia
-            if (robot.distanceTo(container.getX(), container.getY()) > 1) {
+            // Verificar distancia - tolerancia de 3 para permitir que robots grandes (ej
+            // heavy 2x3)
+            // no tengan que solapar físicamente el contenedor para recogerlo
+            if (robot.distanceTo(container.getX(), container.getY()) > 3) {
                 addError(agName, "too_far", "Container too far away");
                 return false;
             }

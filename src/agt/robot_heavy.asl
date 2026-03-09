@@ -37,8 +37,7 @@ carrying(none).      // Contenedor que está cargando
 
 // Ciclo de trabajo principal - más selectivo, solo grandes cargas
 +!work_cycle : state(idle) <-
-    .print("[HEAVY] Solicitando tarea especializada...");
-    request_task;
+    .print("[HEAVY] Esperando tarea del planificador central...");
     .wait(4000);  // Esperar más tiempo (robot más lento)
     !work_cycle.
 
@@ -60,16 +59,23 @@ carrying(none).      // Contenedor que está cargando
     !execute_task(CId, ShelfId).
 
 +task(CId, ShelfId) : not state(idle) <-
-    .print("⚠️ [HEAVY] Ocupado con carga pesada, rechazando: ", CId).
+    .print("⚠️ [HEAVY] Ocupado con carga pesada, encolando: ", CId).
+
++state(idle) : task(CId, ShelfId) <-
+    .print("✅ [HEAVY] Procesando tarea encolada: ", CId, " a ", ShelfId);
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
 
 // Ejecutar la tarea completa - movimientos más lentos pero precisos
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 [HEAVY] Iniciando transporte de carga pesada: ", CId);
     
     // Fase 1: Aproximación cuidadosa al área de entrada
-    // Usamos (2,1) para evitar conflicto de destino con robot_medium que usa (0,1)
+    // Usamos (3,1) para esperar a la derecha del contenedor 2xN (1,1)-(2,3)
     .print("📍 [HEAVY] Fase 1: Aproximación al área de entrada");
-    move_to(2, 1);
+    move_to(3, 1);
     .wait(1000);  // Robot pesado es más lento
     
     // Fase 2: Recoger el contenedor pesado
@@ -120,6 +126,7 @@ carrying(none).      // Contenedor que está cargando
     -+state(idle);
     -+carrying(none);
     release_task(CId);
+    .send(scheduler, tell, task_failed(CId));
     .abolish(task(CId, ShelfId)).
 
 +error(container_too_heavy, Data) : carrying(CId) <-

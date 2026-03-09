@@ -59,9 +59,8 @@ carrying(none).      // Contenedor que está cargando
 
 // Ciclo de trabajo principal
 +!work_cycle : state(idle) <-
-    .print("Solicitando nueva tarea...");
-    request_task;
-    .wait(3000);  // Esperar 3 segundos antes de solicitar otra
+    .print("[MEDIUM] Esperando tarea del planificador central...");
+    .wait(3000);  // Esperar 3 segundos
     !work_cycle.
 
 +!work_cycle : not state(idle) <-
@@ -81,14 +80,21 @@ carrying(none).      // Contenedor que está cargando
     !execute_task(CId, ShelfId).
 
 +task(CId, ShelfId) : not state(idle) <-
-    .print("⚠️ Ocupado, no puedo aceptar tarea: ", CId).
+    .print("⚠️ Ocupado, encolando tarea: ", CId).
+
++state(idle) : task(CId, ShelfId) <-
+    .print("✅ Procesando tarea encolada: ", CId, " a ", ShelfId);
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
 
 // Ejecutar la tarea completa
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 Iniciando tarea: ", CId);
     
     // Fase 1: Ir al área de entrada
-    // Usamos (0,1) para evitar conflicto de destino con robot_heavy que usa (2,1)
+    // Usamos (0,1) para evitar pisar el contenedor (1,1) y evitar colisión
     .print("📍 Fase 1: Moviéndose al área de entrada");
     move_to(0, 1);
     .wait(600);  // Robot medio es más lento
@@ -140,6 +146,7 @@ carrying(none).      // Contenedor que está cargando
     -+state(idle);
     -+carrying(none);
     release_task(CId);
+    .send(scheduler, tell, task_failed(CId));
     .abolish(task(CId, ShelfId)).
 
 +error(container_too_heavy, Data) : carrying(CId) <-
