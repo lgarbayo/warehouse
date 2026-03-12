@@ -670,6 +670,7 @@ public class WarehouseArtifact extends Environment {
             // Depositar
             shelf.store(container);
             robot.drop();
+            robot.setBusy(false);
             container.setAssignedShelf(shelfId);
 
             totalContainersProcessed++;
