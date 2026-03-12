@@ -136,3 +136,47 @@ La salida cada 30s se verá así:
 ========================================
 
 El intervalo está en la creencia report_interval(30000), fácil de cambiar si quieres reportes más frecuentes durante las pruebas.
+
+---
+## 8. Sexta ronda -> Refactorización del supervisor: .count() y corrección de sintaxis ArithSpeak
+
+**Problema**
+
+El supervisor fallaba al parsear con el error:
+`error parsing "file:src/agt/supervisor.asl": Encountered "<ATOM> "is"" at line X, column 17`
+
+Esto hacía que el agente supervisor no cargara en absoluto en el sistema, y los robots reportaban `Receiver 'supervisor' does not exist!`.
+
+**Causa raíz: dos errores de sintaxis Jason 3.3.0**
+
+1. **`is` no es un operador válido en cuerpos de planes en Jason 3.3.0.**
+   En Prolog estándar, `X is Expr` evalúa la expresión aritmética. En Jason 3.3.0, el operador correcto en cuerpos de planes es `=`. El lexer de Jason tokeniza `is` como un átomo genérico, no como un operador reservado, de ahí el error de parse. Ningún otro fichero `.asl` del proyecto ni de los ejemplos oficiales de Jason 3.3.0 usa `is` — todos usan `=`.
+
+   ```jason
+   // Incorrecto en Jason 3.3.0:
+   SuccessRate is (Stored * 100) / Received;
+
+   // Correcto:
+   SuccessRate = (Stored * 100) / Received;
+   ```
+
+2. **`.count(Pattern, Var)` (forma de dos argumentos) no es válida en cuerpos de planes.**
+   En Jason 3.3.0, `.count` funciona como función aritmética inline con un solo argumento: `.count(Pattern)` devuelve el entero directamente (como `math.max(...)` o `math.abs(...)`). La forma de dos argumentos `.count(P, N)` existe en contextos de plan (guardas) para comparar contra un valor ya ligado, pero no para ligar una variable en el cuerpo. Forma correcta en el cuerpo:
+
+   ```jason
+   // Incorrecto en cuerpo de plan:
+   .count(container_received(_), Received);
+
+   // Correcto:
+   Received = .count(container_received(_));
+   ```
+
+**Refactorización asociada: abandono de contadores manuales**
+
+Aprovechando la corrección, se refactorizó la lógica de conteo para eliminar los contadores manuales (`-+total_received(N1)`, etc.) — propensos a condiciones de carrera si múltiples eventos llegan seguidos. En su lugar, cada evento añade un hecho individual a la base de creencias del supervisor:
+
+- `+container_received(CId)` — al percibir `new_container`
+- `+container_stored_fact(CId, ShelfId)` — al recibir notificación del robot
+- `+error_occurred(CId, ErrorType)` — al recibir notificación de error
+
+Los totales se calculan en el momento del reporte con `.count(Pattern)`, sin estado intermedio que mantener. Las creencias iniciales del profesor (`total_received(0)`, `errors_by_type(T, 0)`, etc.) se mantienen intactas; `errors_by_type` se reutiliza como registro de tipos conocidos para iterar en el reporte.
