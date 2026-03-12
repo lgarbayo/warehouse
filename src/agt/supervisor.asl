@@ -54,73 +54,72 @@ report_interval(30000).
  * CÁLCULO Y REPORTE DE ESTADÍSTICAS
  * ============================================================================ */
 
+// Con contenedores recibidos: calcular tasas
 +!print_stats :
-        total_received(Received) & total_stored(Stored) & total_errors(Errors) <-
-    // Tasa de éxito y error (evitar división por cero)
-    if (Received > 0) {
-        SuccessRate is (Stored * 100) / Received;
-        ErrorRate   is (Errors * 100) / Received;
-    } else {
-        SuccessRate = 0;
-        ErrorRate   = 0;
-    };
-    Pending is Received - Stored - Errors;
-
+        .count(container_received(_), Received) & Received > 0 <-
+    .count(container_stored_fact(_,_), Stored);
+    .count(error_occurred(_,_), Errors);
+    SuccessRate is (Stored * 100) / Received;
+    ErrorRate   is (Errors * 100) / Received;
+    Pending     is Received - Stored - Errors;
     .print("========================================");
     .print("[SUPERVISOR] REPORTE DE ESTADISTICAS");
     .print("Contenedores recibidos: ", Received);
     .print("Contenedores almacenados: ", Stored, " (", SuccessRate, "%)");
-    .print("Contenedores con error: ", Errors, " (", ErrorRate,   "%)");
+    .print("Contenedores con error: ", Errors, " (", ErrorRate, "%)");
     .print("Pendientes en proceso: ", Pending);
     .print("Errores por tipo: ");
     !print_errors_by_type;
     .print("========================================").
 
-// Imprime cada tipo de error con su contador
+// Sin contenedores aún: evitar división por cero
++!print_stats : true <-
+    .print("========================================");
+    .print("[SUPERVISOR] REPORTE DE ESTADISTICAS");
+    .print("Sin contenedores recibidos aun.");
+    .print("========================================").
+
+// Recorre los tipos de error conocidos con recursión
 +!print_errors_by_type : true <-
-    .findall(T-C, errors_by_type(T, C), Pairs);
-    for (.member(Type-Count, Pairs)) {
-        if (Count > 0) {
-            .print("    ", Type, ": ", Count)
-        }
-    }.
+    .findall(T, errors_by_type(T, _), Types);
+    !print_error_list(Types).
+
++!print_error_list([]) : true <- true.
+
++!print_error_list([Type|Rest]) : .count(error_occurred(_, Type), N) & N > 0 <-
+    .print("  ", Type, ": ", N);
+    !print_error_list(Rest).
+
++!print_error_list([_|Rest]) : true <-
+    !print_error_list(Rest).
 
 /* ============================================================================
  * MONITORIZACIÓN - Contenedores recibidos
  * ============================================================================ */
 
 // new_container es global: el supervisor lo percibe directamente del entorno
-+new_container(CId) : total_received(N) <-
-    .print("[SUPERVISOR] Nuevo contenedor recibido: ", CId, " | Total recibidos: ", N + 1);
-    -+total_received(N + 1).
++new_container(CId) : true <-
+    +container_received(CId);
+    .count(container_received(_), N);
+    .print("[SUPERVISOR] Nuevo contenedor recibido: ", CId, " | Total recibidos: ", N).
 
 /* ============================================================================
  * MONITORIZACIÓN - Contenedores almacenados
  * Los robots notifican al supervisor tras almacenar con éxito
  * ============================================================================ */
 
-+container_stored(CId, ShelfId)[source(Robot)] : total_stored(N) <-
-    .print("[SUPERVISOR] Contenedor almacenado: ", CId, " en ", ShelfId, " por ", Robot, " | Total almacenados: ", N + 1);
-    -+total_stored(N + 1).
++container_stored(CId, ShelfId)[source(Robot)] : true <-
+    +container_stored_fact(CId, ShelfId);
+    .count(container_stored_fact(_,_), N);
+    .print("[SUPERVISOR] Contenedor almacenado: ", CId, " en ", ShelfId, " por ", Robot, " | Total almacenados: ", N).
 
 /* ============================================================================
  * MONITORIZACIÓN - Errores
  * Los robots notifican al supervisor cuando detectan un error
  * ============================================================================ */
 
-+container_error(CId, ErrorType)[source(Robot)] :
-        total_errors(N) & errors_by_type(ErrorType, M) <-
-    .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot,
-           " | Total errores: ", N + 1);
-    -+total_errors(N + 1);
-    -errors_by_type(ErrorType, M);
-    +errors_by_type(ErrorType, M + 1).
-
-// Error de tipo desconocido (no estaba en la lista inicial)
-+container_error(CId, ErrorType)[source(Robot)] :
-        total_errors(N) & not errors_by_type(ErrorType, _) <-
-    .print("[SUPERVISOR] ERROR (nuevo tipo) en ", CId, " tipo: ", ErrorType, " por ", Robot,
-           " | Total errores: ", N + 1);
-    -+total_errors(N + 1);
-    +errors_by_type(ErrorType, 1).
++container_error(CId, ErrorType)[source(Robot)] : true <-
+    +error_occurred(CId, ErrorType);
+    .count(error_occurred(_,_), N);
+    .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot, " | Total errores: ", N).
 
