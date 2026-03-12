@@ -59,13 +59,16 @@ pending_containers(0).
     // Asignar a robot apropiado según su capacidad (peso Y tamaño)
     if (Weight <= 10 & W <= 1 & H <= 1) {
         .print("Asignando al robot ligero: ", CId);
+        +assigned(robot_light, CId, ShelfId);
         .send(robot_light, tell, task(CId, ShelfId));
     } else {
         if (Weight <= 30 & W <= 1 & H <= 2) {
             .print("Asignando al robot mediano: ", CId);
+            +assigned(robot_medium, CId, ShelfId);
             .send(robot_medium, tell, task(CId, ShelfId));
         } else {
             .print("Asignando al robot pesado: ", CId);
+            +assigned(robot_heavy, CId, ShelfId);
             .send(robot_heavy, tell, task(CId, ShelfId));
         }
     }.
@@ -73,6 +76,19 @@ pending_containers(0).
 // 4. Manejo de fallos reportados por robots
 +task_failed(CId)[source(Robot)] : true <-
     .print("⚠️ ", Robot, " reportó fallo con ", CId, ". Reasignando...");
+    -assigned(Robot, CId, _);
     -task_failed(CId)[source(Robot)];
     // Volvemos a pedir info para reiniciar el ciclo de asignación
     get_container_info(CId).
+
+// 5. Trazabilidad: Almacenamiento confirmado
++container_stored(CId, ShelfId)[source(Robot)] : true <-
+    .print("✨ [TRACE] ", Robot, " almacenó ", CId, " en ", ShelfId);
+    -assigned(Robot, CId, ShelfId);
+    -container_stored(CId, ShelfId)[source(Robot)].
+
+// 6. Trazabilidad: Errores reportados
++container_error(CId, ErrorType)[source(Robot)] : true <-
+    .print("❌ [TRACE] Error reportado por ", Robot, " para ", CId, ": ", ErrorType);
+    -assigned(Robot, CId, _);
+    -container_error(CId, ErrorType)[source(Robot)].

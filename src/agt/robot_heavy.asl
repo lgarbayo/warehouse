@@ -155,7 +155,7 @@ carrying(none).      // Contenedor que está cargando
 
 +error(ErrorType, Data) : carrying(CId) <-
     .print("⚠️ [HEAVY] Error detectado: ", ErrorType, " - ", Data);
-    .send(supervisor, tell, container_error(CId, ErrorType));
+    .send(scheduler, tell, container_error(CId, ErrorType));
     -+state(idle);
     -+carrying(none).
 
@@ -169,4 +169,4 @@ carrying(none).      // Contenedor que está cargando
 
 +stored(CId, ShelfId) : true <-
     .print("✓ [HEAVY] Carga pesada ", CId, " almacenada en ", ShelfId);
-    .send(supervisor, tell, container_stored(CId, ShelfId)).
+    .send(scheduler, tell, container_stored(CId, ShelfId)).

@@ -290,7 +290,9 @@ public class WarehouseArtifact extends Environment {
             type = "urgent";
 
         Container container = new Container(id, width, height, weight, type);
-        container.setPosition(1, 1); // Posición inicial en zona de entrada
+
+        // Posición inicial en zona de entrada
+        container.setPosition(1, 1);
 
         return container;
     }
