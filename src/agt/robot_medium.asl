@@ -185,3 +185,15 @@ carrying(none).      // Contenedor que está cargando
     .print("✓ Contenedor ", CId, " almacenado en ", ShelfId);
     .send(supervisor, tell, container_stored(CId, ShelfId)).
 
+/* ============================================================================
+ * NOTIFICACIÓN DE ESTADO AL SUPERVISOR
+ * ============================================================================ */
+
++state(working) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, working)).
+
++state(idle) : not task(_, _) <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, idle)).
+

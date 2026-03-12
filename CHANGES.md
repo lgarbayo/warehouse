@@ -180,3 +180,38 @@ Aprovechando la corrección, se refactorizó la lógica de conteo para eliminar 
 - `+error_occurred(CId, ErrorType)` — al recibir notificación de error
 
 Los totales se calculan en el momento del reporte con `.count(Pattern)`, sin estado intermedio que mantener. Las creencias iniciales del profesor (`total_received(0)`, `errors_by_type(T, 0)`, etc.) se mantienen intactas; `errors_by_type` se reutiliza como registro de tipos conocidos para iterar en el reporte.
+
+---
+## 9. Séptima ronda -> Supervisor monitoriza el estado de los robots
+
+**Qué se hizo**
+
+Se implementó el objetivo semanal "Supervisor monitors the status of the robots". El supervisor ahora conoce en tiempo real si cada robot está `idle` o `working`, e incluye ese estado en el reporte periódico.
+
+**Robots** (`robot_light.asl`, `robot_medium.asl`, `robot_heavy.asl`) — mismo bloque añadido al final de los tres:
+
+```jason
++state(working) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, working)).
+
++state(idle) : not task(_, _) <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, idle)).
+```
+
+Los contextos son mutuamente excluyentes con el plan existente `+state(idle) : task(CId, ShelfId) <- ...` (que gestiona la cola de tareas pendientes), por lo que no hay conflicto. Cuando hay tarea encolada, ese plan tiene prioridad y lleva al robot a `working` inmediatamente, lo que dispara el plan `+state(working)` → supervisor recibe la notificación igualmente.
+
+**Supervisor** (`supervisor.asl`):
+
+| Añadido | Qué hace |
+|---|---|
+| Creencias iniciales `robot_status(robot_X, idle)` | Estado inicial conocido de los tres robots |
+| `+robot_state_change(Robot, Status)[source(Robot)]` | Actualiza `robot_status` y printea el cambio en tiempo real |
+| `!print_robot_status` + `!print_robot_list` | Imprime el estado de todos los robots en el reporte periódico |
+
+El reporte periódico (`!print_stats`) ahora incluye una sección de robots tanto cuando hay contenedores recibidos como cuando no los hay todavía.
+
+**Por qué planes evento-disparados en vez de añadir `.send` en cada `-+state`**
+
+Añadir `.send` en cada transición de estado habría requerido tocar 6-8 puntos por robot (cada handler de error, el plan de fallo `-!execute_task`, la tarea completada, etc.). Con los planes `+state(X)`, Jason los dispara automáticamente cada vez que se añade la creencia `state(X)` — incluyendo cuando lo hace `-+state(X)`. Un solo punto de integración por estado relevante.
