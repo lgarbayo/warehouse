@@ -151,12 +151,14 @@ carrying(none).      // Contenedor que está cargando
 
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);
+    .send(supervisor, tell, container_error(CId, container_too_heavy));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
 
 +error(container_too_big, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy grande - ", Data);
+    .send(supervisor, tell, container_error(CId, container_too_big));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
@@ -164,6 +166,12 @@ carrying(none).      // Contenedor que está cargando
 +error(destination_conflict, Data) : true <-
     .print("⚠️ Conflicto de destino, esperando y reintentando...");
     .wait(1000).
+
++error(ErrorType, Data) : carrying(CId) <-
+    .print("⚠️ Error detectado: ", ErrorType, " - ", Data);
+    .send(supervisor, tell, container_error(CId, ErrorType));
+    -+state(idle);
+    -+carrying(none).
 
 +error(ErrorType, Data) : true <-
     .print("⚠️ Error detectado: ", ErrorType, " - ", Data);
@@ -174,5 +182,6 @@ carrying(none).      // Contenedor que está cargando
     .print("✓ Contenedor ", CId, " recogido correctamente").
 
 +stored(CId, ShelfId) : true <-
-    .print("✓ Contenedor ", CId, " almacenado en ", ShelfId).
+    .print("✓ Contenedor ", CId, " almacenado en ", ShelfId);
+    .send(supervisor, tell, container_stored(CId, ShelfId)).
 

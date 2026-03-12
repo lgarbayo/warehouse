@@ -58,3 +58,54 @@
         1. Se borró la apelación a `request_task` desde el ciclo base de los ASL de todos los robots. Ahora los robots son puramente reactivos y **solo reciben instrucciones vía mensajes** de `scheduler.asl`.
         2. Se introdujo una **cola o buffer ASL** en los robots. En lugar de negarse a aceptar órdenes cuando están `ocupados` (y perdiendo el paquete en el limbo infinito), los robots guardan y procesan tareas pendientes de manera FIFO la próxima vez que entren en estado `idle`: `+state(idle) : task(CId, ShelfId) <- !execute_task(...)`.
         3. Para los fallos graves como `path_blocked`, ahora el robot reporta transparentemente y delega de nuevo al scheduler el encargo usando `.send(scheduler, tell, task_failed(CId))`, reiniciando el ciclo y previniendo que muera desatendido en el entorno de Java sin que el ASL se entere.
+
+---
+### 6. Cuarta ronda -> Supervisor monitoriza estadísticas:
+**Qué se hizo**
+*supervisor.asl* — 3 planes nuevos:
+
+Plan || Qué hace
++new_container(CId)	|| Percibe directamente del entorno (ya era global), incrementa total_received
++container_stored(CId, ShelfId)[source(Robot)] || Recibe mensaje del robot, incrementa total_stored
++container_error(CId, ErrorType)[source(Robot)] ||	Recibe mensaje del robot, incrementa total_errors y errors_by_type
+
+*robots (light, medium, heavy)* — en cada robot:
+
++stored(...) → añade .send(supervisor, tell, container_stored(CId, ShelfId))
++error(container_too_heavy/big, ...) → añade .send(supervisor, tell, container_error(CId, ErrorType))
++error(ErrorType, ...) : carrying(CId) → nuevo plan genérico que también notifica al supervisor
+
+**Por qué .send en vez de percepciones directas**
+*stored* y *error* los añade el entorno Java solo al robot que actúa. El supervisor no los recibe de otra manera. new_container sí es global, por eso el supervisor lo percibe directamente sin necesidad de mensajes.
+
+Para que el supervisor reciba stored y error como percepciones directas, habría que tocar el Java — concretamente WarehouseArtifact.java.
+
+En lugar de:
+
+
+addPercept(agName, Literal.parseLiteral("stored(...)"));  // solo al robot
+Se haría:
+
+
+addPercept(agName, Literal.parseLiteral("stored(...)"));          // al robot
+addPercept("supervisor", Literal.parseLiteral("stored(...)"));    // también al supervisor
+O con un broadcast a todos:
+
+
+addPercept(Literal.parseLiteral("stored(...)"));  // sin agName = todos los agentes
+Y en el supervisor el plan sería igual pero sin [source(Robot)], porque no es un mensaje sino una percepción del entorno:
+
+
++stored(CId, ShelfId) : total_stored(N) <-
+    .print("[SUPERVISOR] Almacenado: ", CId, " en ", ShelfId);
+    -+total_stored(N + 1).
+
+**¿Por qué no lo hicimos así?**
+
+                 || .send (lo que hicimos) || Percepción directa (Java)
+Cambios necesarios || Solo .asl	|| Java + recompilar
+El robot sabe quién almacenó || Sí, via [source(Robot)]	|| No, a menos que lo metas en el literal
+Acoplamiento || Bajo — el robot decide notificar || Alto — el entorno lo fuerza siempre
+Pureza del modelo MAS || Los agentes se comunican entre sí || El entorno habla directamente al supervisor
+
+En general, el enfoque con .send es más limpio para un sistema multiagente: es el robot quien decide informar al supervisor, lo que respeta mejor la autonomía de los agentes.

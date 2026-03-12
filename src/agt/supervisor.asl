@@ -18,8 +18,12 @@
  * CREENCIAS INICIALES
  * ============================================================================ */
 
-/* Métricas del sistema */
+/* Contadores principales */
+total_received(0).
+total_stored(0).
 total_errors(0).
+
+/* Errores por tipo */
 errors_by_type(container_too_heavy, 0).
 errors_by_type(container_too_big, 0).
 errors_by_type(shelf_full, 0).
@@ -27,10 +31,42 @@ errors_by_type(illegal_move, 0).
 errors_by_type(conflict, 0).
 errors_by_type(route_blocked, 0).
 
-/* Tiempos de inicio */
-system_start_time(0).
+/* ============================================================================
+ * MONITORIZACIÓN - Contenedores recibidos
+ * ============================================================================ */
 
-/* Umbral de alerta */
-max_errors_per_minute(10).
-max_consecutive_errors(5).
+// new_container es global: el supervisor lo percibe directamente del entorno
++new_container(CId) : total_received(N) <-
+    .print("[SUPERVISOR] Nuevo contenedor recibido: ", CId, " | Total recibidos: ", N + 1);
+    -+total_received(N + 1).
+
+/* ============================================================================
+ * MONITORIZACIÓN - Contenedores almacenados
+ * Los robots notifican al supervisor tras almacenar con éxito
+ * ============================================================================ */
+
++container_stored(CId, ShelfId)[source(Robot)] : total_stored(N) <-
+    .print("[SUPERVISOR] Contenedor almacenado: ", CId, " en ", ShelfId, " por ", Robot, " | Total almacenados: ", N + 1);
+    -+total_stored(N + 1).
+
+/* ============================================================================
+ * MONITORIZACIÓN - Errores
+ * Los robots notifican al supervisor cuando detectan un error
+ * ============================================================================ */
+
++container_error(CId, ErrorType)[source(Robot)] :
+        total_errors(N) & errors_by_type(ErrorType, M) <-
+    .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot,
+           " | Total errores: ", N + 1);
+    -+total_errors(N + 1);
+    -errors_by_type(ErrorType, M);
+    +errors_by_type(ErrorType, M + 1).
+
+// Error de tipo desconocido (no estaba en la lista inicial)
++container_error(CId, ErrorType)[source(Robot)] :
+        total_errors(N) & not errors_by_type(ErrorType, _) <-
+    .print("[SUPERVISOR] ERROR (nuevo tipo) en ", CId, " tipo: ", ErrorType, " por ", Robot,
+           " | Total errores: ", N + 1);
+    -+total_errors(N + 1);
+    +errors_by_type(ErrorType, 1).
 

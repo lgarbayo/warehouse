@@ -132,12 +132,14 @@ carrying(none).      // Contenedor que está cargando
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ [HEAVY] ERROR CRÍTICO: Contenedor excede capacidad máxima - ", Data);
     .print("⚠️ Este es el robot más fuerte, contenedor imposible de transportar");
+    .send(supervisor, tell, container_error(CId, container_too_heavy));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
 
 +error(container_too_big, Data) : carrying(CId) <-
     .print("❌ [HEAVY] ERROR: Contenedor muy grande - ", Data);
+    .send(supervisor, tell, container_error(CId, container_too_big));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
@@ -151,6 +153,12 @@ carrying(none).      // Contenedor que está cargando
     -+state(idle);
     -+carrying(none).
 
++error(ErrorType, Data) : carrying(CId) <-
+    .print("⚠️ [HEAVY] Error detectado: ", ErrorType, " - ", Data);
+    .send(supervisor, tell, container_error(CId, ErrorType));
+    -+state(idle);
+    -+carrying(none).
+
 +error(ErrorType, Data) : true <-
     .print("⚠️ [HEAVY] Error detectado: ", ErrorType, " - ", Data);
     -+state(idle);
@@ -160,4 +168,5 @@ carrying(none).      // Contenedor que está cargando
     .print("✓ [HEAVY] Carga pesada ", CId, " asegurada correctamente").
 
 +stored(CId, ShelfId) : true <-
-    .print("✓ [HEAVY] Carga pesada ", CId, " almacenada en ", ShelfId).
+    .print("✓ [HEAVY] Carga pesada ", CId, " almacenada en ", ShelfId);
+    .send(supervisor, tell, container_stored(CId, ShelfId)).
