@@ -60,7 +60,8 @@
         3. Para los fallos graves como `path_blocked`, ahora el robot reporta transparentemente y delega de nuevo al scheduler el encargo usando `.send(scheduler, tell, task_failed(CId))`, reiniciando el ciclo y previniendo que muera desatendido en el entorno de Java sin que el ASL se entere.
 
 ---
-### 6. Cuarta ronda -> Supervisor monitoriza estadísticas:
+# CAMBIOS EN SUPERVISOR
+## 6. Cuarta ronda -> Supervisor monitoriza estadísticas de contenedores:
 **Qué se hizo**
 *supervisor.asl* — 3 planes nuevos:
 
@@ -109,3 +110,29 @@ Acoplamiento || Bajo — el robot decide notificar || Alto — el entorno lo fue
 Pureza del modelo MAS || Los agentes se comunican entre sí || El entorno habla directamente al supervisor
 
 En general, el enfoque con .send es más limpio para un sistema multiagente: es el robot quien decide informar al supervisor, lo que respeta mejor la autonomía de los agentes.
+
+---
+## 7. Quinta ronda -> Cálculo de estadísticas y reporte:
+**Qué hace**
+Ciclo periódico — !stats_loop espera 30 segundos y lanza !print_stats, en bucle infinito.
+
+!print_stats — calcula en el momento de imprimir:
+
+Tasa de éxito: (almacenados / recibidos) * 100
+Tasa de error: (errores / recibidos) * 100
+Pendientes: recibidos - almacenados - errores
+!print_errors_by_type — usa .findall para recoger todos los pares tipo-contador y los imprime, saltando los que estén a 0.
+
+La salida cada 30s se verá así:
+
+========================================
+[SUPERVISOR] === REPORTE DE ESTADISTICAS ===
+  Contenedores recibidos : 5
+  Contenedores almacenados: 4 (80%)
+  Contenedores con error  : 1 (20%)
+  Pendientes en proceso   : 0
+  --- Errores por tipo ---
+    container_too_heavy: 1
+========================================
+
+El intervalo está en la creencia report_interval(30000), fácil de cambiar si quieres reportes más frecuentes durante las pruebas.
