@@ -220,7 +220,13 @@ Añadir `.send` en cada transición de estado habría requerido tocar 6-8 puntos
 
 **Qué se hizo**
 
-En esta fase se ha consolidado al `scheduler` como el único coordinador del sistema, eliminando la necesidad de un agente supervisor externo y garantizando la trazabilidad total de las operaciones.
+En esta fase se ha consolidado al `scheduler` como el único coordinador del sistema, eliminando la necesidad de un agente supervisor externo y garantizando
+### Mejoras de Movimiento, Estabilidad y Recuperación (Fase Final)
+-   **Fin del "Tweaking" y Bucles**: Implementado consumo inmediato de creencias de tareas y pausas de seguridad (1.5s-2s) en planes de fallo para estabilizar el MAS.
+-   **Recogida Dinámica**: Eliminados los puntos de recogida fijos. Los robots ahora consultan la posición real del contenedor via `get_container_info` y navegan a una celda adyacente válida (con comprobación de límites del mapa).
+-   **Recuperación por Estantería Llena**: Si una estantería se llena durante el transporte, el robot ahora suelta el contenedor en su posición actual, resetea su estado en Java y notifica al scheduler para re-encolado dinámico.
+-   **Evasión de Contenedores Grandes**: Refinada la lógica de `hayContenedorEn` para que la navegación (`move_to`) esquive el área total (width x height) de los bultos grandes en el suelo.
+-   **Restauración de Monitorización**: El `scheduler` ahora actúa como proxy, reenviando todas las notificaciones de almacenamiento, errores y estado de robots al `supervisor` para asegurar métricas precisas.
 
 **1. Trazabilidad de Tareas (`scheduler.asl`)**
 - Se ha implementado un sistema de creencias dinámicas `assigned(Robot, CId, ShelfId)` en el scheduler.

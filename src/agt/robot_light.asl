@@ -56,6 +56,7 @@ carrying(none).      // Contenedor que está cargando
 // Recibir tarea del scheduler
 +task(CId, ShelfId) : state(idle) <-
     .print("✅ Tarea asignada: Transportar ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)]; // Consumir creencia inmediatamente
     accept_task(CId);
     -+state(working);
     -+carrying(CId);
@@ -66,6 +67,7 @@ carrying(none).      // Contenedor que está cargando
 
 +state(idle) : task(CId, ShelfId) <-
     .print("✅ Procesando tarea encolada: ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)]; // Consumir creencia inmediatamente
     accept_task(CId);
     -+state(working);
     -+carrying(CId);
@@ -75,9 +77,17 @@ carrying(none).      // Contenedor que está cargando
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 Iniciando tarea: ", CId);
     
-    // Fase 1: Ir al área de entrada sin pisar el contenedor (1,1)
-    .print("📍 Fase 1: Moviéndose al área de entrada");
-    move_to(1, 0);
+    // Fase 1: Localizar y navegar al contenedor (dinámico)
+    .print("📍 Fase 1: Localizando contenedor ", CId);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    get_container_info(CId);
+    .wait(container_info(CId, _, _, _, _, _, _));
+    ?container_info(CId, W, H, Weight, Type, CX, CY);
+    
+    // Navegar a la izquierda del contenedor (CX-1, CY)
+    // Si CX=0, intentamos (CX, CY+1)
+    if (CX > 0) { move_to(CX - 1, CY); }
+    else { move_to(CX, CY + 1); }
     .wait(500);
     
     // Fase 2: Recoger el contenedor
@@ -100,8 +110,7 @@ carrying(none).      // Contenedor que está cargando
     // Fase 5: Completar y volver a idle
     .print("✨ Tarea completada: ", CId);
     -+state(idle);
-    -+carrying(none);
-    .abolish(task(CId, ShelfId)).
+    -+carrying(none).
 
 // LIGHT: se coloca en (SX, SY-1) — encima del shelf (centro)
 +!navigate_to_shelf(ShelfId) : true <-
@@ -123,11 +132,11 @@ carrying(none).      // Contenedor que está cargando
 // Plan de fallo esencial (DEBUGGING.md): sin esto Jason no puede recuperarse
 -!execute_task(CId, ShelfId) : true <-
     .print("⚠️ Fallo en execute_task para ", CId, ". Limpiando estado...");
+    .wait(1500); // Pausa de seguridad para evitar "tweaking"
     -+state(idle);
     -+carrying(none);
     release_task(CId);
-    .send(scheduler, tell, task_failed(CId));
-    .abolish(task(CId, ShelfId)).
+    .send(scheduler, tell, task_failed(CId)).
 
 // Error al recoger contenedor (muy pesado o grande)
 +error(container_too_heavy, Data) : carrying(CId) <-

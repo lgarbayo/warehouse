@@ -52,6 +52,7 @@ carrying(none).      // Contenedor que está cargando
 // Recibir tarea del scheduler
 +task(CId, ShelfId) : state(idle) <-
     .print("✅ [HEAVY] Tarea especializada asignada: ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)]; // Consumir creencia inmediatamente
     // Marcar robot como busy en Java para evitar doble asignación
     accept_task(CId);
     -+state(working);
@@ -63,6 +64,7 @@ carrying(none).      // Contenedor que está cargando
 
 +state(idle) : task(CId, ShelfId) <-
     .print("✅ [HEAVY] Procesando tarea encolada: ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)]; // Consumir creencia inmediatamente
     accept_task(CId);
     -+state(working);
     -+carrying(CId);
@@ -72,10 +74,17 @@ carrying(none).      // Contenedor que está cargando
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 [HEAVY] Iniciando transporte de carga pesada: ", CId);
     
-    // Fase 1: Aproximación cuidadosa al área de entrada
-    // Usamos (3,1) para esperar a la derecha del contenedor 2xN (1,1)-(2,3)
-    .print("📍 [HEAVY] Fase 1: Aproximación al área de entrada");
-    move_to(3, 1);
+    // Fase 1: Localizar y navegar al contenedor pesado (dinámico)
+    .print("📍 [HEAVY] Fase 1: Localizando contenedor ", CId);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    get_container_info(CId);
+    .wait(container_info(CId, _, _, _, _, _, _));
+    ?container_info(CId, W, H, Weight, Type, CX, CY);
+    
+    // Navegar arriba del contenedor (CX, CY-1)
+    // Si CY=0, intentamos abajo (CX, CY+H)
+    if (CY > 0) { move_to(CX, CY - 1); }
+    else { move_to(CX, CY + H); }
     .wait(1000);  // Robot pesado es más lento
     
     // Fase 2: Recoger el contenedor pesado
@@ -98,8 +107,7 @@ carrying(none).      // Contenedor que está cargando
     // Fase 5: Completar y volver a idle
     .print("✨ [HEAVY] Tarea especializada completada: ", CId);
     -+state(idle);
-    -+carrying(none);
-    -task(CId, ShelfId).
+    -+carrying(none).
 
 // HEAVY: se coloca en (SX, SY-1) — celda inmediatamente encima del shelf, dist=1
 +!navigate_to_shelf(ShelfId) : true <-
@@ -123,11 +131,11 @@ carrying(none).      // Contenedor que está cargando
 // Según DEBUGGING.md: esencial para que Jason no quede sin manejador
 -!execute_task(CId, ShelfId) : true <-
     .print("⚠️ [HEAVY] Fallo en execute_task para ", CId, ". Limpiando estado...");
+    .wait(2000); // Robot pesado es más reflexivo
     -+state(idle);
     -+carrying(none);
     release_task(CId);
-    .send(scheduler, tell, task_failed(CId));
-    .abolish(task(CId, ShelfId)).
+    .send(scheduler, tell, task_failed(CId)).
 
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ [HEAVY] ERROR CRÍTICO: Contenedor excede capacidad máxima - ", Data);

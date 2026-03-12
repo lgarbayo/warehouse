@@ -516,10 +516,11 @@ public class WarehouseArtifact extends Environment {
                 int sigY = yActual + mov[1];
                 List<Integer> vecino = Arrays.asList(sigX, sigY);
 
-                // Verificamos: Límites, Obstáculos y si ya pasamos por ahí
+                // Verificamos: Límites, Obstáculos, Contenedores y si ya pasamos por ahí
                 if (estaDentroDelMapa(sigX, sigY) &&
                         grid[sigX][sigY] != CellType.BLOCKED &&
                         grid[sigX][sigY] != CellType.SHELF &&
+                        !hayContenedorEn(sigX, sigY) &&
                         !mapaPadres.containsKey(vecino)) {
 
                     if (avoidRobots) {
@@ -538,6 +539,19 @@ public class WarehouseArtifact extends Environment {
 
         // 4. Reconstrucción de la ruta (de atrás hacia adelante)
         return construirRutaFinal(rutaEncontrada, celdaDestino, mapaPadres);
+    }
+
+    private boolean hayContenedorEn(int x, int y) {
+        for (Container c : containers.values()) {
+            if (!c.isPicked()) {
+                // Verificar si (x,y) cae dentro del área del contenedor
+                if (x >= c.getX() && x < c.getX() + c.getWidth() &&
+                        y >= c.getY() && y < c.getY() + c.getHeight()) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private boolean hayRobotCerca(int x, int y) {
@@ -665,7 +679,14 @@ public class WarehouseArtifact extends Environment {
 
             // Verificar si cabe en la estantería
             if (!shelf.canStore(container)) {
-                addError(agName, "shelf_full", "Shelf " + shelfId + " cannot store container");
+                // Si la estantería está llena, el robot lo suelta en su posición actual
+                robot.drop();
+                container.setPicked(false);
+                container.setPosition(robot.getX(), robot.getY());
+                robot.setBusy(false);
+
+                addError(agName, "shelf_full",
+                        "Shelf " + shelfId + " full. Dropped at (" + robot.getX() + "," + robot.getY() + ")");
                 return false;
             }
 
@@ -811,13 +832,15 @@ public class WarehouseArtifact extends Environment {
                 return false;
             }
 
-            // Agregar percepción con información del contenedor
+            // Agregar percepción con información del contenedor, incluyendo posición
             addPercept(agName, Literal.parseLiteral(
                     "container_info(\"" + containerId + "\"," +
                             container.getWidth() + "," +
                             container.getHeight() + "," +
                             container.getWeight() + ",\"" +
-                            container.getType() + "\")"));
+                            container.getType() + "\"," +
+                            container.getX() + "," +
+                            container.getY() + ")"));
 
             return true;
 
@@ -919,7 +942,11 @@ public class WarehouseArtifact extends Environment {
             robot.setBusy(false);
             robot.setCurrentTask(null);
             if (robot.isCarrying()) {
-                robot.drop();
+                Container c = robot.drop();
+                if (c != null) {
+                    c.setPicked(false);
+                    c.setPosition(robot.getX(), robot.getY());
+                }
             }
             taskAssignments.values().remove(agName);
 

@@ -39,7 +39,7 @@ pending_containers(0).
     get_container_info(CId).
 
 // 2. Recibir info, clasificar y buscar estantería para contenedor
-+container_info(CId, W, H, Weight, Type) : true <-
++container_info(CId, W, H, Weight, Type, X, Y) : true <-
     .print("Info: ", CId, " - ", Weight, "kg. Solicitando estantería...");
     +pending_container(CId, Weight);
     !assign_shelf(CId).
@@ -53,7 +53,7 @@ pending_containers(0).
     !assign_shelf(CId).
 
 // 3. Recibir estantería libre y asignar la tarea (estantería + contenedor) al robot
-+free_shelf(CId, ShelfId) : container_info(CId, W, H, Weight, Type) <-
++free_shelf(CId, ShelfId) : container_info(CId, W, H, Weight, Type, _, _) <-
     .print("Estantería: ", ShelfId, " asignada a ", CId);
     
     // Asignar a robot apropiado según su capacidad (peso Y tamaño)
@@ -84,11 +84,17 @@ pending_containers(0).
 // 5. Trazabilidad: Almacenamiento confirmado
 +container_stored(CId, ShelfId)[source(Robot)] : true <-
     .print("✨ [TRACE] ", Robot, " almacenó ", CId, " en ", ShelfId);
+    .send(supervisor, tell, container_stored(CId, ShelfId));
     -assigned(Robot, CId, ShelfId);
     -container_stored(CId, ShelfId)[source(Robot)].
 
 // 6. Trazabilidad: Errores reportados
 +container_error(CId, ErrorType)[source(Robot)] : true <-
     .print("❌ [TRACE] Error reportado por ", Robot, " para ", CId, ": ", ErrorType);
+    .send(supervisor, tell, container_error(CId, ErrorType));
     -assigned(Robot, CId, _);
     -container_error(CId, ErrorType)[source(Robot)].
+// 7. Trazabilidad: Cambios de estado de robots
++robot_state_change(Robot, Status)[source(Robot)] : true <-
+    .send(supervisor, tell, robot_state_change(Robot, Status));
+    -robot_state_change(Robot, Status)[source(Robot)].

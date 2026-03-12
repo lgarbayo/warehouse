@@ -74,6 +74,7 @@ carrying(none).      // Contenedor que está cargando
 // Recibir tarea del scheduler
 +task(CId, ShelfId) : state(idle) <-
     .print("✅ Tarea asignada: Transportar ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)]; // Consumir creencia inmediatamente
     accept_task(CId);
     -+state(working);
     -+carrying(CId);
@@ -84,6 +85,7 @@ carrying(none).      // Contenedor que está cargando
 
 +state(idle) : task(CId, ShelfId) <-
     .print("✅ Procesando tarea encolada: ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)]; // Consumir creencia inmediatamente
     accept_task(CId);
     -+state(working);
     -+carrying(CId);
@@ -93,11 +95,18 @@ carrying(none).      // Contenedor que está cargando
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 Iniciando tarea: ", CId);
     
-    // Fase 1: Ir al área de entrada
-    // Usamos (0,1) para evitar pisar el contenedor (1,1) y evitar colisión
-    .print("📍 Fase 1: Moviéndose al área de entrada");
-    move_to(0, 1);
-    .wait(600);  // Robot medio es más lento
+    // Fase 1: Localizar y navegar al contenedor (dinámico)
+    .print("📍 Fase 1: Localizando contenedor ", CId);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    get_container_info(CId);
+    .wait(container_info(CId, _, _, _, _, _, _));
+    ?container_info(CId, W, H, Weight, Type, CX, CY);
+    
+    // Navegar a la derecha del contenedor (CX+W, CY)
+    // Si CX+W >= 20, intentamos (CX, CY+H)
+    if (CX + W < 20) { move_to(CX + W, CY); }
+    else { move_to(CX, CY + H); }
+    .wait(600);
     
     // Fase 2: Recoger el contenedor
     .print("📦 Fase 2: Recogiendo contenedor ", CId);
@@ -119,8 +128,7 @@ carrying(none).      // Contenedor que está cargando
     // Fase 5: Completar y volver a idle
     .print("✨ Tarea completada: ", CId);
     -+state(idle);
-    -+carrying(none);
-    -task(CId, ShelfId).
+    -+carrying(none).
 
 // MEDIUM: se coloca en (SX, SY-1) — encima del shelf (centro)
 +!navigate_to_shelf(ShelfId) : true <-
@@ -143,15 +151,15 @@ carrying(none).      // Contenedor que está cargando
 // Se activa cuando una acción dentro de execute_task falla (pickup, drop_at...)
 -!execute_task(CId, ShelfId) : true <-
     .print("⚠️ Fallo en execute_task para ", CId, ". Limpiando estado...");
+    .wait(1500); // Pausa de seguridad
     -+state(idle);
     -+carrying(none);
     release_task(CId);
-    .send(scheduler, tell, task_failed(CId));
-    .abolish(task(CId, ShelfId)).
+    .send(scheduler, tell, task_failed(CId)).
 
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);
-    .send(supervisor, tell, container_error(CId, container_too_heavy));
+    .send(scheduler, tell, container_error(CId, container_too_heavy));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
@@ -191,9 +199,9 @@ carrying(none).      // Contenedor que está cargando
 
 +state(working) : true <-
     .my_name(Me);
-    .send(supervisor, tell, robot_state_change(Me, working)).
+    .send(scheduler, tell, robot_state_change(Me, working)).
 
 +state(idle) : not task(_, _) <-
     .my_name(Me);
-    .send(supervisor, tell, robot_state_change(Me, idle)).
+    .send(scheduler, tell, robot_state_change(Me, idle)).
 
