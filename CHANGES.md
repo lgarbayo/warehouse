@@ -180,3 +180,64 @@ Aprovechando la corrección, se refactorizó la lógica de conteo para eliminar 
 - `+error_occurred(CId, ErrorType)` — al recibir notificación de error
 
 Los totales se calculan en el momento del reporte con `.count(Pattern)`, sin estado intermedio que mantener. Las creencias iniciales del profesor (`total_received(0)`, `errors_by_type(T, 0)`, etc.) se mantienen intactas; `errors_by_type` se reutiliza como registro de tipos conocidos para iterar en el reporte.
+
+---
+## 9. Séptima ronda -> Supervisor monitoriza el estado de los robots
+
+**Qué se hizo**
+
+Se implementó el objetivo semanal "Supervisor monitors the status of the robots". El supervisor ahora conoce en tiempo real si cada robot está `idle` o `working`, e incluye ese estado en el reporte periódico.
+
+**Robots** (`robot_light.asl`, `robot_medium.asl`, `robot_heavy.asl`) — mismo bloque añadido al final de los tres:
+
+```jason
++state(working) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, working)).
+
++state(idle) : not task(_, _) <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, idle)).
+```
+
+Los contextos son mutuamente excluyentes con el plan existente `+state(idle) : task(CId, ShelfId) <- ...` (que gestiona la cola de tareas pendientes), por lo que no hay conflicto. Cuando hay tarea encolada, ese plan tiene prioridad y lleva al robot a `working` inmediatamente, lo que dispara el plan `+state(working)` → supervisor recibe la notificación igualmente.
+
+**Supervisor** (`supervisor.asl`):
+
+| Añadido | Qué hace |
+|---|---|
+| Creencias iniciales `robot_status(robot_X, idle)` | Estado inicial conocido de los tres robots |
+| `+robot_state_change(Robot, Status)[source(Robot)]` | Actualiza `robot_status` y printea el cambio en tiempo real |
+| `!print_robot_status` + `!print_robot_list` | Imprime el estado de todos los robots en el reporte periódico |
+
+El reporte periódico (`!print_stats`) ahora incluye una sección de robots tanto cuando hay contenedores recibidos como cuando no los hay todavía.
+
+**Por qué planes evento-disparados en vez de añadir `.send` en cada `-+state`**
+
+Añadir `.send` en cada transición de estado habría requerido tocar 6-8 puntos por robot (cada handler de error, el plan de fallo `-!execute_task`, la tarea completada, etc.). Con los planes `+state(X)`, Jason los dispara automáticamente cada vez que se añade la creencia `state(X)` — incluyendo cuando lo hace `-+state(X)`. Un solo punto de integración por estado relevante.
+---
+## 10. Octava ronda -> Consolidación del Scheduler y Trazabilidad MAS (Fin de Semana 2)
+
+**Qué se hizo**
+
+En esta fase se ha consolidado al `scheduler` como el único coordinador del sistema, eliminando la necesidad de un agente supervisor externo y garantizando la trazabilidad total de las operaciones.
+
+**1. Trazabilidad de Tareas (`scheduler.asl`)**
+- Se ha implementado un sistema de creencias dinámicas `assigned(Robot, CId, ShelfId)` en el scheduler.
+- Estas creencias se crean en el momento de la asignación y se eliminan solo cuando:
+    - El robot confirma el almacenamiento (`container_stored`).
+    - El robot reporta un error inmanente (`container_error`).
+    - Se detecta una rotura de plan (`task_failed`).
+- Esto permite monitorizar el estado exacto del almacén consultando únicamente la base de creencias del scheduler.
+
+**2. Redirección de Notificaciones (Robot -> Scheduler)**
+- Se han reconfigurado todos los robots para que informen de su estado directamente al `scheduler`.
+- Se han eliminado todas las dependencias del agente `supervisor.asl`, centralizando el monitoreo de errores y éxitos.
+- **Trazabilidad de Estado**: Los robots ahora informan sus cambios de estado (`working`/`idle`) directamente al scheduler para una mejor gestión de la carga de trabajo.
+
+**3. Robustez y Estabilidad del Entorno**
+- Se han resuelto conflictos de inconsistencia entre la rama local y remota, garantizando que el `robot_heavy` y el `robot_light` mantengan la lógica de aproximación adyacente para evitar solapamientos.
+- Se ha realizado un rollback controlado de la lógica de spawning dinámico en Java para evitar conflictos con desarrollos paralelos del equipo, manteniendo el sistema estable sobre una base probada.
+
+**4. Resolución de Conflictos de Ficheros**
+- Se han unificado las versiones de los agentes ASL, resolviendo discrepancias en los protocolos de comunicación y asegurando que las notificaciones de éxito (`stored`) lleguen siempre al destinatario correcto.

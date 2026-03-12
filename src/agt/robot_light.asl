@@ -34,38 +34,10 @@ carrying(none).      // Contenedor que está cargando
 // Plan inicial: Arrancar el robot y hacer pruebas de movimiento
 +!start : true <-
     .print("🤖 Robot ligero iniciado - Capacidad: 10kg, 1x1");
-   // .print("🔍 Iniciando secuencia de prueba de movimientos...");
-  //  -+state(testing);
-   // !test_movement;
+    // .print("🔍 Iniciando secuencia de prueba de movimientos...");
+    // -+state(testing);
+    // !test_movement;
     !work_cycle.
-
-// Secuencia de prueba de movimientos
-+!test_movement : true <-
-    .print("📍 Posición inicial: (1,3)");
-    .wait(1000);
-    
-    .print("➡️  Movimiento 1: Ir al área de entrada (1,1)");
-    move_to(1, 1);
-    .wait(2000);
-    
-    .print("➡️  Movimiento 2: Ir al área de clasificación (5,1)");
-    move_to(5, 1);
-    .wait(2000);
-    
-    .print("➡️  Movimiento 3: Ir a zona de estanterías pequeñas (12,3)");
-    move_to(12, 3);
-    .wait(2000);
-    
-    .print("➡️  Movimiento 4: Explorar más estanterías (16,3)");
-    move_to(16, 3);
-    .wait(2000);
-    
-    .print("➡️  Movimiento 5: Volver a posición intermedia (8,5)");
-    move_to(8, 5);
-    .wait(2000);
-    
-    .print("✅ Prueba de movimientos completada. Robot funcionando correctamente.");
-    -+state(idle).
 
 // Ciclo de trabajo principal
 +!work_cycle : state(idle) <-
@@ -160,7 +132,7 @@ carrying(none).      // Contenedor que está cargando
 // Error al recoger contenedor (muy pesado o grande)
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);
-    .send(supervisor, tell, container_error(CId, container_too_heavy));
+    .send(scheduler, tell, container_error(CId, container_too_heavy));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
@@ -196,3 +168,15 @@ carrying(none).      // Contenedor que está cargando
 +stored(CId, ShelfId) : true <-
     .print("✓ Contenedor ", CId, " almacenado en ", ShelfId);
     .send(scheduler, tell, container_stored(CId, ShelfId)).
+
+/* ============================================================================
+ * NOTIFICACIÓN DE ESTADO AL PLANIFICADOR
+ * ============================================================================ */
+
++state(working) : true <-
+    .my_name(Me);
+    .send(scheduler, tell, robot_state_change(Me, working)).
+
++state(idle) : not task(_, _) <-
+    .my_name(Me);
+    .send(scheduler, tell, robot_state_change(Me, idle)).

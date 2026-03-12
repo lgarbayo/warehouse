@@ -31,6 +31,11 @@ errors_by_type(illegal_move, 0).
 errors_by_type(conflict, 0).
 errors_by_type(route_blocked, 0).
 
+/* Estado de los robots */
+robot_status(robot_light, idle).
+robot_status(robot_medium, idle).
+robot_status(robot_heavy, idle).
+
 /* Intervalo del reporte periódico (ms) */
 report_interval(30000).
 
@@ -70,13 +75,17 @@ report_interval(30000).
     .print("Pendientes en proceso: ", Pending);
     .print("Errores por tipo: ");
     !print_errors_by_type;
+    .print("Estado de robots: ");
+    !print_robot_status;
     .print("========================================").
 
-// Sin contenedores aún: evitar división por cero
+// Sin contenedores aún: evitar división por cero (pero sí imprime robots)
 +!print_stats : true <-
     .print("========================================");
     .print("[SUPERVISOR] REPORTE DE ESTADISTICAS");
     .print("Sin contenedores recibidos aun.");
+    .print("Estado de robots: ");
+    !print_robot_status;
     .print("========================================").
 
 // Recorre los tipos de error conocidos con recursión
@@ -93,6 +102,26 @@ report_interval(30000).
 
 +!print_error_list([_|Rest]) : true <-
     !print_error_list(Rest).
+
+/* ============================================================================
+ * MONITORIZACIÓN - Estado de los robots
+ * Los robots notifican al supervisor cuando cambian a idle o working
+ * ============================================================================ */
+
++robot_state_change(Robot, Status)[source(Robot)] : true <-
+    -robot_status(Robot, _);
+    +robot_status(Robot, Status);
+    .print("[SUPERVISOR] ", Robot, ": ", Status).
+
++!print_robot_status : true <-
+    .findall(rs(R, S), robot_status(R, S), Robots);
+    !print_robot_list(Robots).
+
++!print_robot_list([]) : true <- true.
+
++!print_robot_list([rs(R, S)|Rest]) : true <-
+    .print("  ", R, ": ", S);
+    !print_robot_list(Rest).
 
 /* ============================================================================
  * MONITORIZACIÓN - Contenedores recibidos

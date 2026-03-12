@@ -111,7 +111,7 @@ carrying(none).      // Contenedor que está cargando
     move_to(X, Y).
 
 // Si move_to falla (destination_conflict), esperamos y reintentamos
--!try_move_to_shelf(X, Y) : true <-
+ -!try_move_to_shelf(X, Y) : true <-
     .wait(2000);
     !try_move_to_shelf(X, Y).
 
@@ -132,14 +132,14 @@ carrying(none).      // Contenedor que está cargando
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ [HEAVY] ERROR CRÍTICO: Contenedor excede capacidad máxima - ", Data);
     .print("⚠️ Este es el robot más fuerte, contenedor imposible de transportar");
-    .send(supervisor, tell, container_error(CId, container_too_heavy));
+    .send(scheduler, tell, container_error(CId, container_too_heavy));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
 
 +error(container_too_big, Data) : carrying(CId) <-
     .print("❌ [HEAVY] ERROR: Contenedor muy grande - ", Data);
-    .send(supervisor, tell, container_error(CId, container_too_big));
+    .send(scheduler, tell, container_error(CId, container_too_big));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
@@ -170,3 +170,15 @@ carrying(none).      // Contenedor que está cargando
 +stored(CId, ShelfId) : true <-
     .print("✓ [HEAVY] Carga pesada ", CId, " almacenada en ", ShelfId);
     .send(scheduler, tell, container_stored(CId, ShelfId)).
+
+/* ============================================================================
+ * NOTIFICACIÓN DE ESTADO AL PLANIFICADOR
+ * ============================================================================ */
+
++state(working) : true <-
+    .my_name(Me);
+    .send(scheduler, tell, robot_state_change(Me, working)).
+
++state(idle) : not task(_, _) <-
+    .my_name(Me);
+    .send(scheduler, tell, robot_state_change(Me, idle)).
