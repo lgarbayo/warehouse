@@ -215,35 +215,54 @@ El reporte periódico (`!print_stats`) ahora incluye una sección de robots tant
 **Por qué planes evento-disparados en vez de añadir `.send` en cada `-+state`**
 
 Añadir `.send` en cada transición de estado habría requerido tocar 6-8 puntos por robot (cada handler de error, el plan de fallo `-!execute_task`, la tarea completada, etc.). Con los planes `+state(X)`, Jason los dispara automáticamente cada vez que se añade la creencia `state(X)` — incluyendo cuando lo hace `-+state(X)`. Un solo punto de integración por estado relevante.
+
 ---
-## 10. Octava ronda -> Consolidación del Scheduler y Trazabilidad MAS (Fin de Semana 2)
+## 10. Octava ronda -> Fix: robots notifican estado directamente al supervisor
 
-**Qué se hizo**
+**Problema**
 
-En esta fase se ha consolidado al `scheduler` como el único coordinador del sistema, eliminando la necesidad de un agente supervisor externo y garantizando
-### Mejoras de Movimiento, Estabilidad y Recuperación (Fase Final)
--   **Fin del "Tweaking" y Bucles**: Implementado consumo inmediato de creencias de tareas y pausas de seguridad (1.5s-2s) en planes de fallo para estabilizar el MAS.
--   **Recogida Dinámica**: Eliminados los puntos de recogida fijos. Los robots ahora consultan la posición real del contenedor via `get_container_info` y navegan a una celda adyacente válida (con comprobación de límites del mapa).
--   **Recuperación por Estantería Llena**: Si una estantería se llena durante el transporte, el robot ahora suelta el contenedor en su posición actual, resetea su estado en Java y notifica al scheduler para re-encolado dinámico.
--   **Evasión de Contenedores Grandes**: Refinada la lógica de `hayContenedorEn` para que la navegación (`move_to`) esquive el área total (width x height) de los bultos grandes en el suelo.
--   **Restauración de Monitorización**: El `scheduler` ahora actúa como proxy, reenviando todas las notificaciones de almacenamiento, errores y estado de robots al `supervisor` para asegurar métricas precisas.
+El commit `771e583` (Vincenzo) redirigió las notificaciones `robot_state_change` de los robots al scheduler en vez de al supervisor, convirtiéndolo en proxy. Esto rompió silenciosamente el plan del supervisor:
 
-**1. Trazabilidad de Tareas (`scheduler.asl`)**
-- Se ha implementado un sistema de creencias dinámicas `assigned(Robot, CId, ShelfId)` en el scheduler.
-- Estas creencias se crean en el momento de la asignación y se eliminan solo cuando:
-    - El robot confirma el almacenamiento (`container_stored`).
-    - El robot reporta un error inmanente (`container_error`).
-    - Se detecta una rotura de plan (`task_failed`).
-- Esto permite monitorizar el estado exacto del almacén consultando únicamente la base de creencias del scheduler.
+```jason
+// supervisor esperaba [source(robot_light)], pero llegaba [source(scheduler)]
++robot_state_change(Robot, Status)[source(Robot)] : true <- ...
+// Robot=robot_light (del argumento) ≠ Robot=scheduler (del source) → nunca disparaba
+```
 
-**2. Redirección de Notificaciones (Robot -> Scheduler)**
-- Se han reconfigurado todos los robots para que informen de su estado directamente al `scheduler`.
-- Se han eliminado todas las dependencias del agente `supervisor.asl`, centralizando el monitoreo de errores y éxitos.
-- **Trazabilidad de Estado**: Los robots ahora informan sus cambios de estado (`working`/`idle`) directamente al scheduler para una mejor gestión de la carga de trabajo.
+El supervisor nunca actualizaba `robot_status` ni imprimía cambios de estado.
 
-**3. Robustez y Estabilidad del Entorno**
-- Se han resuelto conflictos de inconsistencia entre la rama local y remota, garantizando que el `robot_heavy` y el `robot_light` mantengan la lógica de aproximación adyacente para evitar solapamientos.
-- Se ha realizado un rollback controlado de la lógica de spawning dinámico en Java para evitar conflictos con desarrollos paralelos del equipo, manteniendo el sistema estable sobre una base probada.
+**Solución**
 
-**4. Resolución de Conflictos de Ficheros**
-- Se han unificado las versiones de los agentes ASL, resolviendo discrepancias en los protocolos de comunicación y asegurando que las notificaciones de éxito (`stored`) lleguen siempre al destinatario correcto.
+Dos cambios:
+
+1. Los tres robots vuelven a notificar directamente al supervisor:
+   ```jason
+   .send(supervisor, tell, robot_state_change(Me, working)).
+   ```
+
+2. El plan del supervisor usa `[source(_)]` para aceptar cualquier origen:
+   ```jason
+   +robot_state_change(Robot, Status)[source(_)] : true <- ...
+   ```
+
+3. Se elimina el plan intermediario del scheduler (`+robot_state_change` que reenviaba al supervisor) — era innecesario ya que la trazabilidad del scheduler se gestiona por `assigned(Robot, CId, ShelfId)`, no por el estado de los robots.
+
+**Ficheros modificados**
+
+- `src/agt/robot_light.asl`, `robot_medium.asl`, `robot_heavy.asl`: `.send` apunta a `supervisor`
+- `src/agt/scheduler.asl`: eliminado plan `+robot_state_change`
+- `src/agt/supervisor.asl`: `[source(Robot)]` → `[source(_)]`
+---
+## 11. Novena ronda -> Mejoras de movimiento, trazabilidad y estabilidad (commit Vincenzo)
+
+### Mejoras de Movimiento, Estabilidad y Recuperación
+-   **Fin del "Tweaking" y Bucles**: Consumo inmediato de creencias de tareas y pausas de seguridad (1.5s-2s) en planes de fallo para estabilizar el MAS.
+-   **Recogida Dinámica**: Eliminados los puntos de recogida fijos. Los robots consultan la posición real del contenedor via `get_container_info` y navegan a una celda adyacente válida con comprobación de límites del mapa.
+-   **Recuperación por Estantería Llena**: Si una estantería se llena durante el transporte, el robot suelta el contenedor en su posición actual, resetea su estado en Java y notifica al scheduler para re-encolado dinámico.
+-   **Evasión de Contenedores Grandes**: Nueva función `hayContenedorEn` en Java para que el A* esquive el área total (width x height) de los bultos grandes en el suelo.
+
+**Trazabilidad de Tareas (`scheduler.asl`)**
+- Sistema de creencias dinámicas `assigned(Robot, CId, ShelfId)` en el scheduler.
+- Se crean al asignar y se eliminan al confirmar almacenamiento, error o fallo de plan.
+
+**Nota**: este commit redirigió las notificaciones `robot_state_change` al scheduler como proxy, lo que introdujo un bug (ver sección 10). Corregido en el commit siguiente.
