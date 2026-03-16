@@ -217,7 +217,30 @@ El reporte periódico (`!print_stats`) ahora incluye una sección de robots tant
 Añadir `.send` en cada transición de estado habría requerido tocar 6-8 puntos por robot (cada handler de error, el plan de fallo `-!execute_task`, la tarea completada, etc.). Con los planes `+state(X)`, Jason los dispara automáticamente cada vez que se añade la creencia `state(X)` — incluyendo cuando lo hace `-+state(X)`. Un solo punto de integración por estado relevante.
 
 ---
-## 10. Octava ronda -> Fix: robots notifican estado directamente al supervisor
+## 10. Octava ronda -> Fix: robots notifican stored/error directamente al supervisor
+
+**Problema**
+
+El scheduler reenviaba `container_stored` y `container_error` al supervisor perdiendo el robot original. El supervisor imprimía `almacenado por scheduler` en vez del robot real.
+
+**Solución**
+
+Los robots envían a **ambos** directamente:
+
+```jason
+.send(scheduler, tell, container_stored(CId, ShelfId));   // trazabilidad
+.send(supervisor, tell, container_stored(CId, ShelfId));  // monitorización
+```
+
+El scheduler mantiene su lógica de trazabilidad (`-assigned`) pero ya no reenvía al supervisor. El supervisor recibe `[source(robot_X)]` directamente y muestra el nombre correcto en los logs.
+
+**Ficheros modificados**
+
+- `robot_light.asl`, `robot_medium.asl`, `robot_heavy.asl`: añadido `.send(supervisor, ...)` en `+stored` y todos los handlers `+error(...) : carrying(CId)`
+- `scheduler.asl`: eliminados `.send(supervisor, tell, container_stored(...))` y `.send(supervisor, tell, container_error(...))`
+
+---
+## 11. Novena ronda -> Fix: robots notifican estado directamente al supervisor
 
 **Problema**
 

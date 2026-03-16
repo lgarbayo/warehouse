@@ -84,13 +84,11 @@ pending_containers(0).
 // 5. Trazabilidad: Almacenamiento confirmado
 +container_stored(CId, ShelfId)[source(Robot)] : true <-
     .print("✨ [TRACE] ", Robot, " almacenó ", CId, " en ", ShelfId);
-    .send(supervisor, tell, container_stored(CId, ShelfId));
     -assigned(Robot, CId, ShelfId);
     -container_stored(CId, ShelfId)[source(Robot)].
 
 // 6. Trazabilidad: Errores reportados
 +container_error(CId, ErrorType)[source(Robot)] : true <-
     .print("❌ [TRACE] Error reportado por ", Robot, " para ", CId, ": ", ErrorType);
-    .send(supervisor, tell, container_error(CId, ErrorType));
     -assigned(Robot, CId, _);
     -container_error(CId, ErrorType)[source(Robot)].

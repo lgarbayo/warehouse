@@ -142,6 +142,7 @@ carrying(none).      // Contenedor que está cargando
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);
     .send(scheduler, tell, container_error(CId, container_too_heavy));
+    .send(supervisor, tell, container_error(CId, container_too_heavy));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
@@ -149,6 +150,7 @@ carrying(none).      // Contenedor que está cargando
 +error(container_too_big, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy grande - ", Data);
     .send(scheduler, tell, container_error(CId, container_too_big));
+    .send(supervisor, tell, container_error(CId, container_too_big));
     -+state(idle);
     -+carrying(none);
     .abolish(task(CId, _)).
@@ -161,6 +163,7 @@ carrying(none).      // Contenedor que está cargando
 +error(ErrorType, Data) : carrying(CId) <-
     .print("⚠️ Error detectado: ", ErrorType, " - ", Data);
     .send(scheduler, tell, container_error(CId, ErrorType));
+    .send(supervisor, tell, container_error(CId, ErrorType));
     -+state(idle);
     -+carrying(none).
 
@@ -176,7 +179,8 @@ carrying(none).      // Contenedor que está cargando
 // Confirmación de almacenamiento exitoso
 +stored(CId, ShelfId) : true <-
     .print("✓ Contenedor ", CId, " almacenado en ", ShelfId);
-    .send(scheduler, tell, container_stored(CId, ShelfId)).
+    .send(scheduler, tell, container_stored(CId, ShelfId));
+    .send(supervisor, tell, container_stored(CId, ShelfId)).
 
 /* ============================================================================
  * NOTIFICACIÓN DE ESTADO AL SUPERVISOR
