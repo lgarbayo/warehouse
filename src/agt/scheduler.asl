@@ -94,7 +94,3 @@ pending_containers(0).
     .send(supervisor, tell, container_error(CId, ErrorType));
     -assigned(Robot, CId, _);
     -container_error(CId, ErrorType)[source(Robot)].
-// 7. Trazabilidad: Cambios de estado de robots
-+robot_state_change(Robot, Status)[source(Robot)] : true <-
-    .send(supervisor, tell, robot_state_change(Robot, Status));
-    -robot_state_change(Robot, Status)[source(Robot)].

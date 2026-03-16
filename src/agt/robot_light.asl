@@ -179,13 +179,13 @@ carrying(none).      // Contenedor que está cargando
     .send(scheduler, tell, container_stored(CId, ShelfId)).
 
 /* ============================================================================
- * NOTIFICACIÓN DE ESTADO AL PLANIFICADOR
+ * NOTIFICACIÓN DE ESTADO AL SUPERVISOR
  * ============================================================================ */
 
 +state(working) : true <-
     .my_name(Me);
-    .send(scheduler, tell, robot_state_change(Me, working)).
+    .send(supervisor, tell, robot_state_change(Me, working)).
 
 +state(idle) : not task(_, _) <-
     .my_name(Me);
-    .send(scheduler, tell, robot_state_change(Me, idle)).
+    .send(supervisor, tell, robot_state_change(Me, idle)).

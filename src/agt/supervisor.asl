@@ -108,7 +108,7 @@ report_interval(30000).
  * Los robots notifican al supervisor cuando cambian a idle o working
  * ============================================================================ */
 
-+robot_state_change(Robot, Status)[source(Robot)] : true <-
++robot_state_change(Robot, Status)[source(_)] : true <-
     -robot_status(Robot, _);
     +robot_status(Robot, Status);
     .print("[SUPERVISOR] ", Robot, ": ", Status).
