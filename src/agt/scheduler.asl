@@ -59,18 +59,22 @@ pending_containers(0).
     // Asignar a robot apropiado según su capacidad (peso Y tamaño)
     if (Weight <= 10 & W <= 1 & H <= 1) {
         .print("Asignando al robot ligero: ", CId);
-        +assigned(robot_light, CId, ShelfId);
+        +assigned(robot_light, CId, ShelfId);   // assigned para trazabilidad activa
+        +task_history(robot_light, CId, ShelfId);   // task_history para historial permanente 
         .send(robot_light, tell, task(CId, ShelfId));
+        .print("[TRACE] assigned: robot_light -> ", CId, " -> ", ShelfId);
+    } elif (Weight <= 30 & W <= 1 & H <= 2) {
+        .print("Asignando al robot mediano: ", CId);
+        +assigned(robot_medium, CId, ShelfId);
+        +task_history(robot_medium, CId, ShelfId);
+        .send(robot_medium, tell, task(CId, ShelfId));
+        .print("[TRACE] assigned: robot_medium -> ", CId, " -> ", ShelfId);
     } else {
-        if (Weight <= 30 & W <= 1 & H <= 2) {
-            .print("Asignando al robot mediano: ", CId);
-            +assigned(robot_medium, CId, ShelfId);
-            .send(robot_medium, tell, task(CId, ShelfId));
-        } else {
-            .print("Asignando al robot pesado: ", CId);
-            +assigned(robot_heavy, CId, ShelfId);
-            .send(robot_heavy, tell, task(CId, ShelfId));
-        }
+        .print("Asignando al robot pesado: ", CId);
+        +assigned(robot_heavy, CId, ShelfId);
+        +task_history(robot_heavy, CId, ShelfId);
+        .send(robot_heavy, tell, task(CId, ShelfId));
+        .print("[TRACE] assigned: robot_heavy -> ", CId, " -> ", ShelfId);
     }.
 
 // 4. Manejo de fallos reportados por robots
