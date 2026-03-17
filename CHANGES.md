@@ -289,3 +289,70 @@ Dos cambios:
 - Se crean al asignar y se eliminan al confirmar almacenamiento, error o fallo de plan.
 
 **Nota**: este commit redirigió las notificaciones `robot_state_change` al scheduler como proxy, lo que introdujo un bug (ver sección 10). Corregido en el commit siguiente.
+
+---
+## 12. Décima ronda -> Refactorización de asignación con elif y trazabilidad de historial de tareas
+
+**Qué se hizo**
+
+Se simplificó la lógica de asignación de robots en `scheduler.asl` y se añadió un sistema de historial permanente de tareas para facilitar el debug y la trazabilidad.
+
+**Problema de legibilidad**
+
+La lógica de asignación usaba `if` anidados, haciendo el código más difícil de leer y mantener:
+
+```jason
+// Antes: if anidado
+if (Weight <= 10 & W <= 1 & H <= 1) {
+    .send(robot_light, ...);
+} else {
+    if (Weight <= 30 & W <= 1 & H <= 2) {
+        .send(robot_medium, ...);
+    } else {
+        .send(robot_heavy, ...);
+    }
+}.
+```
+
+**Solución: `elif` y aplanado de la estructura**
+
+Se reescribió usando `elif` para que los tres casos queden al mismo nivel de indentación:
+
+```jason
+if (Weight <= 10 & W <= 1 & H <= 1) {
+    +assigned(robot_light, CId, ShelfId);
+    +task_history(robot_light, CId, ShelfId);
+    .send(robot_light, tell, task(CId, ShelfId));
+} elif (Weight <= 30 & W <= 1 & H <= 2) {
+    +assigned(robot_medium, CId, ShelfId);
+    +task_history(robot_medium, CId, ShelfId);
+    .send(robot_medium, tell, task(CId, ShelfId));
+} else {
+    +assigned(robot_heavy, CId, ShelfId);
+    +task_history(robot_heavy, CId, ShelfId);
+    .send(robot_heavy, tell, task(CId, ShelfId));
+}.
+```
+
+**Nueva creencia `task_history`**
+
+Se introduce `task_history(Robot, CId, ShelfId)` como creencia separada de `assigned(Robot, CId, ShelfId)`:
+
+| Creencia | Ciclo de vida | Propósito |
+|---|---|---|
+| `assigned(Robot, CId, ShelfId)` | Se elimina al confirmar almacenamiento, error o fallo | Trazabilidad activa — qué tareas están vivas ahora mismo |
+| `task_history(Robot, CId, ShelfId)` | Permanece para siempre | Historial completo — registro inmutable de todas las asignaciones |
+
+Esto permite auditar qué robot procesó qué contenedor incluso después de que la tarea haya finalizado, sin interferir con la lógica de asignación activa.
+
+**Trazas de debug añadidas**
+
+Cada rama imprime una línea `[TRACE]` al asignar:
+
+```
+[TRACE] assigned: robot_light -> container_3 -> shelf_2
+```
+
+**Ficheros modificados**
+
+- `src/agt/scheduler.asl`: lógica de asignación aplanada con `elif`, añadido `+task_history(...)` y `.print("[TRACE]...")` en las tres ramas.
