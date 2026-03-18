@@ -309,8 +309,6 @@ public class WarehouseArtifact extends Environment {
                     return executePickup(agName, action);
                 case "drop_at":
                     return executeDropAt(agName, action);
-                case "request_task":
-                    return executeRequestTask(agName, action);
                 case "get_container_info":
                     return executeGetContainerInfo(agName, action);
                 case "get_free_shelf":
@@ -721,65 +719,6 @@ public class WarehouseArtifact extends Environment {
         }
     }
 
-    /**
-     * Acción: request_task()
-     * Solicita una nueva tarea del scheduler
-     */
-    private boolean executeRequestTask(String agName, Structure action) {
-        try {
-            Robot robot = robots.get(agName);
-            if (robot == null)
-                return false;
-
-            // Si ya está ocupado, no asignar nueva tarea
-            if (robot.isBusy() || robot.isCarrying()) {
-                return true;
-            }
-
-            // Buscar contenedor pendiente, saltando los ya entregados
-            Container container = pendingContainers.poll();
-            // Descartar contenedores ya procesados
-            while (container != null && (container.isPicked() || container.getAssignedShelf() != null)) {
-                container = pendingContainers.poll();
-            }
-            if (container == null) {
-                return true; // No hay tareas pendientes
-            }
-
-            // Verificar si el robot puede manejar el contenedor
-            if (!robot.canCarry(container)) {
-                // Devolver a la cola solo si no ha sido procesado
-                pendingContainers.offer(container);
-                return true;
-            }
-
-            // Buscar estantería apropiada
-            Shelf bestShelf = findBestShelf(container);
-            if (bestShelf == null) {
-                // No hay estanterías disponibles, devolver a la cola
-                pendingContainers.offer(container);
-                addError(agName, "no_shelf_available", "No shelf available for container");
-                return true;
-            }
-
-            // Asignar tarea
-            taskAssignments.put(container.getId(), agName);
-            robot.setBusy(true);
-            robot.setCurrentTask(container.getId());
-
-            // Notificar al agente
-            addPercept(agName, Literal.parseLiteral(
-                    "task(\"" + container.getId() + "\",\"" + bestShelf.getId() + "\")"));
-
-            System.out.println("Task assigned to " + agName + ": " + container.getId() + " -> " + bestShelf.getId());
-
-            return true;
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
 
     /**
      * Encuentra la mejor estantería para un contenedor, priorizando por tipo de
