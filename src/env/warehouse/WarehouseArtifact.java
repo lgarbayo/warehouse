@@ -592,7 +592,7 @@ public class WarehouseArtifact extends Environment {
             Container container = containers.get(containerId);
 
             if (robot == null || container == null) {
-                addError(agName, "invalid_pickup", "Robot or container not found");
+                addError(agName, "invalid_pickup", "Robot or container not found"); // esto es un error de programación, no operacional
                 return false;
             }
 
@@ -650,12 +650,12 @@ public class WarehouseArtifact extends Environment {
             Shelf shelf = shelves.get(shelfId);
 
             if (robot == null || shelf == null) {
-                addError(agName, "invalid_drop", "Robot or shelf not found");
+                addError(agName, "invalid_drop", "Robot or shelf not found"); // esto es un error de programación, no operacional
                 return false;
             }
 
             if (!robot.isCarrying()) {
-                addError(agName, "not_carrying", "Robot is not carrying anything");
+                addError(agName, "not_carrying", "Robot is not carrying anything"); // esto es un error de programación, no operacional
                 return false;
             }
 
@@ -889,35 +889,11 @@ public class WarehouseArtifact extends Environment {
         }
     }
 
-    /**
-     * Agrega un error a las percepciones
-     * Errores de navegacion: se notifican al supervisor desde Java porque los robots no los reenvian
-     * (no tienen contexto de contenedor). Los errores de contenedor ya los reenvian los robots via .send
-     * Equivalente a:
-     * if (errorType.equals("route_blocked") ||
-     *     errorType.equals("path_blocked") ||
-     *     errorType.equals("destination_conflict") ||
-     *     errorType.equals("illegal_move") ||
-     *     errorType.equals("too_far") ||
-     *     errorType.equals("robot_not_found")) {
-     *         addPercept("supervisor", ASSyntax.parseLiteral(
-     *                 "robot_error(\"" + agName + "\"," + errorType + ",\"" + data + "\")"));
-     * }
-     */
-    private static final Set<String> NAVIGATION_ERRORS = Set.of(
-        "route_blocked", "path_blocked", "destination_conflict",
-        "illegal_move", "too_far", "robot_not_found"
-    );
-
     private void addError(String agName, String errorType, String data) {
         totalErrors++;
         try {
             addPercept(agName, ASSyntax.parseLiteral(
                     "error(" + errorType + ",\"" + data + "\")"));
-            if (NAVIGATION_ERRORS.contains(errorType)) {
-                addPercept("supervisor", ASSyntax.parseLiteral(
-                        "robot_error(\"" + agName + "\"," + errorType + ",\"" + data + "\")"));
-            }
         } catch (Exception e) {
             e.printStackTrace();
         }

@@ -174,31 +174,43 @@ carrying(none).      // Contenedor que está cargando
     .abolish(task(CId, _)).
 
 +error(destination_conflict, Data) : true <-
+    .my_name(Me);
     .print("⚠️ Conflicto de destino, esperando y reintentando...");
+    .send(supervisor, tell, robot_error(Me, destination_conflict, Data));
     .wait(1000).
 
 +error(too_far, Data) : true <-
+    .my_name(Me);
     .print("⚠️ [MEDIUM] Demasiado lejos: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, too_far, Data));
     -+state(idle);
     -+carrying(none).
 
 +error(route_blocked, Data) : true <-
+    .my_name(Me);
     .print("⚠️ [MEDIUM] Ruta bloqueada: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, route_blocked, Data));
     -+state(idle);
     -+carrying(none).
 
 +error(path_blocked, Data) : true <-
+    .my_name(Me);
     .print("⚠️ [MEDIUM] Camino bloqueado: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, path_blocked, Data));
     -+state(idle);
     -+carrying(none).
 
 +error(illegal_move, Data) : true <-
+    .my_name(Me);
     .print("⚠️ [MEDIUM] Movimiento ilegal: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, illegal_move, Data));
     -+state(idle);
     -+carrying(none).
 
 +error(robot_not_found, Data) : true <-
+    .my_name(Me);
     .print("⚠️ [MEDIUM] Robot no encontrado: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, robot_not_found, Data));
     -+state(idle);
     -+carrying(none).
 
