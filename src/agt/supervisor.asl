@@ -114,14 +114,12 @@ report_interval(30000).
     .print("[SUPERVISOR] ", Robot, ": ", Status).
 
 +!print_robot_status : true <-
-    .findall(rs(R, S), robot_status(R, S), Robots);
-    !print_robot_list(Robots).
-
-+!print_robot_list([]) : true <- true.
-
-+!print_robot_list([rs(R, S)|Rest]) : true <-
-    .print("  ", R, ": ", S);
-    !print_robot_list(Rest).
+    .send(robot_light,  askOne, state(SL), state(SL));
+    .send(robot_medium, askOne, state(SM), state(SM));
+    .send(robot_heavy,  askOne, state(SH), state(SH));
+    .print("  robot_light: ",  SL);
+    .print("  robot_medium: ", SM);
+    .print("  robot_heavy: ",  SH).
 
 /* ============================================================================
  * MONITORIZACIÓN - Contenedores recibidos

@@ -489,3 +489,56 @@ Añadir planes específicos con contexto `true` para todos los errores de navega
 - `src/agt/robot_light.asl`: 5 planes nuevos de navegación
 - `src/agt/robot_medium.asl`: 5 planes nuevos de navegación
 - `src/agt/robot_heavy.asl`: 4 planes nuevos de navegación (`too_far` ya existía)
+
+---
+
+## 15. Decimotercera ronda -> Fix: estado de robots en tiempo real con `askOne`
+
+**Problema**
+
+El reporte periódico del supervisor leía la creencia cacheada `robot_status(R, S)`, que se actualiza mediante mensajes `.send` de los robots. Estos mensajes son **asíncronos**: cuando el supervisor ejecuta `!print_stats`, los mensajes de cambio de estado pueden estar todavía en la cola de entrada. El resultado era que el reporte mostraba `working` para robots que ya estaban en `idle`.
+
+Ejemplo reproducido:
+```
+[robot_heavy] [HEAVY] Esperando tarea del planificador central...
+[robot_light] [LIGHT] Esperando tarea del planificador central...
+[supervisor] ========================================
+[supervisor]   robot_light: working  ← incorrecto, ya estaba idle
+[supervisor]   robot_heavy: working  ← incorrecto, ya estaba idle
+```
+
+**Causa raíz**
+
+En Jason, los mensajes entre agentes son asíncronos: el receptor los procesa en su siguiente ciclo de razonamiento. Si `!print_stats` ya ha comenzado a ejecutarse, los mensajes `robot_state_change(Me, idle)` llegan después del `print`, aunque hayan sido enviados antes en tiempo de reloj.
+
+**Solución**
+
+Se reemplaza la lectura de la caché por consultas directas a cada robot usando la performativa `askOne`:
+
+```jason
+// Antes: lee caché local del supervisor
++!print_robot_status : true <-
+    .findall(rs(R, S), robot_status(R, S), Robots);
+    !print_robot_list(Robots).
+
+// Después: consulta el estado real en el momento exacto del reporte
++!print_robot_status : true <-
+    .send(robot_light,  askOne, state(SL), state(SL));
+    .send(robot_medium, askOne, state(SM), state(SM));
+    .send(robot_heavy,  askOne, state(SH), state(SH));
+    .print("  robot_light: ",  SL);
+    .print("  robot_medium: ", SM);
+    .print("  robot_heavy: ",  SH).
+```
+
+`askOne` es una performativa FIPA estándar de Jason: suspende la intención del supervisor hasta recibir respuesta del robot consultado. El robot destino responde automáticamente con su creencia `state(X)` actual — no necesita ningún plan especial para contestar.
+
+**Por qué se mantiene `+robot_state_change`**
+
+La creencia `robot_status(R, S)` sigue actualizándose vía `+robot_state_change` porque es útil para el Mind Inspector (permite ver el historial de cambios de estado en tiempo real). Solo se elimina su uso en el reporte, donde ahora se usa `askOne` para garantizar precisión.
+
+Los planes helper `!print_robot_list([])` y `!print_robot_list([H|T])` se eliminan por quedar huérfanos.
+
+**Ficheros modificados**
+
+- `src/agt/supervisor.asl`: `!print_robot_status` reescrito con `askOne`, eliminados `!print_robot_list([])` y `!print_robot_list([H|T])`
