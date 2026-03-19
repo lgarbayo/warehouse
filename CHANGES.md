@@ -453,3 +453,39 @@ La creencia `navigation_error_occurred(Robot, ErrorType)` no se elimina nunca, e
 
 - `src/env/warehouse/WarehouseArtifact.java`: 14 usos de `Literal.parseLiteral` → `ASSyntax.parseLiteral`, eliminado `getOriginalCellType`, añadido `NAVIGATION_ERRORS` y notificación filtrada al supervisor en `addError`
 - `src/agt/supervisor.asl`: añadido plan `+robot_error` con historial `+navigation_error_occurred`
+
+---
+
+## 14. Duodécima ronda -> Fix: planes específicos para errores de navegación en robots
+
+**Problema**
+
+Los errores de navegación (`route_blocked`, `path_blocked`, `illegal_move`, `robot_not_found`, `too_far`) no tenían plan específico en los robots, por lo que caían al plan genérico:
+
+```jason
++error(ErrorType, Data) : carrying(CId) <- ...
+```
+
+Cuando el robot tenía `carrying(none)` (sin carga activa), `CId` se ligaba al átomo `none` y el plan enviaba `container_error(none, path_blocked)` al scheduler y supervisor — un error falso sin contenedor real.
+
+**Causa raíz**
+
+`carrying(none)` es una creencia válida (estado idle/reset). El patrón `carrying(CId)` unifica con ella ligando `CId = none`. Los errores de navegación ocurren durante `move_to`, que puede fallar tanto en fase de aproximación (sin carga) como en fase de transporte (con carga). Los errores de contenedor (`container_too_heavy`, etc.) siempre ocurren durante `pickup`, donde el robot ya tiene `carrying(CId)` con CId real.
+
+**Solución**
+
+Añadir planes específicos con contexto `true` para todos los errores de navegación, **antes** del plan genérico, en los tres robots. Estos planes solo limpian el estado sin enviar mensajes al scheduler/supervisor (Java ya notifica al supervisor vía `NAVIGATION_ERRORS`, y `-!execute_task` ya notifica al scheduler con `task_failed` si la acción falla):
+
+| Error | light | medium | heavy |
+|---|---|---|---|
+| `route_blocked` | añadido | añadido | añadido |
+| `path_blocked` | añadido | añadido | añadido |
+| `illegal_move` | añadido | añadido | añadido |
+| `robot_not_found` | añadido | añadido | añadido |
+| `too_far` | añadido | añadido | ya existía |
+
+**Ficheros modificados**
+
+- `src/agt/robot_light.asl`: 5 planes nuevos de navegación
+- `src/agt/robot_medium.asl`: 5 planes nuevos de navegación
+- `src/agt/robot_heavy.asl`: 4 planes nuevos de navegación (`too_far` ya existía)

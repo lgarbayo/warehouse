@@ -159,6 +159,31 @@ carrying(none).      // Contenedor que está cargando
     .print("⚠️ Conflicto de destino, esperando y reintentando...");
     .wait(800).
 
++error(too_far, Data) : true <-
+    .print("⚠️ [LIGHT] Demasiado lejos: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(route_blocked, Data) : true <-
+    .print("⚠️ [LIGHT] Ruta bloqueada: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(path_blocked, Data) : true <-
+    .print("⚠️ [LIGHT] Camino bloqueado: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(illegal_move, Data) : true <-
+    .print("⚠️ [LIGHT] Movimiento ilegal: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(robot_not_found, Data) : true <-
+    .print("⚠️ [LIGHT] Robot no encontrado: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
 // Error general
 +error(ErrorType, Data) : carrying(CId) <-
     .print("⚠️ Error detectado: ", ErrorType, " - ", Data);

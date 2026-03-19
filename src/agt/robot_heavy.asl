@@ -163,6 +163,26 @@ carrying(none).      // Contenedor que está cargando
     -+state(idle);
     -+carrying(none).
 
++error(route_blocked, Data) : true <-
+    .print("⚠️ [HEAVY] Ruta bloqueada: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(path_blocked, Data) : true <-
+    .print("⚠️ [HEAVY] Camino bloqueado: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(illegal_move, Data) : true <-
+    .print("⚠️ [HEAVY] Movimiento ilegal: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(robot_not_found, Data) : true <-
+    .print("⚠️ [HEAVY] Robot no encontrado: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
 +error(ErrorType, Data) : carrying(CId) <-
     .print("⚠️ [HEAVY] Error detectado: ", ErrorType, " - ", Data);
     .send(scheduler, tell, container_error(CId, ErrorType));

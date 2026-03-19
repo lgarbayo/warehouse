@@ -177,6 +177,31 @@ carrying(none).      // Contenedor que está cargando
     .print("⚠️ Conflicto de destino, esperando y reintentando...");
     .wait(1000).
 
++error(too_far, Data) : true <-
+    .print("⚠️ [MEDIUM] Demasiado lejos: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(route_blocked, Data) : true <-
+    .print("⚠️ [MEDIUM] Ruta bloqueada: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(path_blocked, Data) : true <-
+    .print("⚠️ [MEDIUM] Camino bloqueado: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(illegal_move, Data) : true <-
+    .print("⚠️ [MEDIUM] Movimiento ilegal: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
++error(robot_not_found, Data) : true <-
+    .print("⚠️ [MEDIUM] Robot no encontrado: ", Data, ". Limpiando estado...");
+    -+state(idle);
+    -+carrying(none).
+
 +error(ErrorType, Data) : carrying(CId) <-
     .print("⚠️ Error detectado: ", ErrorType, " - ", Data);
     .send(scheduler, tell, container_error(CId, ErrorType));
