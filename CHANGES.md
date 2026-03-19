@@ -356,3 +356,100 @@ Cada rama imprime una línea `[TRACE]` al asignar:
 **Ficheros modificados**
 
 - `src/agt/scheduler.asl`: lógica de asignación aplanada con `elif`, añadido `+task_history(...)` y `.print("[TRACE]...")` en las tres ramas.
+
+---
+## 13. Undécima ronda -> Limpieza de Java y supervisión completa de errores
+
+### 1. Sustitución de API deprecada: `Literal.parseLiteral` → `ASSyntax.parseLiteral`
+
+**Problema**
+
+Todas las llamadas a `Literal.parseLiteral(String)` en `WarehouseArtifact.java` (14 ocurrencias) generaban el warning `The method parseLiteral(String) from the type Literal is deprecated` en el IDE. Aunque funcional, es una API marcada para eliminación en futuras versiones de Jason.
+
+**Solución**
+
+Sustitución global por `ASSyntax.parseLiteral(String)`, que es la API actualizada y equivalente funcionalmente. `ASSyntax` ya estaba disponible vía el import `jason.asSyntax.*` existente.
+
+**Detalle técnico**: `ASSyntax.parseLiteral` lanza `ParseException` (checked), mientras que `Literal.parseLiteral` la silenciaba internamente. El método `addError` no tenía `try-catch`, por lo que se añadió uno específico para esas dos líneas.
+
+---
+
+### 2. Eliminación de código muerto: `getOriginalCellType`
+
+El método privado `getOriginalCellType(int x, int y)` nunca era invocado desde ningún punto del código. Se eliminó para mantener el fichero limpio. VS Code lo marcaba con "is never used locally".
+
+---
+
+### 3. Supervisor recibe errores de navegación directamente desde Java
+
+**Problema**
+
+Los robots notifican al supervisor vía `.send` los errores que tienen contexto de contenedor (`container_too_heavy`, `container_too_big`, `shelf_full`). Sin embargo, los errores de navegación (`route_blocked`, `path_blocked`, `destination_conflict`, `illegal_move`, `too_far`) se quedaban en el robot — el supervisor nunca se enteraba.
+
+**Por qué los robots no los reenvían**
+
+Los planes de error sin contexto de contenedor son:
+```jason
++error(ErrorType, Data) : true <-   // sin carrying(CId)
+    .print("Error: ", ErrorType);
+    -+state(idle).
+```
+No tienen `CId`, por lo que no pueden construir `container_error(CId, ErrorType)`. El robot los absorbe silenciosamente.
+
+**Solución**
+
+Se añade en `addError` (Java) una notificación directa al supervisor, filtrada por tipo para evitar duplicados con los errores que los robots ya reenvían:
+
+```java
+private static final Set<String> NAVIGATION_ERRORS = Set.of(
+    "route_blocked", "path_blocked", "destination_conflict",
+    "illegal_move", "too_far", "robot_not_found"
+);
+
+private void addError(String agName, String errorType, String data) {
+    totalErrors++;
+    try {
+        addPercept(agName, ASSyntax.parseLiteral("error(...)"));
+        if (NAVIGATION_ERRORS.contains(errorType)) {
+            addPercept("supervisor", ASSyntax.parseLiteral(
+                "robot_error(\"" + agName + "\"," + errorType + ",\"" + data + "\")"));
+        }
+    } catch (Exception e) { e.printStackTrace(); }
+    System.err.println(...);
+}
+```
+
+Se usa el literal `robot_error(Robot, ErrorType, Data)` en vez de `container_error` para distinguir el origen (Java directo vs mensaje del robot) y evitar duplicados en el conteo de errores del supervisor.
+
+**Canales de notificación de errores resultantes**
+
+| Tipo de error | Quién notifica al supervisor | Literal |
+|---|---|---|
+| `container_too_heavy`, `container_too_big`, `shelf_full` | Robot vía `.send` | `container_error(CId, ErrorType)` |
+| `route_blocked`, `path_blocked`, `destination_conflict`, `illegal_move`, `too_far` | Java directo en `addError` | `robot_error(Robot, ErrorType, Data)` |
+
+**Plan añadido en `supervisor.asl`**
+
+```jason
++robot_error(Robot, ErrorType, Data) : true <-
+    .print("[SUPERVISOR] Error de navegacion en ", Robot, ": ", ErrorType).
+```
+
+---
+
+### 4. Historial permanente de errores de navegación en el supervisor
+
+El plan `+robot_error` no solo imprime el error — también lo persiste como creencia permanente para ser visible en el Mind Inspector:
+
+```jason
++robot_error(Robot, ErrorType, Data) : true <-
+    +navigation_error_occurred(Robot, ErrorType);
+    .print("[SUPERVISOR] Error de navegacion en ", Robot, ": ", ErrorType).
+```
+
+La creencia `navigation_error_occurred(Robot, ErrorType)` no se elimina nunca, equivalente a `task_history` en el scheduler. Permite auditar a posteriori qué robot tuvo qué errores de navegación durante la ejecución.
+
+**Ficheros modificados**
+
+- `src/env/warehouse/WarehouseArtifact.java`: 14 usos de `Literal.parseLiteral` → `ASSyntax.parseLiteral`, eliminado `getOriginalCellType`, añadido `NAVIGATION_ERRORS` y notificación filtrada al supervisor en `addError`
+- `src/agt/supervisor.asl`: añadido plan `+robot_error` con historial `+navigation_error_occurred`

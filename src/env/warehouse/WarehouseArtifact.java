@@ -2,7 +2,6 @@ package warehouse;
 
 import jason.asSyntax.*;
 import jason.environment.Environment;
-import jason.environment.grid.Location;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -207,7 +206,7 @@ public class WarehouseArtifact extends Environment {
                     }
 
                     // Notificar a los agentes
-                    addPercept(Literal.parseLiteral("new_container(\"" + container.getId() + "\")"));
+                    addPercept(ASSyntax.parseLiteral("new_container(\"" + container.getId() + "\")"));
 
                     if (view != null) {
                         view.update();
@@ -454,8 +453,8 @@ public class WarehouseArtifact extends Environment {
             }
 
             // Actualizar percepción final en el agente
-            removePerceptsByUnif(agName, Literal.parseLiteral("robot_at(_,_)"));
-            addPercept(agName, Literal.parseLiteral("robot_at(" + targetX + "," + targetY + ")"));
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("robot_at(_,_)"));
+            addPercept(agName, ASSyntax.parseLiteral("robot_at(" + targetX + "," + targetY + ")"));
 
             if (view != null) {
                 view.update();
@@ -471,12 +470,6 @@ public class WarehouseArtifact extends Environment {
                 activeDestinations.remove(destKey);
             }
         }
-    }
-
-    private CellType getOriginalCellType(int x, int y) {
-        CellType a = grid[x][y];
-        return a;
-
     }
 
     private List<int[]> calcularRuta(int inicioX, int inicioY, int destinoX, int destinoY, boolean avoidRobots) {
@@ -626,7 +619,7 @@ public class WarehouseArtifact extends Environment {
             // Recoger contenedor
             if (robot.pickup(container)) {
                 container.setPicked(true);
-                addPercept(agName, Literal.parseLiteral("picked(\"" + containerId + "\")"));
+                addPercept(agName, ASSyntax.parseLiteral("picked(\"" + containerId + "\")"));
 
                 if (view != null) {
                     view.logMessage(
@@ -697,8 +690,8 @@ public class WarehouseArtifact extends Environment {
             totalContainersProcessed++;
 
             // Actualizar percepciones
-            removePerceptsByUnif(agName, Literal.parseLiteral("picked(_)"));
-            addPercept(agName, Literal.parseLiteral("stored(\"" + container.getId() + "\",\"" + shelfId + "\")"));
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("picked(_)"));
+            addPercept(agName, ASSyntax.parseLiteral("stored(\"" + container.getId() + "\",\"" + shelfId + "\")"));
 
             if (view != null) {
                 view.logMessage(String.format("✅ %s stored %s at %s", agName, container.getId(), shelfId));
@@ -772,7 +765,7 @@ public class WarehouseArtifact extends Environment {
             }
 
             // Agregar percepción con información del contenedor, incluyendo posición
-            addPercept(agName, Literal.parseLiteral(
+            addPercept(agName, ASSyntax.parseLiteral(
                     "container_info(\"" + containerId + "\"," +
                             container.getWidth() + "," +
                             container.getHeight() + "," +
@@ -804,7 +797,7 @@ public class WarehouseArtifact extends Environment {
 
             Shelf shelf = findBestShelf(container);
             if (shelf != null) {
-                addPercept(agName, Literal.parseLiteral(
+                addPercept(agName, ASSyntax.parseLiteral(
                         "free_shelf(\"" + containerId + "\",\"" + shelf.getId() + "\")"));
                 return true;
             }
@@ -838,11 +831,11 @@ public class WarehouseArtifact extends Environment {
 
                     if (nx >= 0 && nx < GRID_WIDTH && ny >= 0 && ny < GRID_HEIGHT) {
                         CellType type = grid[nx][ny];
-                        addPercept(agName, Literal.parseLiteral(
+                        addPercept(agName, ASSyntax.parseLiteral(
                                 "cell(" + nx + "," + ny + "," + type.name().toLowerCase() + ")"));
 
                         if (type == CellType.BLOCKED) {
-                            addPercept(agName, Literal.parseLiteral("blocked(" + nx + "," + ny + ")"));
+                            addPercept(agName, ASSyntax.parseLiteral("blocked(" + nx + "," + ny + ")"));
                         }
                     }
                 }
@@ -898,11 +891,36 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Agrega un error a las percepciones
+     * Errores de navegacion: se notifican al supervisor desde Java porque los robots no los reenvian
+     * (no tienen contexto de contenedor). Los errores de contenedor ya los reenvian los robots via .send
+     * Equivalente a:
+     * if (errorType.equals("route_blocked") ||
+     *     errorType.equals("path_blocked") ||
+     *     errorType.equals("destination_conflict") ||
+     *     errorType.equals("illegal_move") ||
+     *     errorType.equals("too_far") ||
+     *     errorType.equals("robot_not_found")) {
+     *         addPercept("supervisor", ASSyntax.parseLiteral(
+     *                 "robot_error(\"" + agName + "\"," + errorType + ",\"" + data + "\")"));
+     * }
      */
+    private static final Set<String> NAVIGATION_ERRORS = Set.of(
+        "route_blocked", "path_blocked", "destination_conflict",
+        "illegal_move", "too_far", "robot_not_found"
+    );
+
     private void addError(String agName, String errorType, String data) {
         totalErrors++;
-        addPercept(agName, Literal.parseLiteral(
-                "error(" + errorType + ",\"" + data + "\")"));
+        try {
+            addPercept(agName, ASSyntax.parseLiteral(
+                    "error(" + errorType + ",\"" + data + "\")"));
+            if (NAVIGATION_ERRORS.contains(errorType)) {
+                addPercept("supervisor", ASSyntax.parseLiteral(
+                        "robot_error(\"" + agName + "\"," + errorType + ",\"" + data + "\")"));
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
         System.err.println("ERROR [" + agName + "]: " + errorType + " - " + data);
     }
 
@@ -986,8 +1004,8 @@ public class WarehouseArtifact extends Environment {
                 System.err.println("[" + agName + "] Shelf not found: " + shelfId);
                 return false;
             }
-            removePerceptsByUnif(agName, Literal.parseLiteral("shelf_pos(\"" + shelfId + "\",_,_)"));
-            addPercept(agName, Literal.parseLiteral(
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("shelf_pos(\"" + shelfId + "\",_,_)"));
+            addPercept(agName, ASSyntax.parseLiteral(
                     "shelf_pos(\"" + shelfId + "\"," + shelf.getX() + "," + shelf.getY() + ")"));
             return true;
         } catch (Exception e) {

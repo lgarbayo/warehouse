@@ -153,3 +153,8 @@ report_interval(30000).
     N = .count(error_occurred(_,_));
     .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot, " | Total errores: ", N).
 
+// Errores de navegacion enviados directamente desde Java (sin CId: route_blocked, etc.)
++robot_error(Robot, ErrorType, Data) : true <-
+    +navigation_error_occurred(Robot, ErrorType);
+    .print("[SUPERVISOR] Error de navegacion en ", Robot, ": ", ErrorType).
+
