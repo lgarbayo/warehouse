@@ -61,9 +61,9 @@ report_interval(30000).
 
 // Con contenedores recibidos: calcular tasas
 +!print_stats : container_received(_) <-
-    Received = .count(container_received(_));
-    Stored = .count(container_stored_fact(_,_));
-    Errors = .count(error_occurred(_,_));
+    .count(container_received(_), Received);
+    .count(container_stored_fact(_,_), Stored);
+    .count(error_occurred(_,_), Errors);
     SuccessRate = (Stored * 100) / Received;
     ErrorRate   = (Errors * 100) / Received;
     Pending     = Received - Stored - Errors;
@@ -96,7 +96,7 @@ report_interval(30000).
 +!print_error_list([]) : true <- true.
 
 +!print_error_list([Type|Rest]) : error_occurred(_, Type) <-
-    N = .count(error_occurred(_, Type));
+    .count(error_occurred(_, Type), N);
     .print("  ", Type, ": ", N);
     !print_error_list(Rest).
 
@@ -128,7 +128,7 @@ report_interval(30000).
 // new_container es global: el supervisor lo percibe directamente del entorno
 +new_container(CId) : true <-
     +container_received(CId);
-    N = .count(container_received(_));
+    .count(container_received(_), N);
     .print("[SUPERVISOR] Nuevo contenedor recibido: ", CId, " | Total recibidos: ", N).
 
 /* ============================================================================
@@ -138,7 +138,7 @@ report_interval(30000).
 
 +container_stored(CId, ShelfId)[source(Robot)] : true <-
     +container_stored_fact(CId, ShelfId);
-    N = .count(container_stored_fact(_,_));
+    .count(container_stored_fact(_,_), N);
     .print("[SUPERVISOR] Contenedor almacenado: ", CId, " en ", ShelfId, " por ", Robot, " | Total almacenados: ", N).
 
 /* ============================================================================
@@ -148,7 +148,7 @@ report_interval(30000).
 
 +container_error(CId, ErrorType)[source(Robot)] : true <-
     +error_occurred(CId, ErrorType);
-    N = .count(error_occurred(_,_));
+    .count(error_occurred(_,_), N);
     .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot, " | Total errores: ", N).
 
 // Errores de navegacion enviados directamente desde Java (sin CId: route_blocked, etc.)

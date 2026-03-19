@@ -160,14 +160,11 @@ Esto hacía que el agente supervisor no cargara en absoluto en el sistema, y los
    SuccessRate = (Stored * 100) / Received;
    ```
 
-2. **`.count(Pattern, Var)` (forma de dos argumentos) no es válida en cuerpos de planes.**
-   En Jason 3.3.0, `.count` funciona como función aritmética inline con un solo argumento: `.count(Pattern)` devuelve el entero directamente (como `math.max(...)` o `math.abs(...)`). La forma de dos argumentos `.count(P, N)` existe en contextos de plan (guardas) para comparar contra un valor ya ligado, pero no para ligar una variable en el cuerpo. Forma correcta en el cuerpo:
+2. **`.count(Pattern, Var)` (forma de dos argumentos) — workaround inicial.**
+   En el momento de aplicar este fix no se pudo confirmar si la forma de dos argumentos funcionaba en cuerpos de planes en Jason 3.3.0. Como solución segura se usó la forma aritmética de un argumento. Esta decisión fue posteriormente revisada (ver sección 16).
 
    ```jason
-   // Incorrecto en cuerpo de plan:
-   .count(container_received(_), Received);
-
-   // Correcto:
+   // Workaround usado inicialmente:
    Received = .count(container_received(_));
    ```
 
@@ -516,3 +513,41 @@ Los planes helper `!print_robot_list([])` y `!print_robot_list([H|T])` se elimin
 **Ficheros modificados**
 
 - `src/agt/supervisor.asl`: `!print_robot_status` reescrito con `askOne`, eliminados `!print_robot_list([])` y `!print_robot_list([H|T])`
+
+---
+
+## 16. Decimocuarta ronda -> Refactorización: `.count` a forma estándar de dos argumentos
+
+**Contexto**
+
+El profesor confirmó que `.count(Pattern, Var)` sí funciona correctamente en cuerpos de planes en Jason 3.3.0, con el siguiente ejemplo de prueba:
+
+```jason
+creencia("A").
+creencia("B").
+!contar_creencias.
+
++!contar_creencias : true <-
+    .count(creencia(_), Total);
+    .print("Total creencias: ", Total);
+    .wait(10000);
+    !contar_creencias.
+```
+
+Este plan imprime `Total creencias: 2` correctamente. La forma de un argumento usada en la sección 8 (`N = .count(P)`) era un workaround innecesario.
+
+**Qué se hizo**
+
+Se actualizaron los 7 usos de `.count` en `supervisor.asl` a la forma estándar de dos argumentos:
+
+```jason
+// Antes (workaround):
+Received = .count(container_received(_));
+
+// Después (forma estándar):
+.count(container_received(_), Received);
+```
+
+**Ficheros modificados**
+
+- `src/agt/supervisor.asl`: 7 ocurrencias de `N = .count(P)` reemplazadas por `.count(P, N)`
