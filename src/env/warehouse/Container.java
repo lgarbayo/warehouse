@@ -62,4 +62,45 @@ public class Container {
     public int getArea() {
         return width * height;
     }
+
+    /**
+     * Devuelve las celdas adyacentes ortogonales (sin diagonales) a este CONTENEDOR,
+     * usando su posición (x,y) y dimensiones (width x height) propias.
+     * Filtra celdas fuera del mapa, SHELF y BLOCKED.
+     * El grid y sus dimensiones se pasan desde WarehouseArtifact ya que el contenedor
+     * no tiene acceso directo al estado del entorno.
+     * Usado por executeMoveToContainer.
+     */
+    public java.util.List<int[]> getAdyacentes(CellType[][] grid, int gridWidth, int gridHeight) {
+        java.util.List<int[]> result = new java.util.ArrayList<>();
+        // Fila superior
+        for (int i = 0; i < width; i++) {
+            int ax = x + i, ay = y - 1;
+            if (ax >= 0 && ax < gridWidth && ay >= 0 && ay < gridHeight
+                    && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
+                result.add(new int[]{ax, ay});
+        }
+        // Fila inferior
+        for (int i = 0; i < width; i++) {
+            int ax = x + i, ay = y + height;
+            if (ax >= 0 && ax < gridWidth && ay >= 0 && ay < gridHeight
+                    && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
+                result.add(new int[]{ax, ay});
+        }
+        // Columna izquierda
+        for (int j = 0; j < height; j++) {
+            int ax = x - 1, ay = y + j;
+            if (ax >= 0 && ax < gridWidth && ay >= 0 && ay < gridHeight
+                    && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
+                result.add(new int[]{ax, ay});
+        }
+        // Columna derecha
+        for (int j = 0; j < height; j++) {
+            int ax = x + width, ay = y + j;
+            if (ax >= 0 && ax < gridWidth && ay >= 0 && ay < gridHeight
+                    && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
+                result.add(new int[]{ax, ay});
+        }
+        return result;
+    }
 }

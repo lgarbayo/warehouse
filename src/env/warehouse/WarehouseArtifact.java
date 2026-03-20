@@ -383,7 +383,7 @@ public class WarehouseArtifact extends Environment {
                 addError(agName, "robot_not_found", "Container " + containerId + " not found");
                 return false;
             }
-            List<int[]> adyacentes = getAdyacentes(container.getX(), container.getY(), container.getWidth(), container.getHeight());
+            List<int[]> adyacentes = container.getAdyacentes(grid, GRID_WIDTH, GRID_HEIGHT);
             for (int[] cell : adyacentes) {
                 if (!hayRobotCerca(cell[0], cell[1])) {
                     return doMoveTo(agName, cell[0], cell[1]);
@@ -398,9 +398,10 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
-     * Devuelve las celdas adyacentes (arriba, abajo, izquierda, derecha — sin diagonales)
-     * a un rectángulo de posición (x,y) y dimensiones (width x height),
-     * filtrando celdas fuera del mapa, SHELF y BLOCKED.
+     * Devuelve las celdas adyacentes ortogonales (sin diagonales) a una ESTANTERÍA,
+     * dado su rectángulo de posición (x,y) y dimensiones (width x height).
+     * Filtra celdas fuera del mapa, SHELF y BLOCKED.
+     * Usado por executeMoveToShelf. Para contenedores, usar container.getAdyacentes().
      */
     private List<int[]> getAdyacentes(int x, int y, int width, int height) {
         List<int[]> result = new ArrayList<>();

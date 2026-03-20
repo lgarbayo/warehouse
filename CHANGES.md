@@ -804,3 +804,32 @@ containers_light([])
 **Ficheros modificados**
 
 - `src/agt/scheduler.asl`: añadidas creencias iniciales `containers_heavy/medium/light([])` y actualización de listas en las tres ramas de asignación
+
+---
+
+## 22. Vigésima ronda -> `getAdyacentes` movido a `Container.java`
+
+**Objetivo**
+
+Cumplir el ticket: *"poner getAdyacentes en la clase Container"*. El método calculaba adyacencias de cualquier rectángulo en `WarehouseArtifact` como método privado genérico. Semánticamente, un contenedor conoce su posición y dimensiones, por lo que tiene sentido que sea él quien calcule sus propias celdas adyacentes.
+
+**Qué se hizo**
+
+Se añadió `getAdyacentes(CellType[][] grid, int gridWidth, int gridHeight)` como método público en `Container.java`. Usa `this.x`, `this.y`, `this.width`, `this.height` directamente — atributos propios del contenedor. El `grid` y sus dimensiones se reciben como parámetros porque el contenedor no tiene acceso al estado del entorno.
+
+En `WarehouseArtifact.executeMoveToContainer` la llamada se simplifica:
+
+```java
+// Antes:
+List<int[]> adyacentes = getAdyacentes(container.getX(), container.getY(), container.getWidth(), container.getHeight());
+
+// Después:
+List<int[]> adyacentes = container.getAdyacentes(grid, GRID_WIDTH, GRID_HEIGHT);
+```
+
+El método privado `getAdyacentes(x, y, width, height)` se mantiene en `WarehouseArtifact` para uso exclusivo de `executeMoveToShelf` (las estanterías no tienen este método). Los comentarios de ambos métodos se actualizaron para dejar claro a qué corresponde cada uno.
+
+**Ficheros modificados**
+
+- `src/env/warehouse/Container.java`: añadido `getAdyacentes(CellType[][] grid, int gridWidth, int gridHeight)`
+- `src/env/warehouse/WarehouseArtifact.java`: `executeMoveToContainer` delega en `container.getAdyacentes`; comentario de `getAdyacentes` privado actualizado
