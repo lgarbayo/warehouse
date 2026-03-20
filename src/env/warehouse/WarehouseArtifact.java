@@ -304,6 +304,10 @@ public class WarehouseArtifact extends Environment {
             switch (actionName) {
                 case "move_to":
                     return executeMoveTo(agName, action);
+                case "move_to_shelf":
+                    return executeMoveToShelf(agName, action);
+                case "move_to_container":
+                    return executeMoveToContainer(agName, action);
                 case "pickup":
                     return executePickup(agName, action);
                 case "drop_at":
@@ -339,12 +343,97 @@ public class WarehouseArtifact extends Environment {
      * Mueve el robot a la posición especificada
      */
     private boolean executeMoveTo(String agName, Structure action) {
-        String destKey = null;
         try {
             int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
             int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
-            destKey = targetX + "," + targetY;
+            return doMoveTo(agName, targetX, targetY);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
 
+    private boolean executeMoveToShelf(String agName, Structure action) {
+        try {
+            String shelfId = action.getTerm(0).toString().replace("\"", "");
+            Shelf shelf = shelves.get(shelfId);
+            if (shelf == null) {
+                addError(agName, "robot_not_found", "Shelf " + shelfId + " not found");
+                return false;
+            }
+            List<int[]> adyacentes = getAdyacentes(shelf.getX(), shelf.getY(), shelf.getWidth(), shelf.getHeight());
+            for (int[] cell : adyacentes) {
+                if (!hayRobotCerca(cell[0], cell[1])) {
+                    return doMoveTo(agName, cell[0], cell[1]);
+                }
+            }
+            addError(agName, "path_blocked", "No free adjacent cell for shelf " + shelfId);
+            return false;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    private boolean executeMoveToContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Container container = containers.get(containerId);
+            if (container == null) {
+                addError(agName, "robot_not_found", "Container " + containerId + " not found");
+                return false;
+            }
+            List<int[]> adyacentes = getAdyacentes(container.getX(), container.getY(), container.getWidth(), container.getHeight());
+            for (int[] cell : adyacentes) {
+                if (!hayRobotCerca(cell[0], cell[1])) {
+                    return doMoveTo(agName, cell[0], cell[1]);
+                }
+            }
+            addError(agName, "path_blocked", "No free adjacent cell for container " + containerId);
+            return false;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Devuelve las celdas adyacentes (arriba, abajo, izquierda, derecha — sin diagonales)
+     * a un rectángulo de posición (x,y) y dimensiones (width x height),
+     * filtrando celdas fuera del mapa, SHELF y BLOCKED.
+     */
+    private List<int[]> getAdyacentes(int x, int y, int width, int height) {
+        List<int[]> result = new ArrayList<>();
+        // Fila superior
+        for (int i = 0; i < width; i++) {
+            int ax = x + i, ay = y - 1;
+            if (estaDentroDelMapa(ax, ay) && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
+                result.add(new int[]{ax, ay});
+        }
+        // Fila inferior
+        for (int i = 0; i < width; i++) {
+            int ax = x + i, ay = y + height;
+            if (estaDentroDelMapa(ax, ay) && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
+                result.add(new int[]{ax, ay});
+        }
+        // Columna izquierda
+        for (int j = 0; j < height; j++) {
+            int ax = x - 1, ay = y + j;
+            if (estaDentroDelMapa(ax, ay) && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
+                result.add(new int[]{ax, ay});
+        }
+        // Columna derecha
+        for (int j = 0; j < height; j++) {
+            int ax = x + width, ay = y + j;
+            if (estaDentroDelMapa(ax, ay) && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
+                result.add(new int[]{ax, ay});
+        }
+        return result;
+    }
+
+    private boolean doMoveTo(String agName, int targetX, int targetY) {
+        String destKey = targetX + "," + targetY;
+        try {
             Robot robot = robots.get(agName);
             if (robot == null) {
                 addError(agName, "robot_not_found", "Robot " + agName + " not found");

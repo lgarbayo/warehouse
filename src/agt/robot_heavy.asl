@@ -74,29 +74,21 @@ carrying(none).      // Contenedor que está cargando
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 [HEAVY] Iniciando transporte de carga pesada: ", CId);
     
-    // Fase 1: Localizar y navegar al contenedor pesado (dinámico)
+    // Fase 1: Localizar y navegar al contenedor pesado
     .print("📍 [HEAVY] Fase 1: Localizando contenedor ", CId);
-    .abolish(container_info(CId, _, _, _, _, _, _));
-    get_container_info(CId);
-    .wait(container_info(CId, _, _, _, _, _, _));
-    ?container_info(CId, W, H, Weight, Type, CX, CY);
-    
-    // Navegar arriba del contenedor (CX, CY-1)
-    // Si CY=0, intentamos abajo (CX, CY+H)
-    if (CY > 0) { move_to(CX, CY - 1); }
-    else { move_to(CX, CY + H); }
-    .wait(1000);  // Robot pesado es más lento
-    
+    move_to_container(CId);
+    .wait(1000);
+
     // Fase 2: Recoger el contenedor pesado
     .print("📦 [HEAVY] Fase 2: Recogiendo contenedor pesado ", CId);
     -+state(picking);
     pickup(CId);
     .wait(1000);
-    
+
     // Fase 3: Transporte lento pero seguro
     .print("🚚 [HEAVY] Fase 3: Transportando carga pesada a ", ShelfId);
     -+state(carrying);
-    !navigate_to_shelf(ShelfId);
+    move_to_shelf(ShelfId);
     
     // Fase 4: Depositar con cuidado
     .print("📥 [HEAVY] Fase 4: Depositando carga en ", ShelfId);
@@ -109,19 +101,6 @@ carrying(none).      // Contenedor que está cargando
     -+state(idle);
     -+carrying(none).
 
-// HEAVY: se coloca en (SX, SY-1) — celda inmediatamente encima del shelf, dist=1
-+!navigate_to_shelf(ShelfId) : true <-
-    get_shelf_position(ShelfId);
-    ?shelf_pos(ShelfId, SX, SY);
-    !try_move_to_shelf(SX, SY - 1).
-
-+!try_move_to_shelf(X, Y) : true <-
-    move_to(X, Y).
-
-// Si move_to falla (destination_conflict), esperamos y reintentamos
- -!try_move_to_shelf(X, Y) : true <-
-    .wait(2000);
-    !try_move_to_shelf(X, Y).
 
 /* ============================================================================
  * MANEJO DE ERRORES Y FALLOS DE PLANES

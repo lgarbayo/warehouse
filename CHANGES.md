@@ -551,3 +551,67 @@ Received = .count(container_received(_));
 **Ficheros modificados**
 
 - `src/agt/supervisor.asl`: 7 ocurrencias de `N = .count(P)` reemplazadas por `.count(P, N)`
+
+---
+
+## 17. Decimoquinta ronda -> Navegación inteligente: `move_to_container` y `move_to_shelf`
+
+**Problema**
+
+Los robots calculaban manualmente las coordenadas de destino para recoger contenedores y depositar en estanterías:
+
+- **Fase 1 (contenedor):** `get_container_info` → coordenadas con offsets fijos (`CX-1`, `CX+W`, `CY-1`) según el robot, con `if/else` para evitar salir del mapa. El robot siempre llegaba desde el mismo lado.
+- **Fase 3 (estantería):** `get_shelf_position` → `move_to(SX, SY-1)` — siempre la misma celda fija encima de la estantería, independientemente de si estaba libre o había otro robot.
+
+Esto violaba el requisito del profesor: *"que el robot se pueda poner adyacente a un contenedor, no que se ponga a machete delante (abajo)"*.
+
+**Solución**
+
+Se añadieron dos nuevas acciones Java y se refactorizó `executeMoveTo` para eliminar duplicación:
+
+### `getAdyacentes(int x, int y, int width, int height)`
+
+Método privado que devuelve todas las celdas adyacentes ortogonales (arriba, abajo, izquierda, derecha — **sin diagonales**) a un rectángulo de posición `(x,y)` y dimensiones `width×height`, filtrando celdas fuera del mapa, `SHELF` y `BLOCKED`:
+
+```java
+// Fila superior:   (x..x+width-1, y-1)
+// Fila inferior:   (x..x+width-1, y+height)
+// Columna izq:     (x-1, y..y+height-1)
+// Columna dcha:    (x+width, y..y+height-1)
+```
+
+### `executeMoveToContainer(agName, action)`
+
+Acción `move_to_container(ContainerId)` — busca el contenedor en el mapa Java, obtiene sus adyacentes, elige la primera celda libre (sin robot), y ejecuta el movimiento con la lógica completa de `doMoveTo`.
+
+### `executeMoveToShelf(agName, action)`
+
+Acción `move_to_shelf(ShelfId)` — igual pero para estanterías. Busca la estantería por ID, obtiene sus adyacentes, elige la primera libre, y mueve el robot.
+
+### `doMoveTo(agName, targetX, targetY)`
+
+Se extrajo el núcleo de movimiento de `executeMoveTo` a un método privado reutilizable. Ahora `executeMoveTo`, `executeMoveToShelf` y `executeMoveToContainer` comparten la misma lógica: reserva en `activeDestinations`, cálculo de ruta, movimiento reactivo paso a paso, percepción `robot_at` final.
+
+**Cambios en los robots**
+
+Los tres robots (`robot_light.asl`, `robot_medium.asl`, `robot_heavy.asl`) se simplificaron eliminando código de navegación manual:
+
+| Antes | Después |
+|---|---|
+| `get_container_info` + `.wait` + `?` + `if/else move_to(...)` | `move_to_container(CId)` |
+| `!navigate_to_shelf` → `get_shelf_position` → `move_to(SX, SY-1)` | `move_to_shelf(ShelfId)` |
+
+Los planes `!navigate_to_shelf` y `!try_move_to_shelf` se eliminaron de los tres robots por quedar huérfanos.
+
+**Resultado**
+
+- El robot se posiciona en la celda adyacente libre más cercana al contenedor o estantería, no siempre en la misma posición fija.
+- Si la primera celda adyacente está ocupada por otro robot, automáticamente elige la siguiente disponible.
+- Las diagonales nunca se consideran adyacentes, cumpliendo el requisito explícito del profesor.
+
+**Ficheros modificados**
+
+- `src/env/warehouse/WarehouseArtifact.java`: añadidos `executeMoveToShelf`, `executeMoveToContainer`, `getAdyacentes`, `doMoveTo`; registradas `move_to_shelf` y `move_to_container` en el switch; `executeMoveTo` refactorizado para delegar en `doMoveTo`
+- `src/agt/robot_light.asl`: Fase 1 y Fase 3 simplificadas, eliminados `!navigate_to_shelf` y `!try_move_to_shelf`
+- `src/agt/robot_medium.asl`: ídem
+- `src/agt/robot_heavy.asl`: ídem

@@ -77,29 +77,21 @@ carrying(none).      // Contenedor que está cargando
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 Iniciando tarea: ", CId);
     
-    // Fase 1: Localizar y navegar al contenedor (dinámico)
+    // Fase 1: Localizar y navegar al contenedor
     .print("📍 Fase 1: Localizando contenedor ", CId);
-    .abolish(container_info(CId, _, _, _, _, _, _));
-    get_container_info(CId);
-    .wait(container_info(CId, _, _, _, _, _, _));
-    ?container_info(CId, W, H, Weight, Type, CX, CY);
-    
-    // Navegar a la izquierda del contenedor (CX-1, CY)
-    // Si CX=0, intentamos (CX, CY+1)
-    if (CX > 0) { move_to(CX - 1, CY); }
-    else { move_to(CX, CY + 1); }
+    move_to_container(CId);
     .wait(500);
-    
+
     // Fase 2: Recoger el contenedor
     .print("📦 Fase 2: Recogiendo contenedor ", CId);
     -+state(picking);
     pickup(CId);
     .wait(500);
-    
+
     // Fase 3: Navegar hacia la estantería
     .print("🚚 Fase 3: Transportando a estantería ", ShelfId);
     -+state(carrying);
-    !navigate_to_shelf(ShelfId);
+    move_to_shelf(ShelfId);
     
     // Fase 4: Depositar el contenedor
     .print("📥 Fase 4: Depositando en ", ShelfId);
@@ -112,18 +104,6 @@ carrying(none).      // Contenedor que está cargando
     -+state(idle);
     -+carrying(none).
 
-// LIGHT: se coloca en (SX, SY-1) — encima del shelf (centro)
-+!navigate_to_shelf(ShelfId) : true <-
-    get_shelf_position(ShelfId);
-    ?shelf_pos(ShelfId, SX, SY);
-    !try_move_to_shelf(SX, SY - 1).
-
-+!try_move_to_shelf(X, Y) : true <-
-    move_to(X, Y).
-
--!try_move_to_shelf(X, Y) : true <-
-    .wait(2000);
-    !try_move_to_shelf(X, Y).
 
 /* ============================================================================
  * MANEJO DE ERRORES Y FALLOS DE PLANES
