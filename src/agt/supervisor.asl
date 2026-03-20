@@ -142,6 +142,8 @@ report_interval(30000).
 +new_container(CId) : true <-
     +container_received(CId);
     .count(container_received(_), N);
+    -total_received(_);
+    +total_received(N);
     .print("[SUPERVISOR] Nuevo contenedor recibido: ", CId, " | Total recibidos: ", N).
 
 /* ============================================================================
@@ -152,6 +154,8 @@ report_interval(30000).
 +container_stored(CId, ShelfId)[source(Robot)] : true <-
     +container_stored_fact(CId, ShelfId);
     .count(container_stored_fact(_,_), N);
+    -total_stored(_);
+    +total_stored(N);
     .print("[SUPERVISOR] Contenedor almacenado: ", CId, " en ", ShelfId, " por ", Robot, " | Total almacenados: ", N).
 
 /* ============================================================================
@@ -162,6 +166,8 @@ report_interval(30000).
 +container_error(CId, ErrorType)[source(Robot)] : true <-
     +error_occurred(CId, ErrorType);
     .count(error_occurred(_,_), N);
+    -total_errors(_);
+    +total_errors(N);
     .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot, " | Total errores: ", N).
 
 // Errores de navegacion enviados directamente desde Java (sin CId: route_blocked, etc.)

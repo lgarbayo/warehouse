@@ -661,3 +661,104 @@ Errores por tipo:
 **Ficheros modificados**
 
 - `src/agt/supervisor.asl`: `!print_errors_by_type` extendido con sección de navegación, añadidos `!print_nav_error_list` y sus dos variantes
+
+---
+
+## 19. Decimoséptima ronda -> Clasificación de contenedores por tipo, peso y tamaño en el scheduler
+
+**Objetivo**
+
+El objetivo semanal "scheduler clasifica contenedor por peso/tamaño/tipo" requería que el scheduler mantuviera creencias explícitas sobre la categoría de cada contenedor, no solo que tomara decisiones de asignación basadas en esos atributos.
+
+**Qué se hizo**
+
+Se añadieron tres nuevas creencias en el plan `+free_shelf` de `scheduler.asl`, generadas en el momento de la asignación:
+
+| Creencia | Valores posibles | Criterio |
+|---|---|---|
+| `container_type(CId, Type)` | `urgent`, `fragile`, `standard` | Tipo recibido del entorno |
+| `container_weight_category(CId, Cat)` | `light`, `medium`, `heavy` | Peso: ≤10 / ≤30 / >30 kg |
+| `container_size_category(CId, Cat)` | `small`, `medium`, `large` | Tamaño: 1×1 / 1×2 / mayor |
+
+**Por qué separar peso y tamaño**
+
+Aunque la lógica de asignación usa ambos combinados (`Weight <= 10 & W <= 1 & H <= 1`), un contenedor puede ser ligero pero grande (ej: 1×2, 5kg) o pesado pero compacto (ej: 1×1, 80kg). Tenerlos como creencias independientes permite ver en el Mind Inspector exactamente qué criterio predominó en cada caso, sin cambiar la lógica de asignación.
+
+La creencia `container_category(CId, Cat)` ya existente refleja la **decisión final** del scheduler (qué robot se asignó). Las nuevas creencias reflejan los **atributos individuales** del contenedor.
+
+**La lógica de asignación no cambia** — el `elif` sigue igual. Las creencias son puramente informativas.
+
+**Visible en**
+
+- Mind Inspector del scheduler: 4 creencias por contenedor
+- Logs: `[TRACE] assigned: robot_light -> container_5 -> shelf_4 [fragile]` (el tipo ya aparecía)
+
+**Ficheros modificados**
+
+- `src/agt/scheduler.asl`: añadidas clasificaciones por tipo, peso y tamaño antes del bloque de asignación de robot
+
+---
+
+## 20. Decimoctava ronda -> Activación de contadores totales en supervisor y scheduler
+
+**Problema**
+
+Las creencias iniciales `total_received(0)`, `total_stored(0)` y `total_errors(0)` (supervisor) y `total_containers_received(0)` y `total_tasks_assigned(0)` (scheduler) estaban declaradas pero **nunca se actualizaban**. Permanecían a `0` durante toda la ejecución, haciéndolas inútiles en el Mind Inspector.
+
+Los totales sí se calculaban correctamente con `.count` durante el reporte periódico, pero ese resultado no se persistía como creencia.
+
+**Solución**
+
+Se aprovecha que cada plan relevante ya calculaba `N` con `.count` para añadir `-+total_X(N)` justo después, actualizando la creencia en tiempo real:
+
+**Supervisor** (`supervisor.asl`):
+
+```jason
+// +new_container: ya calculaba N con .count(container_received(_), N)
+-total_received(_);
++total_received(N);
+
+// +container_stored: ya calculaba N con .count(container_stored_fact(_,_), N)
+-total_stored(_);
++total_stored(N);
+
+// +container_error: ya calculaba N con .count(error_occurred(_,_), N)
+-total_errors(_);
++total_errors(N);
+```
+
+**Scheduler** (`scheduler.asl`):
+
+```jason
+// +container_info: añadido .count(container_info(...), N)
+-total_containers_received(_);
++total_containers_received(N);
+
+// +free_shelf (tras asignación): añadido .count(task_history(_,_,_), T)
+-total_tasks_assigned(_);
++total_tasks_assigned(T);
+```
+
+**Por qué `-+` en vez de incremento manual**
+
+El patrón `-old; +(old+1)` requiere recuperar el valor anterior con `?` y es propenso a condiciones de carrera. Recalcular con `.count` directamente desde las creencias fuente es más robusto y coherente con el resto del sistema.
+
+**Resultado**
+
+Mind Inspector del supervisor muestra en tiempo real:
+```
+total_received(4)
+total_stored(2)
+total_errors(0)
+```
+
+Mind Inspector del scheduler muestra:
+```
+total_containers_received(4)
+total_tasks_assigned(4)
+```
+
+**Ficheros modificados**
+
+- `src/agt/supervisor.asl`: activados `total_received`, `total_stored`, `total_errors`
+- `src/agt/scheduler.asl`: activados `total_containers_received`, `total_tasks_assigned`

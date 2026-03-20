@@ -42,6 +42,9 @@ pending_containers(0).
 +container_info(CId, W, H, Weight, Type, X, Y) : true <-
     .print("Info: ", CId, " - ", Weight, "kg. Solicitando estantería...");
     +pending_container(CId, Weight);
+    .count(container_info(_, _, _, _, _, _, _), N);
+    -total_containers_received(_);
+    +total_containers_received(N);
     !assign_shelf(CId).
 
 +!assign_shelf(CId) : true <-
@@ -56,26 +59,53 @@ pending_containers(0).
 +free_shelf(CId, ShelfId) : container_info(CId, W, H, Weight, Type, _, _) <-
     .print("Estantería: ", ShelfId, " asignada a ", CId);
     
+    // Clasificación por tipo (urgent/fragile/standard)
+    +container_type(CId, Type);
+
+    // Clasificación por peso
+    if (Weight <= 10) { 
+        +container_weight_category(CId, light); 
+    } elif (Weight <= 30) { 
+        +container_weight_category(CId, medium); 
+    } else { 
+        +container_weight_category(CId, heavy); 
+    };
+
+    // Clasificación por tamaño
+    if (W <= 1 & H <= 1) { 
+        +container_size_category(CId, small); 
+    } elif (W <= 1 & H <= 2) { 
+        +container_size_category(CId, medium); 
+    } else { 
+        +container_size_category(CId, large); 
+    };
+
     // Asignar a robot apropiado según su capacidad (peso Y tamaño)
     if (Weight <= 10 & W <= 1 & H <= 1) {
         .print("Asignando al robot ligero: ", CId);
-        +assigned(robot_light, CId, ShelfId);   // assigned para trazabilidad activa
-        +task_history(robot_light, CId, ShelfId);   // task_history para historial permanente 
+        +container_category(CId, light);
+        +assigned(robot_light, CId, ShelfId);
+        +task_history(robot_light, CId, ShelfId);
         .send(robot_light, tell, task(CId, ShelfId));
-        .print("[TRACE] assigned: robot_light -> ", CId, " -> ", ShelfId);
+        .print("[TRACE] assigned: robot_light -> ", CId, " -> ", ShelfId, " [", Type, "]");
     } elif (Weight <= 30 & W <= 1 & H <= 2) {
         .print("Asignando al robot mediano: ", CId);
+        +container_category(CId, medium);
         +assigned(robot_medium, CId, ShelfId);
         +task_history(robot_medium, CId, ShelfId);
         .send(robot_medium, tell, task(CId, ShelfId));
-        .print("[TRACE] assigned: robot_medium -> ", CId, " -> ", ShelfId);
+        .print("[TRACE] assigned: robot_medium -> ", CId, " -> ", ShelfId, " [", Type, "]");
     } else {
         .print("Asignando al robot pesado: ", CId);
+        +container_category(CId, heavy);
         +assigned(robot_heavy, CId, ShelfId);
         +task_history(robot_heavy, CId, ShelfId);
         .send(robot_heavy, tell, task(CId, ShelfId));
-        .print("[TRACE] assigned: robot_heavy -> ", CId, " -> ", ShelfId);
-    }.
+        .print("[TRACE] assigned: robot_heavy -> ", CId, " -> ", ShelfId, " [", Type, "]");
+    };
+    .count(task_history(_, _, _), T);
+    -total_tasks_assigned(_);
+    +total_tasks_assigned(T).
 
 // 4. Manejo de fallos reportados por robots
 +task_failed(CId)[source(Robot)] : true <-
