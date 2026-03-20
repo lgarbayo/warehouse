@@ -33,6 +33,11 @@ total_containers_received(0).
 total_tasks_assigned(0).
 pending_containers(0).
 
+/* Listas de contenedores por categoría */
+containers_heavy([]).
+containers_medium([]).
+containers_light([]).
+
 // 1. Reaccionar a nuevo contenedor
 +new_container(CId) : true <-
     .print("Nuevo contenedor: ", CId);
@@ -84,6 +89,9 @@ pending_containers(0).
     if (Weight <= 10 & W <= 1 & H <= 1) {
         .print("Asignando al robot ligero: ", CId);
         +container_category(CId, light);
+        ?containers_light(LL); // LL -> light list
+        -containers_light(LL); 
+        +containers_light([CId|LL]);
         +assigned(robot_light, CId, ShelfId);
         +task_history(robot_light, CId, ShelfId);
         .send(robot_light, tell, task(CId, ShelfId));
@@ -91,6 +99,9 @@ pending_containers(0).
     } elif (Weight <= 30 & W <= 1 & H <= 2) {
         .print("Asignando al robot mediano: ", CId);
         +container_category(CId, medium);
+        ?containers_medium(ML); // ML -> medium list
+        -containers_medium(ML); 
+        +containers_medium([CId|ML]);
         +assigned(robot_medium, CId, ShelfId);
         +task_history(robot_medium, CId, ShelfId);
         .send(robot_medium, tell, task(CId, ShelfId));
@@ -98,6 +109,9 @@ pending_containers(0).
     } else {
         .print("Asignando al robot pesado: ", CId);
         +container_category(CId, heavy);
+        ?containers_heavy(HL); // HL -> heavy list
+        -containers_heavy(HL); 
+        +containers_heavy([CId|HL]);
         +assigned(robot_heavy, CId, ShelfId);
         +task_history(robot_heavy, CId, ShelfId);
         .send(robot_heavy, tell, task(CId, ShelfId));

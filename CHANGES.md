@@ -762,3 +762,45 @@ total_tasks_assigned(4)
 
 - `src/agt/supervisor.asl`: activados `total_received`, `total_stored`, `total_errors`
 - `src/agt/scheduler.asl`: activados `total_containers_received`, `total_tasks_assigned`
+
+---
+
+## 21. Decimonovena ronda -> Listas de contenedores por categoría en el scheduler
+
+**Objetivo**
+
+Cumplir el ticket: *"containersHeavy: lista rellenada con los nombres de los contenedores (c1, c3, ...)"* y *"creencias con la lista de qué contenedores pertenecen a qué clasificación (heavy, medium, light)"*.
+
+**Qué se hizo**
+
+Se añadieron tres creencias iniciales vacías en `scheduler.asl`:
+
+```jason
+containers_heavy([]).
+containers_medium([]).
+containers_light([]).
+```
+
+En cada rama del bloque de asignación (`if/elif/else`), tras asignar `container_category`, se actualiza la lista correspondiente usando el patrón estándar de Jason para modificar una creencia lista:
+
+```jason
+?containers_heavy(HL);   // leer lista actual
+-containers_heavy(HL);   // eliminar creencia antigua
++containers_heavy([CId|HL]);  // añadir CId al principio
+```
+
+**Por qué este patrón y no `-+`**
+
+`-+` solo funciona cuando el nuevo valor no depende del anterior. Aquí necesitamos leer `HL` primero para construir `[CId|HL]`, por lo que hay que hacer los tres pasos explícitamente.
+
+**Resultado en el Mind Inspector**
+
+```
+containers_heavy(["container_6","container_2"])
+containers_medium(["container_8","container_7","container_5","container_4","container_3","container_1"])
+containers_light([])
+```
+
+**Ficheros modificados**
+
+- `src/agt/scheduler.asl`: añadidas creencias iniciales `containers_heavy/medium/light([])` y actualización de listas en las tres ramas de asignación
