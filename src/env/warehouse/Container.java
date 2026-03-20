@@ -1,5 +1,7 @@
 package warehouse;
 
+import java.util.*;
+
 /**
  * Representa un contenedor en el almacén
  */
@@ -10,6 +12,7 @@ public class Container {
     private final double weight;
     private final String type; // "standard", "fragile", "urgent"
     private boolean picked;
+    private boolean broken;
     private String assignedShelf;
     private int x, y; // posición actual
     
@@ -20,6 +23,7 @@ public class Container {
         this.weight = weight;
         this.type = type;
         this.picked = false;
+        this.broken = false;
         this.assignedShelf = null;
         this.x = -1;
         this.y = -1;
@@ -32,6 +36,8 @@ public class Container {
     public double getWeight() { return weight; }
     public String getType() { return type; }
     public boolean isPicked() { return picked; }
+    public boolean isBroken() { return broken; }
+    public void setBroken(boolean broken) { this.broken = broken; }
     public String getAssignedShelf() { return assignedShelf; }
     public int getX() { return x; }
     public int getY() { return y; }
@@ -65,38 +71,15 @@ public class Container {
 
     /**
      * Devuelve las celdas adyacentes ortogonales (sin diagonales) a este CONTENEDOR,
-     * usando su posición (x,y) y dimensiones (width x height) propias.
+     * tratado como 1x1 en su posición (x,y) (el tamaño visual es siempre 1x1).
      * Filtra celdas fuera del mapa, SHELF y BLOCKED.
-     * El grid y sus dimensiones se pasan desde WarehouseArtifact ya que el contenedor
-     * no tiene acceso directo al estado del entorno.
      * Usado por executeMoveToContainer.
      */
-    public java.util.List<int[]> getAdyacentes(CellType[][] grid, int gridWidth, int gridHeight) {
-        java.util.List<int[]> result = new java.util.ArrayList<>();
-        // Fila superior
-        for (int i = 0; i < width; i++) {
-            int ax = x + i, ay = y - 1;
-            if (ax >= 0 && ax < gridWidth && ay >= 0 && ay < gridHeight
-                    && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
-                result.add(new int[]{ax, ay});
-        }
-        // Fila inferior
-        for (int i = 0; i < width; i++) {
-            int ax = x + i, ay = y + height;
-            if (ax >= 0 && ax < gridWidth && ay >= 0 && ay < gridHeight
-                    && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
-                result.add(new int[]{ax, ay});
-        }
-        // Columna izquierda
-        for (int j = 0; j < height; j++) {
-            int ax = x - 1, ay = y + j;
-            if (ax >= 0 && ax < gridWidth && ay >= 0 && ay < gridHeight
-                    && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
-                result.add(new int[]{ax, ay});
-        }
-        // Columna derecha
-        for (int j = 0; j < height; j++) {
-            int ax = x + width, ay = y + j;
+    public List<int[]> getAdyacentes(CellType[][] grid, int gridWidth, int gridHeight) {
+        List<int[]> result = new ArrayList<>();
+        int[][] dirs = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+        for (int[] d : dirs) {
+            int ax = x + d[0], ay = y + d[1];
             if (ax >= 0 && ax < gridWidth && ay >= 0 && ay < gridHeight
                     && grid[ax][ay] != CellType.SHELF && grid[ax][ay] != CellType.BLOCKED)
                 result.add(new int[]{ax, ay});

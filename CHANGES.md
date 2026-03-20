@@ -833,3 +833,320 @@ El método privado `getAdyacentes(x, y, width, height)` se mantiene en `Warehous
 
 - `src/env/warehouse/Container.java`: añadido `getAdyacentes(CellType[][] grid, int gridWidth, int gridHeight)`
 - `src/env/warehouse/WarehouseArtifact.java`: `executeMoveToContainer` delega en `container.getAdyacentes`; comentario de `getAdyacentes` privado actualizado
+
+---
+
+## 23. Vigesimoprimera ronda -> Robustez del entorno: spawn aleatorio, aplastamiento de containers, cola FIFO explícita y límite de reintentos
+
+### 1. Spawn aleatorio de containers en ENTRANCE
+
+**Problema**
+
+Todos los containers se generaban en la posición fija `(1,1)`. Esto causaba que:
+- Si un container no se recogía a tiempo, el siguiente se generaba exactamente encima, solapándolos visualmente y lógicamente.
+- Los robots siempre iban al mismo punto, creando cuellos de botella artificiales.
+
+**Solución**
+
+`generateRandomContainer()` en `WarehouseArtifact.java` ahora elige una celda ENTRANCE aleatoria que no esté ocupada por otro container:
+
+```java
+List<int[]> entranceCells = new ArrayList<>();
+for (int x = 0; x < GRID_WIDTH; x++) {
+    for (int y = 0; y < GRID_HEIGHT; y++) {
+        if (grid[x][y] == CellType.ENTRANCE && !hayContenedorEn(x, y)) {
+            entranceCells.add(new int[]{x, y});
+        }
+    }
+}
+if (entranceCells.isEmpty()) {
+    container.setPosition(0, 0); // fallback si ENTRANCE está llena
+} else {
+    int[] cell = entranceCells.get(rand.nextInt(entranceCells.size()));
+    container.setPosition(cell[0], cell[1]);
+}
+```
+
+El filtro `!hayContenedorEn(x, y)` garantiza que dos containers nunca compartan la misma celda.
+
+---
+
+### 2. Footprint de containers simplificado a 1x1
+
+**Problema**
+
+Los containers tienen dimensiones lógicas (`width × height`, ej: 2×3 para pesados), pero la vista (`WarehouseView`) los renderiza siempre como **1x1**. El cálculo de adyacencia y bloqueo usaba el footprint completo (`width × height`), generando inconsistencias:
+- Un container 2×3 en `(1,0)` bloqueaba celdas `(1,0)` a `(2,2)` — fuera de la zona ENTRANCE.
+- `getAdyacentes` devolvía celdas alrededor de un rectángulo 2×3 que visualmente no existía.
+- El `bound must be positive` crash ocurría cuando un container grande no cabía en ninguna posición ENTRANCE.
+
+**Solución**
+
+Se tratan **todos los containers como 1x1** a nivel de posicionamiento y adyacencia. El `width` y `height` siguen existiendo como metadata (para clasificación por tipo de robot), pero no afectan al grid.
+
+**`hayContenedorEn`** simplificado:
+```java
+// Antes: verificaba si (x,y) caía dentro del área width×height
+if (x >= c.getX() && x < c.getX() + c.getWidth() &&
+    y >= c.getY() && y < c.getY() + c.getHeight())
+
+// Después: solo compara la posición exacta (1x1)
+if (x == c.getX() && y == c.getY())
+```
+
+También se añadió el filtro `!c.isBroken()` para ignorar containers destruidos.
+
+**`Container.getAdyacentes`** simplificado:
+```java
+// Antes: iteraba sobre los 4 lados del rectángulo width×height (bucles for)
+// Después: solo 4 celdas ortogonales alrededor de (x,y)
+int[][] dirs = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+for (int[] d : dirs) {
+    int ax = x + d[0], ay = y + d[1];
+    // filtrar fuera de mapa, SHELF, BLOCKED
+}
+```
+
+---
+
+### 3. Validación de ruta vacía en `doMoveTo`
+
+**Problema**
+
+Cuando `calcularRuta` no encontraba camino al destino, devolvía una lista vacía. `doMoveTo` no distinguía entre "lista vacía porque no hay ruta" y "lista vacía porque el robot ya está en el destino". En ambos casos saltaba el bucle `while` y **retornaba `true`** — el robot no se movía pero la acción se consideraba exitosa.
+
+Consecuencia: `move_to_container` "tenía éxito", el plan continuaba al `pickup`, y el robot recibía `too_far` porque nunca se acercó al container.
+
+**Solución**
+
+Se añadió una verificación explícita tras calcular la ruta:
+
+```java
+if (pos.isEmpty() && (robot.getX() != targetX || robot.getY() != targetY)) {
+    addError(agName, "path_blocked", "No route found to (" + targetX + "," + targetY + ")");
+    activeDestinations.remove(destKey, agName);
+    return false;
+}
+```
+
+Si la ruta está vacía Y el robot no está ya en el destino → fallo explícito con `path_blocked`.
+
+---
+
+### 4. Aplastamiento de containers por robots
+
+**Problema**
+
+Si un robot pasaba por encima de una celda donde había un container (posible por race conditions o rutas que no evitaban containers temporalmente), el container quedaba intacto y el robot se superponía visualmente, sin consecuencias.
+
+**Solución**
+
+En el bucle de movimiento paso a paso de `doMoveTo`, antes de mover el robot a la siguiente celda, se comprueba si hay un container ahí. Si lo hay, se **destruye**:
+
+```java
+// Dentro del synchronized, justo antes de robot.setPosition(...)
+List<String> crushedIds = new ArrayList<>();
+for (Container c : containers.values()) {
+    if (!c.isPicked() && !c.isBroken()
+            && c.getX() == siguientePaso[0] && c.getY() == siguientePaso[1]) {
+        crushedIds.add(c.getId());
+    }
+}
+for (String crushedId : crushedIds) {
+    containers.remove(crushedId);  // eliminado del mapa completamente
+    System.err.println("[WARNING] " + agName + " aplastó " + crushedId + " en (...)");
+    view.logMessage("💥 " + agName + " aplastó " + crushedId);
+    addPercept(ASSyntax.parseLiteral("container_broken(\"" + crushedId + "\")"));
+}
+```
+
+El container aplastado:
+- Se elimina del `containers` map (desaparece del grid y la vista)
+- Se logea por `System.err` y en la GUI con emoji 💥
+- Se añade percepto global `container_broken(CId)` para que el scheduler pueda reaccionar
+
+**Verificación en `executePickup`**: se añadió un check de `container.isBroken()` que devuelve error `container_broken` si un robot intenta recoger un container ya destruido.
+
+---
+
+### 5. Filtrado de containers en celdas adyacentes
+
+**Problema**
+
+`executeMoveToShelf` y `executeMoveToContainer` elegían la primera celda adyacente sin robot (`!hayRobotCerca`), pero no verificaban si había un container en esa celda. El robot intentaba ir a una celda con un container → `calcularRuta` la trataba como bloqueada → `doMoveTo` no encontraba ruta → fallo silencioso (antes del fix de ruta vacía) o `path_blocked`.
+
+**Solución**
+
+Añadido `!hayContenedorEn(cell[0], cell[1])` como condición adicional en ambos métodos:
+
+```java
+// executeMoveToShelf y executeMoveToContainer:
+for (int[] cell : adyacentes) {
+    if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
+        return doMoveTo(agName, cell[0], cell[1]);
+    }
+}
+```
+
+---
+
+### 6. Cola de tareas explícita con `!check_queue` en los tres robots
+
+**Problema**
+
+Los robots procesaban tareas encoladas mediante el trigger `+state(idle) : task(CId, ShelfId)`. Este mecanismo fallaba cuando:
+- El estado ya era `idle` y no cambiaba (el trigger no se re-disparaba)
+- Múltiples tareas se encolaban mientras el robot estaba ocupado — solo la primera se procesaba al volver a idle
+
+Consecuencia: tareas quedaban perdidas en la base de creencias sin procesarse.
+
+**Solución**
+
+Se reemplazó el trigger `+state(idle) : task(CId, ShelfId)` por un plan explícito `!check_queue` que se invoca al final de cada tarea (tanto en éxito como en fallo):
+
+```jason
+// Al final de +!execute_task (éxito):
+-+carrying(none);
+!check_queue.
+
+// Al final de -!execute_task (fallo):
+-+carrying(none);
+release_task(CId);
+.send(scheduler, tell, task_failed(CId));
+!check_queue.
+
+// El plan check_queue:
++!check_queue : task(CId, ShelfId) <-
+    .print("✅ Procesando tarea encolada: ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
+
++!check_queue : not task(_, _) <-
+    -+state(idle).
+```
+
+**Flujo**: tarea termina → `!check_queue` → ¿hay más `task` beliefs? → sí: ejecutar siguiente / no: poner `idle`.
+
+**Nota sobre orden LIFO**: Jason matchea `task(CId, ShelfId)` con la creencia más reciente (LIFO). Esto significa que tareas antiguas pueden retrasarse si llegan nuevas continuamente. Se aceptó como comportamiento conocido.
+
+El trigger `+state(idle) : not task(_, _)` se mantiene para notificar al supervisor cuando el robot queda sin tareas pendientes.
+
+**Cambio idéntico aplicado a los tres robots**: `robot_light.asl`, `robot_medium.asl`, `robot_heavy.asl`.
+
+---
+
+### 7. Límite de reintentos en asignación de estanterías (scheduler)
+
+**Problema**
+
+Cuando todas las estanterías estaban llenas, el failure handler `-!assign_shelf` reintentaba indefinidamente cada 5 segundos, generando un loop infinito de logs:
+```
+[scheduler] ⚠️ [SCHEDULER] Estanterías llenas para container_11. Reintentando en 5s...
+[scheduler] ⚠️ [SCHEDULER] Estanterías llenas para container_11. Reintentando en 5s...
+(infinito)
+```
+
+El scheduler acumulaba intenciones de reintento que nunca se resolvían, consumiendo recursos.
+
+**Solución**
+
+Se implementó un sistema de reintentos con contador `shelf_retries(CId, N)` y máximo de 3 intentos:
+
+```jason
+// Primer fallo: crear contador
+-!assign_shelf(CId) : true <-
+    +shelf_retries(CId, 1);
+    .wait(5000);
+    !assign_shelf(CId).
+
+// Fallos siguientes (N < 3): incrementar
+-!assign_shelf(CId) : shelf_retries(CId, N) <-
+    N1 = N + 1;
+    -+shelf_retries(CId, N1);
+    .wait(5000);
+    !assign_shelf(CId).
+
+// Límite alcanzado (N >= 3): rechazar container
+-!assign_shelf(CId) : shelf_retries(CId, N) & N >= 3 <-
+    -shelf_retries(CId, _);
+    -pending_container(CId, _);
+    .send(supervisor, tell, container_error(CId, no_shelf_space)).
+```
+
+Tras 3 intentos (15s total), el container se rechaza y se notifica al supervisor. El container queda físicamente donde fue soltado, pero el scheduler deja de intentar asignarle estantería.
+
+---
+
+### 8. Manejo de containers aplastados en el scheduler
+
+**Problema**
+
+Cuando un container era aplastado por un robot (eliminado del `containers` map en Java):
+
+1. Si el container tenía una tarea asignada a otro robot, ese robot fallaba al intentar `pickup` → enviaba `task_failed(CId)` al scheduler
+2. El scheduler ejecutaba `get_container_info(CId)` → retornaba `false` (container no existe) → plan fallaba silenciosamente
+3. Creencias huérfanas (`container_info`, `assigned`, `container_category`, etc.) quedaban en la base de creencias del scheduler sin limpiarse
+
+**Solución**
+
+Se añadieron tres mecanismos en `scheduler.asl`:
+
+**a) Detección directa via `container_broken`:**
+```jason
++task_failed(CId)[source(Robot)] : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado. Limpiando creencias...");
+    -assigned(Robot, CId, _);
+    -task_failed(CId)[source(Robot)];
+    -pending_container(CId, _);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    .abolish(container_category(CId, _));
+    .abolish(container_type(CId, _));
+    .abolish(container_weight_category(CId, _));
+    .abolish(container_size_category(CId, _));
+    .abolish(shelf_retries(CId, _)).
+```
+
+Este plan tiene prioridad sobre el `+task_failed` genérico porque el contexto `container_broken(CId)` es más específico que `true`. Cuando el percepto `container_broken` existe, limpia todas las creencias del container sin intentar reasignar.
+
+**b) Fallback cuando `get_container_info` falla:**
+```jason
+-!task_failed(CId) : true <-
+    .print("💥 [SCHEDULER] ", CId, " ya no existe. Limpiando creencias...");
+    // misma limpieza que arriba
+```
+
+Si el percepto `container_broken` no llegó a tiempo y el plan genérico `+task_failed` se ejecutó, `get_container_info(CId)` fallará porque el container ya no existe en Java. Este failure handler captura ese caso y hace la misma limpieza.
+
+---
+
+### 9. Campo `broken` en `Container.java`
+
+Se añadió un campo booleano `broken` a la clase `Container`:
+
+```java
+private boolean broken;
+
+// Constructor: this.broken = false;
+public boolean isBroken() { return broken; }
+public void setBroken(boolean broken) { this.broken = broken; }
+```
+
+Usado por `hayContenedorEn` para ignorar containers destruidos (`!c.isBroken()`) y por `executePickup` para rechazar intentos de recoger containers aplastados.
+
+**Nota**: aunque `containers.remove(crushedId)` elimina el container del mapa (sección 4), el campo `broken` existe como safety net para el caso de que alguna referencia al container persista temporalmente en otra estructura.
+
+---
+
+### Ficheros modificados
+
+| Fichero | Cambios |
+|---|---|
+| `src/env/warehouse/WarehouseArtifact.java` | Spawn aleatorio en ENTRANCE, validación de ruta vacía en `doMoveTo`, aplastamiento de containers, filtrado de containers en adyacentes, `hayContenedorEn` simplificado a 1x1, check `isBroken` en `executePickup` |
+| `src/env/warehouse/Container.java` | Campo `broken` (getter/setter), `getAdyacentes` simplificado a 4 vecinos ortogonales de 1x1 |
+| `src/agt/robot_light.asl` | `+state(idle) : task(...)` reemplazado por `!check_queue`, invocado en éxito y fallo de tarea |
+| `src/agt/robot_medium.asl` | Ídem |
+| `src/agt/robot_heavy.asl` | Ídem |
+| `src/agt/scheduler.asl` | Límite 3 reintentos en `assign_shelf`, manejo de `container_broken` en `task_failed`, fallback `-!task_failed` para containers eliminados |

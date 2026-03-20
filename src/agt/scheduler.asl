@@ -55,8 +55,23 @@ containers_light([]).
 +!assign_shelf(CId) : true <-
     get_free_shelf(CId).
 
+// Sin espacio: máximo 3 reintentos antes de rechazar
+-!assign_shelf(CId) : shelf_retries(CId, N) & N >= 3 <-
+    .print("❌ [SCHEDULER] Container ", CId, " rechazado: sin espacio tras ", N, " intentos");
+    -shelf_retries(CId, _);
+    -pending_container(CId, _);
+    .send(supervisor, tell, container_error(CId, no_shelf_space)).
+
+-!assign_shelf(CId) : shelf_retries(CId, N) <-
+    N1 = N + 1;
+    .print("⚠️ [SCHEDULER] Estanterías llenas para ", CId, ". Reintento ", N1, "/3...");
+    -+shelf_retries(CId, N1);
+    .wait(5000);
+    !assign_shelf(CId).
+
 -!assign_shelf(CId) : true <-
-    .print("⚠️ [SCHEDULER] Estanterías llenas para ", CId, ". Reintentando en 5s...");
+    .print("⚠️ [SCHEDULER] Estanterías llenas para ", CId, ". Reintento 1/3...");
+    +shelf_retries(CId, 1);
     .wait(5000);
     !assign_shelf(CId).
 
@@ -122,12 +137,36 @@ containers_light([]).
     +total_tasks_assigned(T).
 
 // 4. Manejo de fallos reportados por robots
++task_failed(CId)[source(Robot)] : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado. Limpiando creencias...");
+    -assigned(Robot, CId, _);
+    -task_failed(CId)[source(Robot)];
+    -pending_container(CId, _);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    .abolish(container_category(CId, _));
+    .abolish(container_type(CId, _));
+    .abolish(container_weight_category(CId, _));
+    .abolish(container_size_category(CId, _));
+    .abolish(shelf_retries(CId, _)).
+
 +task_failed(CId)[source(Robot)] : true <-
     .print("⚠️ ", Robot, " reportó fallo con ", CId, ". Reasignando...");
     -assigned(Robot, CId, _);
     -task_failed(CId)[source(Robot)];
-    // Volvemos a pedir info para reiniciar el ciclo de asignación
+    // Borrar percepto anterior para que el nuevo dispare +container_info
+    .abolish(container_info(CId, _, _, _, _, _, _));
     get_container_info(CId).
+
+// Fallback: si get_container_info falla (container ya no existe), limpiar
+-!task_failed(CId) : true <-
+    .print("💥 [SCHEDULER] ", CId, " ya no existe. Limpiando creencias...");
+    -pending_container(CId, _);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    .abolish(container_category(CId, _));
+    .abolish(container_type(CId, _));
+    .abolish(container_weight_category(CId, _));
+    .abolish(container_size_category(CId, _));
+    .abolish(shelf_retries(CId, _)).
 
 // 5. Trazabilidad: Almacenamiento confirmado
 +container_stored(CId, ShelfId)[source(Robot)] : true <-

@@ -290,8 +290,23 @@ public class WarehouseArtifact extends Environment {
 
         Container container = new Container(id, width, height, weight, type);
 
-        // Posición inicial en zona de entrada
-        container.setPosition(1, 1);
+        // Posición inicial aleatoria en zona de entrada (ENTRANCE)
+        // Solo celdas ENTRANCE sin otro container ya colocado
+        List<int[]> entranceCells = new ArrayList<>();
+        for (int x = 0; x < GRID_WIDTH; x++) {
+            for (int y = 0; y < GRID_HEIGHT; y++) {
+                if (grid[x][y] == CellType.ENTRANCE && !hayContenedorEn(x, y)) {
+                    entranceCells.add(new int[]{x, y});
+                }
+            }
+        }
+        if (entranceCells.isEmpty()) {
+            // ENTRANCE llena, colocar en (0,0) como fallback
+            container.setPosition(0, 0);
+        } else {
+            int[] cell = entranceCells.get(rand.nextInt(entranceCells.size()));
+            container.setPosition(cell[0], cell[1]);
+        }
 
         return container;
     }
@@ -363,7 +378,7 @@ public class WarehouseArtifact extends Environment {
             }
             List<int[]> adyacentes = getAdyacentes(shelf.getX(), shelf.getY(), shelf.getWidth(), shelf.getHeight());
             for (int[] cell : adyacentes) {
-                if (!hayRobotCerca(cell[0], cell[1])) {
+                if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
                     return doMoveTo(agName, cell[0], cell[1]);
                 }
             }
@@ -385,7 +400,7 @@ public class WarehouseArtifact extends Environment {
             }
             List<int[]> adyacentes = container.getAdyacentes(grid, GRID_WIDTH, GRID_HEIGHT);
             for (int[] cell : adyacentes) {
-                if (!hayRobotCerca(cell[0], cell[1])) {
+                if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
                     return doMoveTo(agName, cell[0], cell[1]);
                 }
             }
@@ -478,6 +493,15 @@ public class WarehouseArtifact extends Environment {
             boolean avoidRobots = false;
             List<int[]> pos = calcularRuta(robot.getX(), robot.getY(), targetX, targetY, avoidRobots);
 
+            // Si no hay ruta y el robot no está ya en el destino, fallo
+            if (pos.isEmpty() && (robot.getX() != targetX || robot.getY() != targetY)) {
+                addError(agName, "path_blocked", "No route found to (" + targetX + "," + targetY + ")");
+                if (activeDestinations != null) {
+                    activeDestinations.remove(destKey, agName);
+                }
+                return false;
+            }
+
             // 2. MOVIMIENTO PASO A PASO (Reactivo)
             while (!pos.isEmpty()) {
                 // Miramos cuál es nuestro próximo paso inmediato
@@ -488,6 +512,24 @@ public class WarehouseArtifact extends Environment {
                 while (!moved && cont < 3) {
                     synchronized (this) {
                         if (!hayRobotCerca(siguientePaso[0], siguientePaso[1])) {
+                            // Comprobar si hay un container en la celda destino y destruirlo
+                            List<String> crushedIds = new ArrayList<>();
+                            for (Container c : containers.values()) {
+                                if (!c.isPicked() && !c.isBroken()
+                                        && c.getX() == siguientePaso[0] && c.getY() == siguientePaso[1]) {
+                                    crushedIds.add(c.getId());
+                                }
+                            }
+                            for (String crushedId : crushedIds) {
+                                containers.remove(crushedId);
+                                System.err.println("[WARNING] " + agName + " aplastó " + crushedId
+                                        + " en (" + siguientePaso[0] + "," + siguientePaso[1] + ")");
+                                if (view != null) {
+                                    view.logMessage("💥 " + agName + " aplastó " + crushedId);
+                                }
+                                addPercept(ASSyntax.parseLiteral(
+                                        "container_broken(\"" + crushedId + "\")"));
+                            }
                             robot.setPosition(siguientePaso[0], siguientePaso[1]);
                             moved = true;
                         }
@@ -624,10 +666,9 @@ public class WarehouseArtifact extends Environment {
 
     private boolean hayContenedorEn(int x, int y) {
         for (Container c : containers.values()) {
-            if (!c.isPicked()) {
-                // Verificar si (x,y) cae dentro del área del contenedor
-                if (x >= c.getX() && x < c.getX() + c.getWidth() &&
-                        y >= c.getY() && y < c.getY() + c.getHeight()) {
+            if (!c.isPicked() && !c.isBroken()) {
+                // Container tratado como 1x1 (su tamaño visual)
+                if (x == c.getX() && y == c.getY()) {
                     return true;
                 }
             }
@@ -682,7 +723,12 @@ public class WarehouseArtifact extends Environment {
             Container container = containers.get(containerId);
 
             if (robot == null || container == null) {
-                addError(agName, "invalid_pickup", "Robot or container not found"); // esto es un error de programación, no operacional
+                addError(agName, "invalid_pickup", "Robot or container not found");
+                return false;
+            }
+
+            if (container.isBroken()) {
+                addError(agName, "container_broken", "Container " + containerId + " is broken");
                 return false;
             }
 

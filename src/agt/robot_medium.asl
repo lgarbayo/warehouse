@@ -83,13 +83,7 @@ carrying(none).      // Contenedor que está cargando
 +task(CId, ShelfId) : not state(idle) <-
     .print("⚠️ Ocupado, encolando tarea: ", CId).
 
-+state(idle) : task(CId, ShelfId) <-
-    .print("✅ Procesando tarea encolada: ", CId, " a ", ShelfId);
-    -task(CId, ShelfId)[source(scheduler)]; // Consumir creencia inmediatamente
-    accept_task(CId);
-    -+state(working);
-    -+carrying(CId);
-    !execute_task(CId, ShelfId).
+// La cola se procesa via !check_queue al final de cada tarea
 
 // Ejecutar la tarea completa
 +!execute_task(CId, ShelfId) : true <-
@@ -117,10 +111,10 @@ carrying(none).      // Contenedor que está cargando
     drop_at(ShelfId);
     .wait(600);
     
-    // Fase 5: Completar y volver a idle
+    // Fase 5: Completar y verificar cola
     .print("✨ Tarea completada: ", CId);
-    -+state(idle);
-    -+carrying(none).
+    -+carrying(none);
+    !check_queue.
 
 
 /* ============================================================================
@@ -132,10 +126,22 @@ carrying(none).      // Contenedor que está cargando
 -!execute_task(CId, ShelfId) : true <-
     .print("⚠️ Fallo en execute_task para ", CId, ". Limpiando estado...");
     .wait(1500); // Pausa de seguridad
-    -+state(idle);
     -+carrying(none);
     release_task(CId);
-    .send(scheduler, tell, task_failed(CId)).
+    .send(scheduler, tell, task_failed(CId));
+    !check_queue.
+
+// Verificar si hay más tareas encoladas antes de volver a idle
++!check_queue : task(CId, ShelfId) <-
+    .print("✅ Procesando tarea encolada: ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
+
++!check_queue : not task(_, _) <-
+    -+state(idle).
 
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);
