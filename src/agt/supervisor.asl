@@ -88,10 +88,12 @@ report_interval(30000).
     !print_robot_status;
     .print("========================================").
 
-// Recorre los tipos de error conocidos con recursión
+// Imprime errores de contenedor y de navegación agrupados por tipo
 +!print_errors_by_type : true <-
-    .findall(T, errors_by_type(T, _), Types);
-    !print_error_list(Types).
+    .findall(T, errors_by_type(T, _), ContainerTypes);
+    !print_error_list(ContainerTypes);
+    .findall(T, navigation_error_occurred(_, T), NavTypes);
+    !print_nav_error_list(NavTypes, []).
 
 +!print_error_list([]) : true <- true.
 
@@ -102,6 +104,17 @@ report_interval(30000).
 
 +!print_error_list([_|Rest]) : true <-
     !print_error_list(Rest).
+
+// Navegación: itera la lista deduplicando con Seen
++!print_nav_error_list([], _) : true <- true.
+
++!print_nav_error_list([T|Rest], Seen) : .member(T, Seen) <-
+    !print_nav_error_list(Rest, Seen).
+
++!print_nav_error_list([T|Rest], Seen) : true <-
+    .count(navigation_error_occurred(_, T), N);
+    .print("  ", T, " (nav): ", N);
+    !print_nav_error_list(Rest, [T|Seen]).
 
 /* ============================================================================
  * MONITORIZACIÓN - Estado de los robots

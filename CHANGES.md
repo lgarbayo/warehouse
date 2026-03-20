@@ -615,3 +615,49 @@ Los planes `!navigate_to_shelf` y `!try_move_to_shelf` se eliminaron de los tres
 - `src/agt/robot_light.asl`: Fase 1 y Fase 3 simplificadas, eliminados `!navigate_to_shelf` y `!try_move_to_shelf`
 - `src/agt/robot_medium.asl`: ídem
 - `src/agt/robot_heavy.asl`: ídem
+
+---
+
+## 18. Decimosexta ronda -> Fix: errores de navegación visibles en el reporte del supervisor
+
+**Problema**
+
+El reporte periódico mostraba `Errores por tipo:` pero nunca imprimía nada debajo, incluso cuando habían ocurrido errores de navegación. Dos causas:
+
+1. `!print_errors_by_type` iteraba sobre `errors_by_type(T, _)` — lista fija de tipos de error de contenedor definida en las creencias iniciales. Los errores de navegación se almacenan en `navigation_error_occurred(Robot, ErrorType)`, una creencia distinta que nunca se consultaba en el reporte.
+
+2. Si no había errores de contenedor, la sección quedaba vacía aunque hubiera errores de navegación acumulados en el Mind Inspector.
+
+**Solución**
+
+Se reescribió `!print_errors_by_type` para cubrir ambos tipos:
+
+- **Errores de contenedor:** igual que antes, itera sobre `errors_by_type(T, _)` y cuenta `error_occurred(_, T)`
+- **Errores de navegación:** usa `.findall` sobre `navigation_error_occurred(_, T)` para obtener todos los tipos que han ocurrido, luego itera deduplicando con una lista `Seen` acumulada:
+
+```jason
++!print_nav_error_list([], _) : true <- true.
+
++!print_nav_error_list([T|Rest], Seen) : .member(T, Seen) <-
+    !print_nav_error_list(Rest, Seen).
+
++!print_nav_error_list([T|Rest], Seen) : true <-
+    .count(navigation_error_occurred(_, T), N);
+    .print("  ", T, " (nav): ", N);
+    !print_nav_error_list(Rest, [T|Seen]).
+```
+
+La deduplicación es necesaria porque `.findall` devuelve una entrada por cada instancia — si `path_blocked` ocurrió 3 veces, aparece 3 veces en la lista. El patrón `Seen` acumula los tipos ya impresos y los salta.
+
+**Resultado en el reporte**
+
+```
+Errores por tipo:
+  container_too_heavy: 1
+  path_blocked (nav): 3
+  destination_conflict (nav): 1
+```
+
+**Ficheros modificados**
+
+- `src/agt/supervisor.asl`: `!print_errors_by_type` extendido con sección de navegación, añadidos `!print_nav_error_list` y sus dos variantes
