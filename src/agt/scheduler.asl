@@ -38,13 +38,24 @@ containers_heavy([]).
 containers_medium([]).
 containers_light([]).
 
-// 1. Reaccionar a nuevo contenedor
+// 1. Reaccionar a nuevo contenedor (trigger → goal para capturar fallos)
 +new_container(CId) : true <-
     .print("Nuevo contenedor: ", CId);
+    !process_new_container(CId).
+
++!process_new_container(CId) : true <-
     get_container_info(CId).
 
-// 2. Recibir info, clasificar y buscar estantería para contenedor
-+container_info(CId, W, H, Weight, Type, X, Y) : true <-
+// Fallback: container ya no existe (aplastado antes de ser procesado)
+-!process_new_container(CId) : true <-
+    .print("💥 [SCHEDULER] ", CId, " ya no existe al intentar procesar. Ignorando.").
+
+// 2. Recibir info: si fue aplastado, ignorar
++container_info(CId, W, H, Weight, Type, X, Y) : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado antes de clasificar. Ignorando.").
+
+// Recibir info, clasificar y buscar estantería para contenedor
++container_info(CId, W, H, Weight, Type, X, Y) : not container_broken(CId) <-
     .print("Info: ", CId, " - ", Weight, "kg. Solicitando estantería...");
     +pending_container(CId, Weight);
     .count(container_info(_, _, _, _, _, _, _), N);
@@ -52,8 +63,30 @@ containers_light([]).
     +total_containers_received(N);
     !assign_shelf(CId).
 
+// Si el contenedor fue aplastado mientras esperaba, abortar
++!assign_shelf(CId) : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado antes de asignar estantería. Abortando.");
+    -pending_container(CId, _);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    .abolish(container_category(CId, _));
+    .abolish(container_type(CId, _));
+    .abolish(container_weight_category(CId, _));
+    .abolish(container_size_category(CId, _));
+    .abolish(shelf_retries(CId, _)).
+
 +!assign_shelf(CId) : true <-
     get_free_shelf(CId).
+
+// Sin espacio: si fue aplastado durante reintentos, abortar limpiamente
+-!assign_shelf(CId) : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado durante reintentos de estantería. Abortando.");
+    -pending_container(CId, _);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    .abolish(container_category(CId, _));
+    .abolish(container_type(CId, _));
+    .abolish(container_weight_category(CId, _));
+    .abolish(container_size_category(CId, _));
+    .abolish(shelf_retries(CId, _)).
 
 // Sin espacio: máximo 3 reintentos antes de rechazar
 -!assign_shelf(CId) : shelf_retries(CId, N) & N >= 3 <-
@@ -75,7 +108,19 @@ containers_light([]).
     .wait(5000);
     !assign_shelf(CId).
 
-// 3. Recibir estantería libre y asignar la tarea (estantería + contenedor) al robot
+// 3. Recibir estantería libre: si el contenedor fue aplastado, descartar
++free_shelf(CId, ShelfId) : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado antes de asignar robot. Liberando estantería.");
+    -free_shelf(CId, ShelfId);
+    -pending_container(CId, _);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    .abolish(container_category(CId, _));
+    .abolish(container_type(CId, _));
+    .abolish(container_weight_category(CId, _));
+    .abolish(container_size_category(CId, _));
+    .abolish(shelf_retries(CId, _)).
+
+// Recibir estantería libre y asignar la tarea (estantería + contenedor) al robot
 +free_shelf(CId, ShelfId) : container_info(CId, W, H, Weight, Type, _, _) <-
     .print("Estantería: ", ShelfId, " asignada a ", CId);
     

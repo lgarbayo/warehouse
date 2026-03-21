@@ -1149,4 +1149,250 @@ Usado por `hayContenedorEn` para ignorar containers destruidos (`!c.isBroken()`)
 | `src/agt/robot_light.asl` | `+state(idle) : task(...)` reemplazado por `!check_queue`, invocado en éxito y fallo de tarea |
 | `src/agt/robot_medium.asl` | Ídem |
 | `src/agt/robot_heavy.asl` | Ídem |
-| `src/agt/scheduler.asl` | Límite 3 reintentos en `assign_shelf`, manejo de `container_broken` en `task_failed`, fallback `-!task_failed` para containers eliminados |
+| `src/agt/scheduler.asl` | Límite 3 reintentos en `assign_shelf`, manejo de `container_broken` en `task_failed`, fallback `-!task_failed` para containers eliminados, fallback `-!new_container` para containers aplastados antes de ser procesados |
+
+---
+
+### 10. Fallback para containers aplastados antes de ser procesados por el scheduler
+
+**Problema**
+
+Si un container era aplastado (eliminado del `containers` map en Java) entre el momento de su generación y el momento en que el scheduler procesaba el evento `+new_container`, la acción `get_container_info(CId)` retornaba `false`. Sin failure handler, Jason imprimía el warning:
+
+```
+Could not finish intention: intention 33:
+    +new_container("container_4") <- ... get_container_info(CId)
+    Trigger: +new_container("container_4")[error(action_failed)]
+```
+
+La intención moría silenciosamente sin limpieza.
+
+**Solución**
+
+Se añadió un failure handler para `+new_container`:
+
+```jason
+-!new_container(CId) : true <-
+    .print("💥 [SCHEDULER] ", CId, " ya no existe al intentar procesar. Ignorando.").
+```
+
+Si `get_container_info` falla, el scheduler logea el evento y continúa operando normalmente. No hay creencias que limpiar porque el container nunca llegó a tener `container_info` ni `assigned`.
+
+**Fichero modificado**
+
+- `src/agt/scheduler.asl`: añadido `-!new_container(CId)` tras el plan `+new_container`
+
+---
+
+## 24. Vigesimosegunda ronda -> Guards `container_broken` en todo el pipeline del scheduler
+
+**Problema**
+
+Existían **race conditions** en el pipeline de procesamiento de contenedores. Un container podía ser aplastado en cualquier momento durante su procesamiento, pero el scheduler solo comprobaba `container_broken` en dos puntos: `+task_failed` y `-!new_container`. Los puntos intermedios no tenían protección:
+
+1. **`+container_info`**: si el container era aplastado entre `get_container_info` y la llegada del percepto, el scheduler seguía clasificándolo y lanzando `!assign_shelf` para un container que ya no existía.
+2. **`+!assign_shelf`**: si el container era aplastado antes de llamar a `get_free_shelf`, se buscaba estantería inútilmente.
+3. **`-!assign_shelf` (reintentos)**: si el container era aplastado durante el `.wait(5000)` entre reintentos, el scheduler seguía reintentando hasta agotar los 3 intentos — produciendo mensajes como `"Container container_10 rechazado: sin espacio tras 3 intentos"` para containers que ya no existían.
+4. **`+free_shelf`**: si el container era aplastado entre `get_free_shelf` y la llegada del resultado, se asignaba un robot a un container destruido.
+
+**Ejemplo del log (antes del fix)**
+
+```
+[scheduler] ⚠️ [SCHEDULER] Estanterías llenas para container_10. Reintento 2/3...
+    ← container_10 fue aplastado durante este .wait(5000)
+[scheduler] ❌ [SCHEDULER] Container container_10 rechazado: sin espacio tras 3 intentos
+    ← error innecesario: el container ya no existía
+```
+
+**Solución**
+
+Se añadieron **4 guards `container_broken(CId)`** en los puntos clave del pipeline. En Jason, los planes con contexto más específico se evalúan primero, así que al colocar estos planes antes de los genéricos, el scheduler detecta containers aplastados inmediatamente:
+
+```jason
+// Guard 1: antes de clasificar
++container_info(CId, W, H, Weight, Type, X, Y) : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado antes de clasificar. Ignorando.").
+
+// Guard 2: antes de buscar estantería
++!assign_shelf(CId) : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado antes de asignar estantería. Abortando.");
+    // limpieza completa de creencias...
+
+// Guard 3: durante reintentos de estantería
+-!assign_shelf(CId) : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado durante reintentos de estantería. Abortando.");
+    // limpieza completa de creencias...
+
+// Guard 4: antes de asignar robot
++free_shelf(CId, ShelfId) : container_broken(CId) <-
+    .print("💥 [SCHEDULER] ", CId, " fue aplastado antes de asignar robot. Liberando estantería.");
+    // limpieza completa de creencias...
+```
+
+Cada guard ejecuta una limpieza completa: `-pending_container(CId, _)`, `.abolish(container_info(...))`, `.abolish(container_category(...))`, `.abolish(container_type(...))`, `.abolish(container_weight_category(...))`, `.abolish(container_size_category(...))`, `.abolish(shelf_retries(...))`.
+
+Adicionalmente, el plan `+container_info` genérico cambió su contexto de `true` a `not container_broken(CId)` para ser mutuamente excluyente con el guard.
+
+**Resultado verificado en logs**
+
+```
+[WARNING] robot_light aplastó container_38 en (1,1)
+[scheduler] 💥 [SCHEDULER] container_38 fue aplastado. Limpiando creencias...
+[scheduler] 💥 [SCHEDULER] container_38 fue aplastado antes de clasificar. Ignorando.
+```
+
+El scheduler detecta el aplastamiento inmediatamente y no genera errores espurios.
+
+**Fichero modificado**
+
+- `src/agt/scheduler.asl`: añadidos 4 planes con guard `container_broken(CId)` antes de `+container_info`, `+!assign_shelf`, `-!assign_shelf` y `+free_shelf`
+
+---
+
+## 25. Vigesimotercera ronda -> Fix: `-!new_container` → goal intermedio `!process_new_container`
+
+**Problema**
+
+El failure handler `-!new_container(CId)` añadido en la sección 23.10 **nunca se activaba**. Cuando un container era aplastado antes de que el scheduler procesara `+new_container`, `get_container_info(CId)` fallaba, pero en vez de activar el handler, Jason mostraba:
+
+```
+Could not finish intention: intention 209:
+    +new_container("container_20") <- ... get_container_info(CId)
+    Trigger: +new_container("container_20")[error(action_failed)]
+```
+
+**Causa raíz**
+
+En Jason, `+new_container(CId)` es un **trigger de creencia** (belief change trigger), NO un goal. Los failure handlers `-!X` solo capturan fallos de **goals** (invocados con `!X`). Cuando una acción falla dentro de un plan disparado por `+trigger`, Jason no busca `-!trigger` — simplemente mata la intención con `Could not finish intention`.
+
+**Solución**
+
+Se introdujo un goal intermedio `!process_new_container(CId)`:
+
+```jason
+// Trigger de creencia → delega a un goal
++new_container(CId) : true <-
+    .print("Nuevo contenedor: ", CId);
+    !process_new_container(CId).
+
+// Goal que ejecuta la acción que puede fallar
++!process_new_container(CId) : true <-
+    get_container_info(CId).
+
+// Ahora SÍ captura el fallo (porque es un goal, no un trigger)
+-!process_new_container(CId) : true <-
+    .print("💥 [SCHEDULER] ", CId, " ya no existe al intentar procesar. Ignorando.").
+```
+
+Cuando `get_container_info` falla, falla el goal `!process_new_container`, y el handler `-!process_new_container` lo captura limpiamente.
+
+**Diferencia clave**
+
+| | Antes | Después |
+|---|---|---|
+| `get_container_info` falla en... | plan de trigger `+new_container` | plan de goal `+!process_new_container` |
+| Jason busca handler... | `-!new_container` → **no aplica** (no es un goal) | `-!process_new_container` → **aplica** |
+| Resultado | `Could not finish intention` | `"container_X ya no existe. Ignorando."` |
+
+**Fichero modificado**
+
+- `src/agt/scheduler.asl`: `+new_container` delega a `!process_new_container`; handler cambiado de `-!new_container` a `-!process_new_container`
+
+---
+
+## 26. Vigesimocuarta ronda -> Navegación resiliente: probar todas las celdas adyacentes
+
+**Problema**
+
+`executeMoveToContainer` y `executeMoveToShelf` en `WarehouseArtifact.java` seleccionaban la primera celda adyacente libre (sin robot ni container) y ejecutaban `doMoveTo`. Si `doMoveTo` fallaba (sin ruta BFS hasta esa celda), **no probaban las demás celdas adyacentes** — devolvían `false` inmediatamente:
+
+```java
+// Antes: sale al primer intento
+for (int[] cell : adyacentes) {
+    if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
+        return doMoveTo(agName, cell[0], cell[1]);  // ← si falla, no intenta más
+    }
+}
+```
+
+Esto causaba errores como `path_blocked - No route found to (0,0)` cuando la primera celda adyacente no era alcanzable, aunque otras celdas adyacentes sí lo fueran.
+
+**Ejemplo del log (antes del fix)**
+
+```
+ERROR [robot_heavy]: path_blocked - No route found to (0,0)
+```
+
+El container estaba en `(0,1)`, la celda `(0,0)` era la primera adyacente probada pero no tenía ruta BFS. Las celdas `(1,1)` y `(0,2)` eran alcanzables pero nunca se intentaron.
+
+**Solución**
+
+Se modificaron ambos métodos para iterar sobre **todas** las celdas adyacentes hasta encontrar una con ruta válida:
+
+```java
+for (int[] cell : adyacentes) {
+    if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
+        // Limpiar errores de path_blocked de intentos anteriores
+        removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
+        if (doMoveTo(agName, cell[0], cell[1])) {
+            return true;  // Ruta encontrada, éxito
+        }
+        // doMoveTo falló, probar siguiente celda adyacente
+    }
+}
+// Limpiar errores intermedios antes de añadir el definitivo
+removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
+addError(agName, "path_blocked", "No free adjacent cell for container/shelf " + id);
+return false;
+```
+
+**Limpieza de errores intermedios**: cuando `doMoveTo` falla, añade un percepto `error(path_blocked, ...)`. Si luego otra celda adyacente tiene éxito, ese error espurio llegaría al robot y corrompería su estado. Se usa `removePerceptsByUnif` para limpiar estos errores intermedios antes de cada nuevo intento y antes del error definitivo.
+
+**Resultado**: el robot solo recibe `path_blocked` si **ninguna** celda adyacente es alcanzable, no por la primera que falle.
+
+**Fichero modificado**
+
+- `src/env/warehouse/WarehouseArtifact.java`: `executeMoveToShelf` y `executeMoveToContainer` iteran sobre todas las celdas adyacentes con limpieza de errores intermedios
+
+---
+
+## 27. Limitación conocida: saturación del almacén
+
+**Comportamiento observado**
+
+Cuando las estanterías heavy (shelf_8, shelf_9: maxWeight=200kg, maxVolume=20) se llenan (~195kg cada una), ningún container pesado nuevo puede almacenarse. `findBestShelf` devuelve `null` porque:
+
+- Estanterías preferidas (shelf_8, shelf_9): peso lleno
+- Fallback (shelf_1-7): maxWeight de 50-100kg, insuficiente para containers de 60-90kg
+
+Los containers pesados se rechazan tras 3 reintentos (`no_shelf_space`) y se acumulan físicamente en la zona ENTRANCE. Esto provoca un **deadlock por congestión**:
+
+1. Containers pesados no almacenables → se quedan en ENTRANCE
+2. ENTRANCE se llena de containers → bloquean celdas adyacentes de containers nuevos
+3. Robots no pueden alcanzar containers nuevos → `path_blocked - No free adjacent cell`
+4. Todos los robots quedan idle → el almacén se detiene completamente
+
+**Capacidades de las estanterías**
+
+| Estanterías | IDs | maxWeight | maxVolume | Para quién |
+|---|---|---|---|---|
+| Fila superior (y=2) | shelf_1 a shelf_4 | 50 kg | 8 | Light (≤10kg) |
+| Fila media (y=6) | shelf_5 a shelf_7 | 100 kg | 12 | Medium (≤30kg) |
+| Fila inferior (y=10) | shelf_8, shelf_9 | 200 kg | 20 | Heavy (>30kg) |
+
+**No es un bug** — es una limitación de capacidad del almacén. En un sistema real se necesitaría:
+- Más estanterías heavy o con mayor capacidad
+- Un mecanismo de "salida" de containers (despacho/envío)
+- Parar la generación de containers cuando no hay espacio
+- Permitir que containers medianos-pesados (30-50kg) vayan a estanterías medium
+
+Se deja como decisión de diseño para futuras iteraciones.
+
+---
+
+### Ficheros modificados en esta sesión (secciones 24-27)
+
+| Fichero | Cambios |
+|---|---|
+| `src/agt/scheduler.asl` | 4 guards `container_broken` en pipeline; `+new_container` delega a goal `!process_new_container`; handler cambiado a `-!process_new_container` |
+| `src/env/warehouse/WarehouseArtifact.java` | `executeMoveToShelf` y `executeMoveToContainer` prueban todas las celdas adyacentes con limpieza de errores intermedios |

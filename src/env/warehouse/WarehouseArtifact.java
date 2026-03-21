@@ -379,9 +379,16 @@ public class WarehouseArtifact extends Environment {
             List<int[]> adyacentes = getAdyacentes(shelf.getX(), shelf.getY(), shelf.getWidth(), shelf.getHeight());
             for (int[] cell : adyacentes) {
                 if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
-                    return doMoveTo(agName, cell[0], cell[1]);
+                    // Limpiar errores de path_blocked de intentos anteriores
+                    removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
+                    if (doMoveTo(agName, cell[0], cell[1])) {
+                        return true;
+                    }
+                    // doMoveTo falló (sin ruta BFS), probar siguiente celda adyacente
                 }
             }
+            // Limpiar errores intermedios antes de añadir el definitivo
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
             addError(agName, "path_blocked", "No free adjacent cell for shelf " + shelfId);
             return false;
         } catch (Exception e) {
@@ -401,9 +408,16 @@ public class WarehouseArtifact extends Environment {
             List<int[]> adyacentes = container.getAdyacentes(grid, GRID_WIDTH, GRID_HEIGHT);
             for (int[] cell : adyacentes) {
                 if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
-                    return doMoveTo(agName, cell[0], cell[1]);
+                    // Limpiar errores de path_blocked de intentos anteriores
+                    removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
+                    if (doMoveTo(agName, cell[0], cell[1])) {
+                        return true;
+                    }
+                    // doMoveTo falló (sin ruta BFS), probar siguiente celda adyacente
                 }
             }
+            // Limpiar errores intermedios antes de añadir el definitivo
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
             addError(agName, "path_blocked", "No free adjacent cell for container " + containerId);
             return false;
         } catch (Exception e) {
