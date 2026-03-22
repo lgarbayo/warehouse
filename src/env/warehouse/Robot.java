@@ -9,11 +9,13 @@ public class Robot {
     private final double maxWeight;
     private final int maxWidth;
     private final int maxHeight;
-    private final int speed; // velocidad (alta=3, media=2, baja=1)
+    private final int speed; // velocidad (alta=3, media=2, baja=1) — metadato informativo,
+                                // el BFS no usa este valor; las diferencias de timing se
+                                // aplican en los .wait() de los archivos .asl de cada robot
     private int x, y;
     private Container carriedContainer;
     private boolean busy;
-    private String currentTask;
+    private String currentTask; // reservado para trazabilidad futura; no usado actualmente
     
     public Robot(String id, String type, double maxWeight, int maxWidth, int maxHeight, int speed) {
         this.id = id;
@@ -30,18 +32,50 @@ public class Robot {
     }
     
     // Getters
-    public String getId() { return id; }
-    public String getType() { return type; }
-    public double getMaxWeight() { return maxWeight; }
-    public int getMaxWidth() { return maxWidth; }
-    public int getMaxHeight() { return maxHeight; }
-    public int getSpeed() { return speed; }
-    public int getX() { return x; }
-    public int getY() { return y; }
-    public Container getCarriedContainer() { return carriedContainer; }
-    public boolean isBusy() { return busy; }
-    public String getCurrentTask() { return currentTask; }
+    public String getId() {
+        return id;
+    }
+
+    public String getType() {
+        return type;
+    }
+
+    public double getMaxWeight() {
+        return maxWeight;
+    }
+
+    public int getMaxWidth() {
+        return maxWidth;
+    }
+
+    public int getMaxHeight() {
+        return maxHeight;
+    }
+
+    public int getSpeed() {
+        return speed;
+    }
+
+    public int getX() {
+        return x;
+    }
+
+    public int getY() {
+        return y;
+    }
+
+    public Container getCarriedContainer() {
+        return carriedContainer;
+    }
+
+    public boolean isBusy() {
+        return busy;
+    }
     
+    public String getCurrentTask() {
+        return currentTask;
+    }
+
     // Setters
     public void setPosition(int x, int y) { this.x = x; this.y = y; }
     public void setBusy(boolean busy) { this.busy = busy; }

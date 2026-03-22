@@ -34,44 +34,15 @@ carrying(none).      // Contenedor que está cargando
 // Plan inicial: Arrancar el robot y hacer pruebas de movimiento
 +!start : true <-
     .print("🤖 Robot ligero iniciado - Capacidad: 10kg, 1x1");
-   // .print("🔍 Iniciando secuencia de prueba de movimientos...");
-  //  -+state(testing);
-   // !test_movement;
+    // .print("🔍 Iniciando secuencia de prueba de movimientos...");
+    // -+state(testing);
+    // !test_movement;
     !work_cycle.
-
-// Secuencia de prueba de movimientos
-+!test_movement : true <-
-    .print("📍 Posición inicial: (1,3)");
-    .wait(1000);
-    
-    .print("➡️  Movimiento 1: Ir al área de entrada (1,1)");
-    move_to(1, 1);
-    .wait(2000);
-    
-    .print("➡️  Movimiento 2: Ir al área de clasificación (5,1)");
-    move_to(5, 1);
-    .wait(2000);
-    
-    .print("➡️  Movimiento 3: Ir a zona de estanterías pequeñas (12,3)");
-    move_to(12, 3);
-    .wait(2000);
-    
-    .print("➡️  Movimiento 4: Explorar más estanterías (16,3)");
-    move_to(16, 3);
-    .wait(2000);
-    
-    .print("➡️  Movimiento 5: Volver a posición intermedia (8,5)");
-    move_to(8, 5);
-    .wait(2000);
-    
-    .print("✅ Prueba de movimientos completada. Robot funcionando correctamente.");
-    -+state(idle).
 
 // Ciclo de trabajo principal
 +!work_cycle : state(idle) <-
-    .print("Solicitando nueva tarea...");
-    request_task;
-    .wait(3000);  // Esperar 3 segundos antes de solicitar otra
+    .print("[LIGHT] Esperando tarea del planificador central...");
+    .wait(3000);  // Esperar 3 segundos
     !work_cycle.
 
 +!work_cycle : not state(idle) <-
@@ -85,32 +56,36 @@ carrying(none).      // Contenedor que está cargando
 // Recibir tarea del scheduler
 +task(CId, ShelfId) : state(idle) <-
     .print("✅ Tarea asignada: Transportar ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)]; // Consumir creencia inmediatamente
+    accept_task(CId);
     -+state(working);
     -+carrying(CId);
     !execute_task(CId, ShelfId).
 
 +task(CId, ShelfId) : not state(idle) <-
-    .print("⚠️ Ocupado, no puedo aceptar tarea: ", CId).
+    .print("⚠️ Ocupado, encolando tarea: ", CId).
+
+// La cola se procesa via !check_queue al final de cada tarea
 
 // Ejecutar la tarea completa
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 Iniciando tarea: ", CId);
     
-    // Fase 1: Ir al área de entrada (donde están los contenedores)
-    .print("📍 Fase 1: Moviéndose al área de entrada");
-    move_to(1, 1);
+    // Fase 1: Localizar y navegar al contenedor
+    .print("📍 Fase 1: Localizando contenedor ", CId);
+    move_to_container(CId);
     .wait(500);
-    
+
     // Fase 2: Recoger el contenedor
     .print("📦 Fase 2: Recogiendo contenedor ", CId);
     -+state(picking);
     pickup(CId);
     .wait(500);
-    
+
     // Fase 3: Navegar hacia la estantería
     .print("🚚 Fase 3: Transportando a estantería ", ShelfId);
     -+state(carrying);
-    !navigate_to_shelf(ShelfId);
+    move_to_shelf(ShelfId);
     
     // Fase 4: Depositar el contenedor
     .print("📥 Fase 4: Depositando en ", ShelfId);
@@ -118,37 +93,103 @@ carrying(none).      // Contenedor que está cargando
     drop_at(ShelfId);
     .wait(500);
     
-    // Fase 5: Completar y volver a idle
+    // Fase 5: Completar y verificar cola
     .print("✨ Tarea completada: ", CId);
-    -+state(idle);
     -+carrying(none);
-    -task(CId, ShelfId).
+    !check_queue.
 
-// Navegar a la estantería (simplificado - zona de estanterías)
-+!navigate_to_shelf(ShelfId) : true <-
-    // Las estanterías están en la zona x=10-18, y=2-12
-    .print("YENDO A LA SHELFFFFFF");
-    move_to(12, 3);  // Posición aproximada en zona de estanterías pequeñas
-    .wait(500).
 
 /* ============================================================================
- * MANEJO DE ERRORES
+ * MANEJO DE ERRORES Y FALLOS DE PLANES
  * ============================================================================ */
+
+// Plan de fallo esencial (DEBUGGING.md): sin esto Jason no puede recuperarse
+-!execute_task(CId, ShelfId) : true <-
+    .print("⚠️ Fallo en execute_task para ", CId, ". Limpiando estado...");
+    .wait(1500); // Pausa de seguridad para evitar "tweaking"
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, task_failed(CId));
+    !check_queue.
+
+// Verificar si hay más tareas encoladas antes de volver a idle
++!check_queue : task(CId, ShelfId) <-
+    .print("✅ Procesando tarea encolada: ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
+
++!check_queue : not task(_, _) <-
+    -+state(idle).
 
 // Error al recoger contenedor (muy pesado o grande)
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);
+    .send(scheduler, tell, container_error(CId, container_too_heavy));
+    .send(supervisor, tell, container_error(CId, container_too_heavy));
     -+state(idle);
     -+carrying(none);
-    -task(CId, _).
+    .abolish(task(CId, _)).
 
 +error(container_too_big, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy grande - ", Data);
+    .send(scheduler, tell, container_error(CId, container_too_big));
+    .send(supervisor, tell, container_error(CId, container_too_big));
     -+state(idle);
     -+carrying(none);
-    -task(CId, _).
+    .abolish(task(CId, _)).
+
++error(destination_conflict, Data) : true <-
+    .my_name(Me);
+    .print("⚠️ Conflicto de destino, esperando y reintentando...");
+    .send(supervisor, tell, robot_error(Me, destination_conflict, Data));
+    .wait(800).
+
++error(too_far, Data) : true <-
+    .my_name(Me);
+    .print("⚠️ [LIGHT] Demasiado lejos: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, too_far, Data));
+    -+state(idle);
+    -+carrying(none).
+
++error(route_blocked, Data) : true <-
+    .my_name(Me);
+    .print("⚠️ [LIGHT] Ruta bloqueada: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, route_blocked, Data));
+    -+state(idle);
+    -+carrying(none).
+
++error(path_blocked, Data) : true <-
+    .my_name(Me);
+    .print("⚠️ [LIGHT] Camino bloqueado: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, path_blocked, Data));
+    -+state(idle);
+    -+carrying(none).
+
++error(illegal_move, Data) : true <-
+    .my_name(Me);
+    .print("⚠️ [LIGHT] Movimiento ilegal: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, illegal_move, Data));
+    -+state(idle);
+    -+carrying(none).
+
++error(robot_not_found, Data) : true <-
+    .my_name(Me);
+    .print("⚠️ [LIGHT] Robot no encontrado: ", Data, ". Limpiando estado...");
+    .send(supervisor, tell, robot_error(Me, robot_not_found, Data));
+    -+state(idle);
+    -+carrying(none).
 
 // Error general
++error(ErrorType, Data) : carrying(CId) <-
+    .print("⚠️ Error detectado: ", ErrorType, " - ", Data);
+    .send(scheduler, tell, container_error(CId, ErrorType));
+    .send(supervisor, tell, container_error(CId, ErrorType));
+    -+state(idle);
+    -+carrying(none).
+
 +error(ErrorType, Data) : true <-
     .print("⚠️ Error detectado: ", ErrorType, " - ", Data);
     -+state(idle);
@@ -160,4 +201,18 @@ carrying(none).      // Contenedor que está cargando
 
 // Confirmación de almacenamiento exitoso
 +stored(CId, ShelfId) : true <-
-    .print("✓ Contenedor ", CId, " almacenado en ", ShelfId).
+    .print("✓ Contenedor ", CId, " almacenado en ", ShelfId);
+    .send(scheduler, tell, container_stored(CId, ShelfId));
+    .send(supervisor, tell, container_stored(CId, ShelfId)).
+
+/* ============================================================================
+ * NOTIFICACIÓN DE ESTADO AL SUPERVISOR
+ * ============================================================================ */
+
++state(working) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, working)).
+
++state(idle) : not task(_, _) <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, idle)).
