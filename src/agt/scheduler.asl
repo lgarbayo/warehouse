@@ -38,7 +38,12 @@ containers_heavy([]).
 containers_medium([]).
 containers_light([]).
 
-// 1. Reaccionar a nuevo contenedor (trigger → goal para capturar fallos)
+// 1. Reaccionar a nuevo contenedor.
+// Se usa un goal intermedio (!process_new_container) en lugar de procesar
+// directamente en el trigger +new_container. Esto permite que el plan de fallo
+// -!process_new_container capture el caso en que el contenedor es aplastado
+// entre su aparición y su procesamiento por el scheduler. Con un trigger de
+// creencia (+new_container) no es posible añadir un manejador de fallo.
 +new_container(CId) : true <-
     .print("Nuevo contenedor: ", CId);
     !process_new_container(CId).
@@ -124,7 +129,8 @@ containers_light([]).
 +free_shelf(CId, ShelfId) : container_info(CId, W, H, Weight, Type, _, _) <-
     .print("Estantería: ", ShelfId, " asignada a ", CId);
     
-    // Clasificación por tipo (urgent/fragile/standard)
+    // Clasificación multidimensional: tipo, peso y tamaño se almacenan como
+    // creencias separadas para que el scheduler pueda consultarlas independientemente
     +container_type(CId, Type);
 
     // Clasificación por peso
@@ -145,13 +151,17 @@ containers_light([]).
         +container_size_category(CId, large); 
     };
 
-    // Asignar a robot apropiado según su capacidad (peso Y tamaño)
+    // Asignar a robot apropiado según su capacidad (peso Y tamaño).
+    // ?containers_X(L) consulta la lista actual, se retira y se reinserta con CId
+    // añadido al frente — patrón estándar en AgentSpeak para actualizar listas.
     if (Weight <= 10 & W <= 1 & H <= 1) {
         .print("Asignando al robot ligero: ", CId);
         +container_category(CId, light);
         ?containers_light(LL); // LL -> light list
         -containers_light(LL); 
         +containers_light([CId|LL]);
+        // assigned: creencia transitoria: se elimina al confirmar o fallar la tarea
+        // task_history: registro permanente para trazabilidad de auditoría
         +assigned(robot_light, CId, ShelfId);
         +task_history(robot_light, CId, ShelfId);
         .send(robot_light, tell, task(CId, ShelfId));

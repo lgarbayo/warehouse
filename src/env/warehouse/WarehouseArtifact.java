@@ -25,6 +25,11 @@ public class WarehouseArtifact extends Environment {
     private Map<String, Shelf> shelves;
     private ConcurrentLinkedQueue<Container> pendingContainers;
     private Map<String, String> taskAssignments; // containerId -> robotId
+
+    // Mapa de destinos activos: clave "(X,Y)" → nombre del robot que lo ha reservado.
+    // Evita que dos robots calculen BFS al mismo destino simultáneamente y lleguen
+    // a la misma celda. La clave es la coordenada (no el agente) para que el bloque
+    // finally de doMoveTo la libere correctamente aunque el robot cambie de ruta.
     private Map<String, String> activeDestinations;
 
     // GUI visual
@@ -331,12 +336,8 @@ public class WarehouseArtifact extends Environment {
                     return executeGetContainerInfo(agName, action);
                 case "get_free_shelf":
                     return executeGetFreeShelf(agName, action);
-                case "scan_surroundings":
-                    return executeScanSurroundings(agName, action);
                 case "release_task":
                     return executeReleaseTask(agName, action);
-                case "get_shelf_position":
-                    return executeGetShelfPosition(agName, action);
                 case "accept_task":
                     return executeAcceptTask(agName, action);
                 default:
@@ -351,11 +352,7 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: move_to(X, Y)
-     * Mueve el robot a la posición especificada
-     */
-    /**
-     * Acción: move_to(X, Y)
-     * Mueve el robot a la posición especificada
+     * Mueve el robot a la posición especificada.
      */
     private boolean executeMoveTo(String agName, Structure action) {
         try {
@@ -368,6 +365,13 @@ public class WarehouseArtifact extends Environment {
         }
     }
 
+    /**
+     * Acción: move_to_shelf(ShelfId)
+     * Navega a la celda adyacente libre más cercana a la estantería indicada,
+     * descartando celdas ocupadas por robots o contenedores. Prueba todas las
+     * adyacentes en orden antes de reportar path_blocked. Los errores parciales
+     * de intentos fallidos se limpian antes de emitir el error definitivo.
+     */
     private boolean executeMoveToShelf(String agName, Structure action) {
         try {
             String shelfId = action.getTerm(0).toString().replace("\"", "");
@@ -397,6 +401,12 @@ public class WarehouseArtifact extends Environment {
         }
     }
 
+    /**
+     * Acción: move_to_container(ContainerId)
+     * Igual que executeMoveToShelf pero usa container.getAdyacentes() (lógica
+     * encapsulada en Container.java) en lugar de la versión local para estanterías.
+     * Los contenedores se tratan siempre como 1×1 en el grid.
+     */
     private boolean executeMoveToContainer(String agName, Structure action) {
         try {
             String containerId = action.getTerm(0).toString().replace("\"", "");
@@ -461,6 +471,20 @@ public class WarehouseArtifact extends Environment {
         return result;
     }
 
+    /**
+     * Núcleo de navegación: mueve el robot agName hasta (targetX, targetY).
+     *
+     * Estrategia en dos fases:
+     *   Fase 1 (optimista): BFS ignorando robots en movimiento. Más eficiente
+     *     y evita que robots se bloqueen mutuamente al calcular rutas simultáneas.
+     *   Fase 2 (reactiva): Si un paso lleva 3 s bloqueado, recalcula con
+     *     avoidRobots=true para esquivar robots que están parados. Se resetea
+     *     tras cada recálculo exitoso para volver a modo optimista.
+     *
+     * La mecánica de aplastamiento ocurre dentro del bucle paso a paso:
+     * si un contenedor no recogido ocupa la celda destino del paso, se elimina
+     * del mapa y se emite container_broken globalmente antes de mover el robot.
+     */
     private boolean doMoveTo(String agName, int targetX, int targetY) {
         String destKey = targetX + "," + targetY;
         try {
@@ -818,9 +842,11 @@ public class WarehouseArtifact extends Environment {
 
             Container container = robot.getCarriedContainer();
 
-            // Verificar si cabe en la estantería
+            // Verificar si cabe en la estantería.
+            // Si está llena, el robot suelta el contenedor en su posición actual (pasillo).
+            // El plan -!execute_task del robot notificará task_failed al scheduler,
+            // que reintentará assign_shelf hasta shelf_retries >= 3.
             if (!shelf.canStore(container)) {
-                // Si la estantería está llena, el robot lo suelta en su posición actual
                 robot.drop();
                 container.setPicked(false);
                 container.setPosition(robot.getX(), robot.getY());
@@ -952,6 +978,9 @@ public class WarehouseArtifact extends Environment {
                 return true;
             }
 
+            // null → no hay estantería disponible → la acción falla en Jason →
+            // dispara -!assign_shelf(CId) en el scheduler, que reintentará
+            // hasta shelf_retries >= 3 antes de notificar no_shelf_space.
             return false;
 
         } catch (Exception e) {
@@ -960,44 +989,6 @@ public class WarehouseArtifact extends Environment {
         }
     }
 
-    /**
-     * Acción: scan_surroundings()
-     * Escanea las celdas alrededor del robot
-     */
-    private boolean executeScanSurroundings(String agName, Structure action) {
-        try {
-            Robot robot = robots.get(agName);
-            if (robot == null)
-                return false;
-
-            int x = robot.getX();
-            int y = robot.getY();
-
-            // Escanear celdas adyacentes
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dy = -2; dy <= 2; dy++) {
-                    int nx = x + dx;
-                    int ny = y + dy;
-
-                    if (nx >= 0 && nx < GRID_WIDTH && ny >= 0 && ny < GRID_HEIGHT) {
-                        CellType type = grid[nx][ny];
-                        addPercept(agName, ASSyntax.parseLiteral(
-                                "cell(" + nx + "," + ny + "," + type.name().toLowerCase() + ")"));
-
-                        if (type == CellType.BLOCKED) {
-                            addPercept(agName, ASSyntax.parseLiteral("blocked(" + nx + "," + ny + ")"));
-                        }
-                    }
-                }
-            }
-
-            return true;
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
 
     /**
      * Acción: release_task(ContainerId)
@@ -1067,18 +1058,6 @@ public class WarehouseArtifact extends Environment {
         return shelves;
     }
 
-    public int getPendingContainersCount() {
-        return pendingContainers.size();
-    }
-
-    public int getTotalContainersProcessed() {
-        return totalContainersProcessed;
-    }
-
-    public int getTotalErrors() {
-        return totalErrors;
-    }
-
     public String getStatistics() {
         long elapsedTime = (System.currentTimeMillis() - startTime) / 1000;
         return String.format(
@@ -1115,28 +1094,4 @@ public class WarehouseArtifact extends Environment {
         }
     }
 
-    /**
-     * Acción: get_shelf_position(ShelfId)
-     * Devuelve la posición real de la estantería como percepción shelf_pos(ShelfId,
-     * X, Y)
-     * Los robots usan esto para navegar a (X, Y-2) y quedar a distancia ≤ 2 del
-     * shelf
-     */
-    private boolean executeGetShelfPosition(String agName, Structure action) {
-        try {
-            String shelfId = action.getTerm(0).toString().replace("\"", "");
-            Shelf shelf = shelves.get(shelfId);
-            if (shelf == null) {
-                System.err.println("[" + agName + "] Shelf not found: " + shelfId);
-                return false;
-            }
-            removePerceptsByUnif(agName, ASSyntax.parseLiteral("shelf_pos(\"" + shelfId + "\",_,_)"));
-            addPercept(agName, ASSyntax.parseLiteral(
-                    "shelf_pos(\"" + shelfId + "\"," + shelf.getX() + "," + shelf.getY() + ")"));
-            return true;
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
 }

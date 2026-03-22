@@ -30,17 +30,46 @@ public class Shelf {
     }
     
     // Getters
-    public String getId() { return id; }
-    public int getX() { return x; }
-    public int getY() { return y; }
-    public int getWidth() { return width; }
-    public int getHeight() { return height; }
-    public double getMaxWeight() { return maxWeight; }
-    public int getMaxVolume() { return maxVolume; }
-    public List<String> getStoredContainers() { return new ArrayList<>(storedContainers); }
-    public double getCurrentWeight() { return currentWeight; }
-    public int getCurrentVolume() { return currentVolume; }
+    public String getId() { 
+        return id; 
+    }
+
+    public int getX() { 
+        return x; 
+    }
+
+    public int getY() { 
+        return y; 
+    }
+
+    public int getWidth() { 
+        return width; 
+    }
+
+    public int getHeight() { 
+        return height; 
+    }
+
+    public double getMaxWeight() { 
+        return maxWeight; 
+    }
+
+    public int getMaxVolume() { 
+        return maxVolume; 
+    }
+
+    public List<String> getStoredContainers() { 
+        return new ArrayList<>(storedContainers); 
+    }
+
+    public double getCurrentWeight() { 
+        return currentWeight; 
+    }
     
+    public int getCurrentVolume() { 
+        return currentVolume; 
+    }
+
     /**
      * Verifica si el contenedor cabe en la estantería
      */
@@ -63,18 +92,6 @@ public class Shelf {
     }
     
     /**
-     * Remueve un contenedor de la estantería
-     */
-    public boolean remove(String containerId, double weight, int volume) {
-        if (storedContainers.remove(containerId)) {
-            currentWeight -= weight;
-            currentVolume -= volume;
-            return true;
-        }
-        return false;
-    }
-    
-    /**
      * Verifica si la estantería está llena
      */
     public boolean isFull() {
@@ -82,7 +99,10 @@ public class Shelf {
     }
     
     /**
-     * Obtiene el porcentaje de ocupación
+     * Obtiene el porcentaje de ocupación.
+     * Devuelve el máximo entre ocupación por peso y por volumen: si cualquiera
+     * de las dos dimensiones está al límite, la estantería se considera llena.
+     * Usado por findBestShelf para ordenar estanterías de menor a mayor carga.
      */
     public double getOccupancyPercentage() {
         double weightPercent = (currentWeight / maxWeight) * 100;

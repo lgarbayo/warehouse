@@ -21,41 +21,9 @@ carrying(none).      // Contenedor que está cargando
  * ============================================================================ */
 !start.
 
-// Plan inicial: Arrancar el robot y hacer pruebas de movimiento
 +!start : true <-
     .print("🤖 Robot medio iniciado - Capacidad: 30kg, 1x2");
-   // .print("🔍 Iniciando secuencia de prueba de movimientos...");
-  //  -+state(testing);
-  //  !test_movement;
     !work_cycle.
-
-// Secuencia de prueba de movimientos (ruta diferente al robot ligero)
-+!test_movement : true <-
-    .print("📍 Posición inicial: (2,3)");
-    .wait(1500);
-    
-    .print("➡️  Movimiento 1: Ir al área de entrada (2,1)");
-    move_to(2, 1);
-    .wait(2500);
-    
-    .print("➡️  Movimiento 2: Patrol por área de clasificación (6,1)");
-    move_to(6, 1);
-    .wait(2500);
-    
-    .print("➡️  Movimiento 3: Ir a zona de estanterías medianas (13,7)");
-    move_to(13, 7);
-    .wait(2500);
-    
-    .print("➡️  Movimiento 4: Explorar zona central (10,5)");
-    move_to(10, 5);
-    .wait(2500);
-    
-    .print("➡️  Movimiento 5: Regresar a zona intermedia (7,4)");
-    move_to(7, 4);
-    .wait(2500);
-    
-    .print("✅ Prueba de movimientos completada. Robot funcionando correctamente.");
-    -+state(idle).
 
 // Ciclo de trabajo principal
 +!work_cycle : state(idle) <-

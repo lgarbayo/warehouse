@@ -22,25 +22,57 @@ public class Container {
         this.height = height;
         this.weight = weight;
         this.type = type;
-        this.picked = false;
-        this.broken = false;
+        this.picked = false;   // true mientras un robot lo transporta
+        this.broken = false;   // true si fue aplastado (destruido permanentemente)
         this.assignedShelf = null;
-        this.x = -1;
+        this.x = -1;           // -1 hasta que el generador lo coloca en una celda ENTRANCE
         this.y = -1;
     }
     
     // Getters
-    public String getId() { return id; }
-    public int getWidth() { return width; }
-    public int getHeight() { return height; }
-    public double getWeight() { return weight; }
-    public String getType() { return type; }
-    public boolean isPicked() { return picked; }
-    public boolean isBroken() { return broken; }
-    public void setBroken(boolean broken) { this.broken = broken; }
-    public String getAssignedShelf() { return assignedShelf; }
-    public int getX() { return x; }
-    public int getY() { return y; }
+    public String getId() { 
+        return id; 
+    }
+
+    public int getWidth() { 
+        return width; 
+    }
+
+    public int getHeight() { 
+        return height; 
+    }
+
+    public double getWeight() { 
+        return weight; 
+    }
+
+    public String getType() { 
+        return type; 
+    }
+
+    public boolean isPicked() { 
+        return picked; 
+    }
+
+    public boolean isBroken() { 
+        return broken; 
+    }
+
+    public void setBroken(boolean broken) { 
+        this.broken = broken; 
+    }
+
+    public String getAssignedShelf() { 
+        return assignedShelf; 
+    }
+
+    public int getX() { 
+        return x; 
+    }
+    
+    public int getY() { 
+        return y; 
+    }
     
     // Setters
     public void setPicked(boolean picked) { this.picked = picked; }
