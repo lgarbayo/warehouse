@@ -322,8 +322,6 @@ public class WarehouseArtifact extends Environment {
             String actionName = action.getFunctor();
 
             switch (actionName) {
-                case "move_to":
-                    return executeMoveTo(agName, action);
                 case "move_to_shelf":
                     return executeMoveToShelf(agName, action);
                 case "move_to_container":
@@ -344,21 +342,6 @@ public class WarehouseArtifact extends Environment {
                     System.err.println("Unknown action: " + actionName);
                     return false;
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
-
-    /**
-     * Acción: move_to(X, Y)
-     * Mueve el robot a la posición especificada.
-     */
-    private boolean executeMoveTo(String agName, Structure action) {
-        try {
-            int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
-            int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
-            return doMoveTo(agName, targetX, targetY);
         } catch (Exception e) {
             e.printStackTrace();
             return false;
