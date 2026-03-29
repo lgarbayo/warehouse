@@ -338,10 +338,27 @@ public class WarehouseArtifact extends Environment {
                     return executeReleaseTask(agName, action);
                 case "accept_task":
                     return executeAcceptTask(agName, action);
+                case "return_to_base":
+                    return executeReturnToBase(agName, action);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
             }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: return_to_base(X, Y)
+     * Mueve el robot a su posición inicial cuando no tiene tareas pendientes.
+     */
+    private boolean executeReturnToBase(String agName, Structure action) {
+        try {
+            int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
+            int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
+            return doMoveTo(agName, targetX, targetY);
         } catch (Exception e) {
             e.printStackTrace();
             return false;

@@ -119,7 +119,8 @@ carrying(none).      // Contenedor que está cargando
     -+carrying(CId);
     !execute_task(CId, ShelfId).
 
-+!check_queue : not task(_, _) <-
++!check_queue : not task(_, _) & position(InitX, InitY) <-
+    return_to_base(InitX, InitY);
     -+state(idle).
 
 +error(container_too_heavy, Data) : carrying(CId) <-
