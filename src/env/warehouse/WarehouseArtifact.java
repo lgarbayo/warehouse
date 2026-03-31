@@ -40,7 +40,6 @@ public class WarehouseArtifact extends Environment {
 
     // Métricas
     private int totalContainersProcessed = 0;
-    private int totalErrors = 0;
     private long startTime;
 
     // Gestión del thread generador de contenedores
@@ -322,8 +321,6 @@ public class WarehouseArtifact extends Environment {
             String actionName = action.getFunctor();
 
             switch (actionName) {
-                case "move_to":
-                    return executeMoveTo(agName, action);
                 case "move_to_shelf":
                     return executeMoveToShelf(agName, action);
                 case "move_to_container":
@@ -340,6 +337,8 @@ public class WarehouseArtifact extends Environment {
                     return executeReleaseTask(agName, action);
                 case "accept_task":
                     return executeAcceptTask(agName, action);
+                case "return_to_base":
+                    return executeReturnToBase(agName, action);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
@@ -351,10 +350,10 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
-     * Acción: move_to(X, Y)
-     * Mueve el robot a la posición especificada.
+     * Acción: return_to_base(X, Y)
+     * Mueve el robot a su posición inicial cuando no tiene tareas pendientes.
      */
-    private boolean executeMoveTo(String agName, Structure action) {
+    private boolean executeReturnToBase(String agName, Structure action) {
         try {
             int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
             int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
@@ -1031,7 +1030,6 @@ public class WarehouseArtifact extends Environment {
     }
 
     private void addError(String agName, String errorType, String data) {
-        totalErrors++;
         try {
             addPercept(agName, ASSyntax.parseLiteral(
                     "error(" + errorType + ",\"" + data + "\")"));
@@ -1061,8 +1059,8 @@ public class WarehouseArtifact extends Environment {
     public String getStatistics() {
         long elapsedTime = (System.currentTimeMillis() - startTime) / 1000;
         return String.format(
-                "Time: %ds | Processed: %d | Pending: %d | Errors: %d",
-                elapsedTime, totalContainersProcessed, pendingContainers.size(), totalErrors);
+                "Time: %ds | Processed: %d | Pending: %d",
+                elapsedTime, totalContainersProcessed, pendingContainers.size());
     }
 
     /**
