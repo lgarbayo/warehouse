@@ -1,8 +1,6 @@
 # Future Changes
 
-## Success rate, etc. como creencia
 ## Mostrar lista contenedores al final
-## Incongruencia: total_errors (revisar lo de java porque pienso que  lo haciamos pero breixo nos quiso cookear)
-## Artifact añade percept error (revisar el addPercept) y no hay plan en supervisor para actualizar
 ## Resolver tema de tipos de containers (standard, urgent y fragile)
-## Robots que vuelvan a posición de inicio en vez de quedarse en posición esperando al siguiente container de la cola
+
+### Los path_blocked - No route found to (0,0) no cuentan gracias al -!check_queue que los descarta. Por qué? Porque el retorno a base es una funcionalidad de comodidad — si no puede volver, no pasa nada, el robot simplemente se queda donde terminó la última entrega y sigue operativo para la siguiente tarea. Si ese fallo llegara al supervisor contaminaría total_errors y error_rate con algo que no es un error real del sistema. Un robot que no puede volver a su posición inicial no afecta para nada a la operación del almacén.

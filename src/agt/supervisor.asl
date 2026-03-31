@@ -23,13 +23,24 @@ total_received(0).
 total_stored(0).
 total_errors(0).
 
-/* Errores por tipo */
+/* Tasas derivadas */
+success_rate(0).
+error_rate(0).
+pending(0).
+
+/* Errores de carga (executePickup) */
 errors_by_type(container_too_heavy, 0).
 errors_by_type(container_too_big, 0).
+errors_by_type(container_broken, 0).
+
+/* Errores de almacenamiento */
 errors_by_type(shelf_full, 0).
-errors_by_type(illegal_move, 0).
-errors_by_type(conflict, 0).
-errors_by_type(route_blocked, 0).
+errors_by_type(no_shelf_space, 0).
+
+/* Errores de estado inconsistente (executeDropAt / executePickup) */
+errors_by_type(not_carrying, 0).
+errors_by_type(invalid_pickup, 0).
+errors_by_type(invalid_drop, 0).
 
 /* Estado de los robots */
 robot_status(robot_light, idle).
@@ -59,14 +70,31 @@ report_interval(30000).
  * CÁLCULO Y REPORTE DE ESTADÍSTICAS
  * ============================================================================ */
 
+// Actualiza las creencias de tasas derivadas
++!update_rates : total_received(Received) & Received > 0 <-
+    ?total_stored(Stored);
+    ?total_errors(Error);
+    SuccessRate = (Stored * 100) / Received;
+    ErrorRate   = (Error * 100) / Received;
+    Pending     = Received - Stored - Error;
+    -success_rate(_); 
+    +success_rate(SuccessRate);
+    -error_rate(_);   
+    +error_rate(ErrorRate);
+    -pending(_);      
+    +pending(Pending).
+
+// Fallback para evitar división por cero antes de recibir contenedores
++!update_rates : true <- true.
+
 // Con contenedores recibidos: calcular tasas
 +!print_stats : container_received(_) <-
-    .count(container_received(_), Received);
-    .count(container_stored_fact(_,_), Stored);
-    .count(error_occurred(_,_), Errors);
-    SuccessRate = (Stored * 100) / Received;
-    ErrorRate   = (Errors * 100) / Received;
-    Pending     = Received - Stored - Errors;
+    ?total_received(Received);
+    ?total_stored(Stored);
+    ?total_errors(Errors);
+    ?success_rate(SuccessRate);
+    ?error_rate(ErrorRate);
+    ?pending(Pending);
     .print("========================================");
     .print("[SUPERVISOR] REPORTE DE ESTADISTICAS");
     .print("Contenedores recibidos: ", Received);
@@ -92,7 +120,7 @@ report_interval(30000).
 +!print_errors_by_type : true <-
     .findall(T, errors_by_type(T, _), ContainerTypes);
     !print_error_list(ContainerTypes);
-    .findall(T, navigation_error_occurred(_, T), NavTypes);
+    .findall(T, navigation_error_occurred(_, T, _), NavTypes);
     !print_nav_error_list(NavTypes, []).
 
 +!print_error_list([]) : true <- true.
@@ -112,7 +140,7 @@ report_interval(30000).
     !print_nav_error_list(Rest, Seen).
 
 +!print_nav_error_list([T|Rest], Seen) : true <-
-    .count(navigation_error_occurred(_, T), N);
+    .count(navigation_error_occurred(_, T, _), N);
     .print("  ", T, " (nav): ", N);
     !print_nav_error_list(Rest, [T|Seen]).
 
@@ -144,6 +172,7 @@ report_interval(30000).
     .count(container_received(_), N);
     -total_received(_);
     +total_received(N);
+    !update_rates;
     .print("[SUPERVISOR] Nuevo contenedor recibido: ", CId, " | Total recibidos: ", N).
 
 /* ============================================================================
@@ -156,6 +185,7 @@ report_interval(30000).
     .count(container_stored_fact(_,_), N);
     -total_stored(_);
     +total_stored(N);
+    !update_rates;
     .print("[SUPERVISOR] Contenedor almacenado: ", CId, " en ", ShelfId, " por ", Robot, " | Total almacenados: ", N).
 
 /* ============================================================================
@@ -165,13 +195,22 @@ report_interval(30000).
 
 +container_error(CId, ErrorType)[source(Robot)] : true <-
     +error_occurred(CId, ErrorType);
-    .count(error_occurred(_,_), N);
+    .count(error_occurred(_,_), CE);
+    .count(navigation_error_occurred(_,_,_), NE);
+    N = CE + NE;
     -total_errors(_);
     +total_errors(N);
+    !update_rates;
     .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot, " | Total errores: ", N).
 
 // Errores de navegacion enviados directamente desde Java (sin CId: route_blocked, etc.)
 +robot_error(Robot, ErrorType, Data) : true <-
-    +navigation_error_occurred(Robot, ErrorType);
+    +navigation_error_occurred(Robot, ErrorType, Data);
+    .count(error_occurred(_,_), CE);
+    .count(navigation_error_occurred(_,_,_), NE);
+    N = CE + NE;
+    -total_errors(_);
+    +total_errors(N);
+    !update_rates;
     .print("[SUPERVISOR] Error de navegacion en ", Robot, ": ", ErrorType).
 
