@@ -125,6 +125,10 @@ carrying(none).      // Contenedor que está cargando
     return_to_base(InitX, InitY);
     -+state(idle).
 
+-!check_queue : not task(_, _) <-
+    .abolish(error(_, _));
+    -+state(idle).
+
 // Error al recoger contenedor (muy pesado o grande)
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);

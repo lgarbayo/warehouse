@@ -123,6 +123,10 @@ carrying(none).      // Contenedor que está cargando
     return_to_base(InitX, InitY);
     -+state(idle).
 
+-!check_queue : not task(_, _) <-
+    .abolish(error(_, _));
+    -+state(idle).
+
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ [HEAVY] ERROR CRÍTICO: Contenedor excede capacidad máxima - ", Data);
     .print("⚠️ Este es el robot más fuerte, contenedor imposible de transportar");
