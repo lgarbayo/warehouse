@@ -1,5 +1,68 @@
 # Changes
 
+## Corrección de entorno grueso: asignación de estanterías movida al agente scheduler
+
+### Problema
+El entorno tenía `findBestShelf()` y `executeGetFreeShelf()` en `WarehouseArtifact.java`. El scheduler simplemente llamaba `get_free_shelf(CId)` y el entorno decidía qué estantería asignar — filtrando por categoría, ordenando por ocupación y devolviendo la mejor. Esto es entorno grueso: el entorno realizaba razonamiento que corresponde al agente.
+
+### Solución
+
+#### Entorno: solo expone percepciones primitivas
+
+Se eliminaron `findBestShelf`, `executeGetFreeShelf` y el case `"get_free_shelf"`. En su lugar el entorno emite dos tipos de percepción al scheduler:
+
+- **`shelf_available("shelf_1")`** — se emite al inicializar cada estantería y se retira con `removePerceptsByUnif` cuando `shelf.isFull()` tras un `drop_at`. Indica simplemente que la estantería tiene capacidad.
+- **`shelf_occupancy("shelf_1", 42)`** — el porcentaje de ocupación actual redondeado a entero. Se emite al inicializar (0%) y se actualiza tras cada `drop_at` exitoso. Dato puro: el entorno mide, no interpreta.
+
+#### Scheduler: razona sobre qué estantería usar
+
+Se añaden creencias estáticas que representan el conocimiento propio del agente sobre el layout del almacén:
+
+```agentspeak
+shelf_category("shelf_1", light).
+shelf_category("shelf_2", light).
+shelf_category("shelf_3", light).
+shelf_category("shelf_4", light).
+shelf_category("shelf_5", medium).
+shelf_category("shelf_6", medium).
+shelf_category("shelf_7", medium).
+shelf_category("shelf_8", heavy).
+shelf_category("shelf_9", heavy).
+```
+
+La lógica de asignación se implementa con cuatro planes `+!assign_shelf` que Jason prueba en orden:
+
+1. **Ligero** (`Weight ≤ 10, W ≤ 1, H ≤ 1`) → estanterías `light`
+2. **Mediano** (`Weight ≤ 30, W ≤ 1, H ≤ 2`) → estanterías `medium`
+3. **Pesado/grande** → estanterías `heavy`
+4. **Fallback anti-starvation** → cualquier estantería disponible (si la categoría preferida está llena)
+
+Los planes 1-3 usan la variable `ExS` en la guardia para verificar que existe al menos una estantería de la categoría con disponibilidad (`shelf_category(ExS, Cat) & shelf_available(ExS)`). Si la guardia falla, Jason prueba automáticamente el siguiente plan — el fallback entre categorías es implícito, igual que en el antiguo `findBestShelf`.
+
+#### Plan auxiliar `+!pick_least_occupied`
+
+Para elegir entre todas las estanterías disponibles de una categoría se replica el criterio de `findBestShelf` (ordenar por ocupación, tomar la de menor carga):
+
+```agentspeak
++!pick_least_occupied(CId, Cat) <-
+    .findall(pair(Occ, S),
+             (shelf_category(S, Cat) & shelf_available(S) & shelf_occupancy(S, Occ)),
+             Pairs);
+    .sort(Pairs, [pair(_, ShelfId)|_]);
+    +free_shelf(CId, ShelfId).
+```
+
+`.findall` recoge todos los pares `(ocupación, id)`. `.sort` los ordena por el primer argumento del término `pair` — Jason compara términos compuestos argumento a argumento, por lo que `pair(0,"shelf_2") < pair(15,"shelf_1")`. El primer elemento de la lista ordenada es siempre la menos ocupada.
+
+Se usa `pair(Occ, S)` como functor explícito en lugar de `Occ-S` porque Jason evalúa el operador `-` como aritmética, lo que produce `ArithExpr: value is not a number` al intentar restar un átomo de un número.
+
+### Resumen de cambios
+
+| Archivo | Eliminado | Añadido |
+|---|---|---|
+| `WarehouseArtifact.java` | `findBestShelf`, `executeGetFreeShelf`, case `"get_free_shelf"` | `emitShelfAvailable`, `emitShelfOccupancy` |
+| `scheduler.asl` | `get_free_shelf(CId)` | `shelf_category` beliefs, 4 planes `assign_shelf`, `pick_least_occupied` |
+
 ## Sustitución del algoritmo de pathfinding: BFS → Movimiento coordinado con waypoints
 
 ### Problema
