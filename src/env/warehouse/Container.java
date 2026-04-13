@@ -109,7 +109,8 @@ public class Container {
      */
     public List<int[]> getAdyacentes(CellType[][] grid, int gridWidth, int gridHeight) {
         List<int[]> result = new ArrayList<>();
-        int[][] dirs = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+        // Orden: abajo primero (y+1) → los robots se aproximan desde y>1 hacia la zona de entrada
+        int[][] dirs = {{0, 1}, {1, 0}, {-1, 0}, {0, -1}};
         for (int[] d : dirs) {
             int ax = x + d[0], ay = y + d[1];
             if (ax >= 0 && ax < gridWidth && ay >= 0 && ay < gridHeight

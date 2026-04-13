@@ -271,9 +271,10 @@ shelf_category("shelf_9", heavy).
     .abolish(shelf_retries(CId, _)).
 
 +task_failed(CId)[source(Robot)] : true <-
-    .print("⚠️ ", Robot, " reportó fallo con ", CId, ". Reasignando...");
+    .print("⚠️ ", Robot, " reportó fallo con ", CId, ". Reasignando en 10s...");
     -assigned(Robot, CId, _);
     -task_failed(CId)[source(Robot)];
+    .wait(10000);   // Dar tiempo a que la zona de entrada se despeje antes de reasignar
     // Borrar percepto anterior para que el nuevo dispare +container_info
     .abolish(container_info(CId, _, _, _, _, _, _));
     get_container_info(CId).

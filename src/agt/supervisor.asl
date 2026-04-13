@@ -70,18 +70,19 @@ report_interval(30000).
  * CÁLCULO Y REPORTE DE ESTADÍSTICAS
  * ============================================================================ */
 
-// Actualiza las creencias de tasas derivadas
-+!update_rates : total_received(Received) & Received > 0 <-
-    ?total_stored(Stored);
-    ?total_errors(Error);
+// Actualiza las creencias de tasas derivadas.
+// total_stored y total_errors se leen en la guardia (atómica) para evitar la carrera
+// en que otra intención borra y re-añade la creencia mientras el cuerpo se ejecuta.
++!update_rates : total_received(Received) & Received > 0 &
+                 total_stored(Stored) & total_errors(Error) <-
     SuccessRate = (Stored * 100) / Received;
     ErrorRate   = (Error * 100) / Received;
     Pending     = Received - Stored - Error;
-    -success_rate(_); 
+    -success_rate(_);
     +success_rate(SuccessRate);
-    -error_rate(_);   
+    -error_rate(_);
     +error_rate(ErrorRate);
-    -pending(_);      
+    -pending(_);
     +pending(Pending).
 
 // Fallback para evitar división por cero antes de recibir contenedores

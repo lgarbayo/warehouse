@@ -1,5 +1,166 @@
 # Changes
 
+## Corrección de bloqueo en zona de entrada: nav_target obsoleto y cascada de fallos
+
+### Problema
+
+Al probar el sistema con varios contenedores medianos seguidos se producía un bloqueo total: `robot_medium` informaba `path_blocked` y a partir de ahí ningún contenedor más avanzaba. La causa real era una combinación de tres factores:
+
+1. **Condición de carrera en `nav_target`**: `move_to_container(CId)` calcula la celda adyacente libre en el instante T y emite `nav_target(TX, TY)`. Si entre T y el momento en que el robot llega a esa celda (≈3 s a 300 ms/paso) un contenedor nuevo se genera justo en ese punto, `move_step` falla en cada reintento. Tras 6 reintentos (6 s) se dispara `path_blocked`. El `nav_target` computado ya no es válido pero el robot no lo recomputa.
+
+2. **Sin retroceso ante el fallo**: `-!execute_task` enviaba `task_failed` al scheduler, que reasignaba el contenedor de inmediato. El robot volvía a intentarlo desde una posición intermedia en la zona congestionada, obtenía el mismo `path_blocked` en <1 s, y así sucesivamente. La secuencia completa de contenedores encolados (4, 5, 6…) fallaba en cadena con intervalos de 2 s.
+
+3. **Preferencia equivocada de `nav_target`**: `getAdyacentes` ordenaba: arriba (y-1), abajo (y+1), izquierda, derecha. Para contenedores en la fila superior de la zona de entrada (y=0) la celda "arriba" (y=-1) es inválida y la siguiente candidata era la celda lateral a y=0, que puede estar bloqueada por más contenedores. La celda "abajo" (y=1, lado por el que se aproxima el robot) era la más accesible pero se evaluaba segunda.
+
+### Solución
+
+#### 1. Sub-goal `!get_to_container` con reintento de `nav_target`
+
+Se extrae la fase de navegación al contenedor en los tres robots a un sub-goal independiente que recomputa `nav_target` en cada reintento:
+
+```agentspeak
++!get_to_container(CId, N) : N > 0 <-
+    move_to_container(CId);
+    ?nav_target(TX, TY);
+    !navigate(TX, TY).
+
+-!get_to_container(CId, N) : N > 1 <-
+    .wait(5000);
+    N1 = N - 1;
+    !get_to_container(CId, N1).
+// N <= 1: sin plan de fallo → falla hacia -!execute_task
+```
+
+Se invoca con `!get_to_container(CId, 3)`. Cubre dos casos:
+- `move_to_container` devuelve false (todas las celdas adyacentes ocupadas): espera y reintenta.
+- `!navigate` falla con `path_blocked` (la celda que era libre cuando se calculó el `nav_target` ahora tiene un contenedor): recomputa el `nav_target` con el estado actual del entorno y vuelve a navegar.
+
+#### 2. `!safe_return` y mayor espera en `-!execute_task`
+
+Cuando `-!execute_task` dispara tras un fallo, el robot puede estar en una posición intermedia dentro de la zona congestionada. Intentar la siguiente tarea encolada desde ahí podría producir el mismo bloqueo. Se añade un retorno seguro a la posición base antes de procesar la cola:
+
+```agentspeak
+-!execute_task(CId, ShelfId) : true <-
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, task_failed(CId));
+    .wait(5000);      // dar tiempo a que la zona se despeje
+    !safe_return;     // volver a base para salir de zona congestionada
+    !check_queue.
+
++!safe_return : position(InitX, InitY) <- !navigate(InitX, InitY).
+-!safe_return : true <- true.  // si la vuelta también falla, continuar igualmente
+```
+
+#### 3. Backoff en `task_failed` del scheduler
+
+El scheduler esperaba 0 ms antes de reasignar un contenedor fallido. Con la zona de entrada congestionada, esto rellenaba la cola del robot con la misma tarea imposible de inmediato. Se añade una espera:
+
+```agentspeak
++task_failed(CId)[source(Robot)] : true <-
+    .print("⚠️ ", Robot, " reportó fallo con ", CId, ". Reasignando en 10s...");
+    -assigned(Robot, CId, _);
+    -task_failed(CId)[source(Robot)];
+    .wait(10000);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    get_container_info(CId).
+```
+
+#### 4. Preferencia de `nav_target` hacia el robot (`Container.java`)
+
+Se cambia el orden de direcciones en `getAdyacentes` para evaluar primero la celda "abajo" (y+1), que es la más accesible para robots que se aproximan desde y≥3:
+
+```java
+// Antes: arriba, abajo, izquierda, derecha
+int[][] dirs = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+
+// Después: abajo, derecha, izquierda, arriba
+int[][] dirs = {{0, 1}, {1, 0}, {-1, 0}, {0, -1}};
+```
+
+Para contenedores en la fila y=1 (fila inferior de la zona de entrada) la celda adyacente preferida pasa a ser y=2, que está fuera de la zona de entrada y siempre libre de contenedores.
+
+### Comportamiento observado en el log
+
+Sin los cambios: `path_blocked` en el primer intento → cascada de `task_failed` inmediatos → sistema parado.
+
+Con los cambios: 15 contenedores procesados sin ningún `path_blocked`. El único error fue `shelf_full` en `container_10` (shelf_9 llena), que el sistema manejó correctamente: `-!execute_task` limpió el estado, el scheduler esperó 10 s y reasignó a otra estantería.
+
+### Resumen de cambios
+
+| Archivo | Cambio |
+|---|---|
+| `robot_{light,medium,heavy}.asl` | `!execute_task` usa `!get_to_container(CId, 3)` en fase 1; `-!execute_task` añade `wait(5000)` + `!safe_return`; nuevos planes `!get_to_container`, `-!get_to_container`, `!safe_return`, `-!safe_return` |
+| `scheduler.asl` | `task_failed`: añadido `.wait(10000)` antes de `get_container_info` |
+| `Container.java` | `getAdyacentes`: orden de dirs cambiado a `{0,1}, {1,0}, {-1,0}, {0,-1}` |
+
+### Limitación conocida documentada en FUTURE_CHANGES
+
+El encolado informal de tareas (creencias `task` acumuladas en la BB del robot) produce inversión de prioridad cuando una tarea nueva llega mientras el robot ya es `idle` y hay tareas encoladas previas: el plan reactivo `+task : state(idle)` procesa la nueva tarea de inmediato, antes que las ya encoladas. La solución correcta es gestionar la cola de despacho en el scheduler (planificación centralizada).
+
+## Corrección de entorno grueso: navegación movida al agente (Opción B)
+
+### Problema
+La navegación completa (`doMoveTo`, `nextCoordinateStep`, `computeWaypointPath`, `isCorridorRow`) vivía en `WarehouseArtifact.java`. El entorno decidía qué dirección tomar en cada paso, cuándo usar waypoints y cuándo esperar a un robot bloqueante — razonamiento que corresponde al agente.
+
+### Solución
+
+#### Entorno: solo expone primitivas físicas
+
+Se eliminaron todos los métodos de navegación. El entorno ahora expone:
+
+- **`move_step(X, Y)`** — primitiva atómica: mueve el robot exactamente una celda a (X,Y). Falla si la celda está ocupada por otro robot o es obstáculo fijo. Aplasta contenedores no recogidos. Emite `robot_pos(X,Y)` tras el movimiento.
+- **`move_to_shelf(ShelfId)`** — ya no navega: calcula la primera celda adyacente a la estantería y emite `nav_target(X,Y)`.
+- **`move_to_container(CId)`** — igual: emite `nav_target(X,Y)` con la primera celda adyacente al contenedor.
+
+Se eliminó también `return_to_base(X,Y)` (acción Java), reemplazada por `!navigate` en el agente. Se eliminó `activeDestinations` (ya no se necesita coordinación de destinos en Java).
+
+La posición inicial de cada robot se emite como percepción `robot_pos(X,Y)` al arrancar para que los planes de navegación tengan el valor desde el primer ciclo.
+
+#### Agentes: razonan sobre cada paso de navegación
+
+Los tres robots reciben la misma sección de navegación autónoma:
+
+```agentspeak
+corridor_row(1). corridor_row(4). corridor_row(5).
+corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
+
++!navigate(TX, TY) : robot_pos(TX, TY) <- true.
++!navigate(TX, TY) : TX >= 10 & robot_pos(X, Y) & not (Y == TY & corridor_row(TY)) <-
+    !navigate(9, TY);
+    !navigate(TX, TY).
++!navigate(TX, TY) : robot_pos(X, Y) <-
+    !step_with_retry(X, Y, TX, TY, 0);
+    !navigate(TX, TY).
+```
+
+El segundo plan replica la lógica de waypoints de `computeWaypointPath`: para destinos en la zona de almacenamiento (TX≥10), si no estamos ya en el corredor correcto, pasar primero por (9, TY) y luego deslizarse horizontalmente.
+
+`!step_with_retry` intenta `!do_step`; si falla (celda ocupada por otro robot), espera 1 s y reintenta hasta 6 veces. Al agotar reintentos, envía `robot_error(path_blocked)` al supervisor y consulta `?nav_abort_signal` (creencia inexistente) para propagar el fallo hacia `!execute_task` → `-!execute_task` → `task_failed` al scheduler.
+
+`!do_step` elige la dirección prioritaria (eje con mayor distancia Manhattan restante). `!try_x_then_y` / `!try_y_then_x` intentan el eje primario y, si `move_step` falla, el secundario como fallback. Si ambos fallan, `!step_with_retry` reintenta.
+
+El flujo de `execute_task` se actualiza para leer `?nav_target` tras cada acción de movimiento y llamar `!navigate`:
+
+```agentspeak
+move_to_container(CId);
+?nav_target(TX1, TY1);
+!navigate(TX1, TY1);
+// ...
+move_to_shelf(ShelfId);
+?nav_target(TX2, TY2);
+!navigate(TX2, TY2);
+```
+
+`!check_queue` reemplaza `return_to_base(InitX, InitY)` por `!navigate(InitX, InitY)`.
+
+### Resumen de cambios
+
+| Archivo | Eliminado | Añadido |
+|---|---|---|
+| `WarehouseArtifact.java` | `doMoveTo`, `nextCoordinateStep`, `computeWaypointPath`, `isCorridorRow`, `isFreeStep`, `executeReturnToBase`, `activeDestinations`, case `return_to_base` | `executeMoveStep`, `emitNavTarget`, case `move_step`, emit `robot_pos` en init |
+| `robot_{light,medium,heavy}.asl` | `return_to_base(...)` en `check_queue` | sección de navegación completa (`corridor_row`, `!navigate`, `!step_with_retry`, `!do_step`, `!try_x_then_y`, `!try_y_then_x`), `?nav_target` + `!navigate` en `execute_task` |
+
 ## Corrección de entorno grueso: asignación de estanterías movida al agente scheduler
 
 ### Problema

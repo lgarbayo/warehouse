@@ -25,12 +25,6 @@ public class WarehouseArtifact extends Environment {
     private ConcurrentLinkedQueue<Container> pendingContainers;
     private Map<String, String> taskAssignments; // containerId -> robotId
 
-    // Mapa de destinos activos: clave "(X,Y)" → nombre del robot que lo ha reservado.
-    // Evita que dos robots naveguen al mismo destino simultáneamente. La clave es la
-    // coordenada (no el agente) para que el bloque finally de doMoveTo la libere
-    // correctamente aunque el robot cambie de ruta.
-    private Map<String, String> activeDestinations;
-
     // GUI visual
     private WarehouseView view;
 
@@ -56,7 +50,6 @@ public class WarehouseArtifact extends Environment {
         shelves = new ConcurrentHashMap<>();
         pendingContainers = new ConcurrentLinkedQueue<>();
         taskAssignments = new ConcurrentHashMap<>();
-        activeDestinations = new ConcurrentHashMap<>();
 
         // Inicializar grid
         initializeGrid();
@@ -135,6 +128,16 @@ public class WarehouseArtifact extends Environment {
         Robot heavy = new Robot("robot_heavy", "heavy", 100, 2, 3, 1);
         heavy.setPosition(3, 3);
         robots.put("robot_heavy", heavy);
+
+        // Emitir posición inicial de cada robot para que sus planes de navegación
+        // tengan robot_pos disponible desde el primer ciclo.
+        try {
+            addPercept("robot_light",  ASSyntax.parseLiteral("robot_pos(1,3)"));
+            addPercept("robot_medium", ASSyntax.parseLiteral("robot_pos(2,3)"));
+            addPercept("robot_heavy",  ASSyntax.parseLiteral("robot_pos(3,3)"));
+        } catch (jason.asSyntax.parser.ParseException e) {
+            e.printStackTrace();
+        }
     }
 
     /**
@@ -330,6 +333,8 @@ public class WarehouseArtifact extends Environment {
                     return executeMoveToShelf(agName, action);
                 case "move_to_container":
                     return executeMoveToContainer(agName, action);
+                case "move_step":
+                    return executeMoveStep(agName, action);
                 case "pickup":
                     return executePickup(agName, action);
                 case "drop_at":
@@ -340,8 +345,6 @@ public class WarehouseArtifact extends Environment {
                     return executeReleaseTask(agName, action);
                 case "accept_task":
                     return executeAcceptTask(agName, action);
-                case "return_to_base":
-                    return executeReturnToBase(agName, action);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
@@ -353,49 +356,26 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
-     * Acción: return_to_base(X, Y)
-     * Mueve el robot a su posición inicial cuando no tiene tareas pendientes.
-     */
-    private boolean executeReturnToBase(String agName, Structure action) {
-        try {
-            int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
-            int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
-            return doMoveTo(agName, targetX, targetY);
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
-
-    /**
      * Acción: move_to_shelf(ShelfId)
-     * Navega a la celda adyacente libre más cercana a la estantería indicada,
-     * descartando celdas ocupadas por robots o contenedores. Prueba todas las
-     * adyacentes en orden antes de reportar path_blocked. Los errores parciales
-     * de intentos fallidos se limpian antes de emitir el error definitivo.
+     * Calcula la primera celda adyacente a la estantería y emite nav_target(X,Y).
+     * La navegación real la realiza el agente usando !navigate y move_step.
      */
     private boolean executeMoveToShelf(String agName, Structure action) {
         try {
             String shelfId = action.getTerm(0).toString().replace("\"", "");
             Shelf shelf = shelves.get(shelfId);
             if (shelf == null) {
-                addError(agName, "robot_not_found", "Shelf " + shelfId + " not found");
+                System.err.println("[" + agName + "] Shelf not found: " + shelfId);
                 return false;
             }
             List<int[]> adyacentes = getAdyacentes(shelf.getX(), shelf.getY(), shelf.getWidth(), shelf.getHeight());
             for (int[] cell : adyacentes) {
-                if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
-                    // Limpiar errores de path_blocked de intentos anteriores
-                    removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
-                    if (doMoveTo(agName, cell[0], cell[1])) {
-                        return true;
-                    }
-                    // doMoveTo falló (sin ruta BFS), probar siguiente celda adyacente
+                if (!hayContenedorEn(cell[0], cell[1])) {
+                    emitNavTarget(agName, cell[0], cell[1]);
+                    return true;
                 }
             }
-            // Limpiar errores intermedios antes de añadir el definitivo
-            removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
-            addError(agName, "path_blocked", "No free adjacent cell for shelf " + shelfId);
+            System.err.println("[" + agName + "] All adjacent cells occupied for shelf " + shelfId);
             return false;
         } catch (Exception e) {
             e.printStackTrace();
@@ -405,36 +385,111 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: move_to_container(ContainerId)
-     * Igual que executeMoveToShelf pero usa container.getAdyacentes() (lógica
-     * encapsulada en Container.java) en lugar de la versión local para estanterías.
-     * Los contenedores se tratan siempre como 1×1 en el grid.
+     * Calcula la primera celda adyacente al contenedor y emite nav_target(X,Y).
+     * La navegación real la realiza el agente usando !navigate y move_step.
      */
     private boolean executeMoveToContainer(String agName, Structure action) {
         try {
             String containerId = action.getTerm(0).toString().replace("\"", "");
             Container container = containers.get(containerId);
             if (container == null) {
-                addError(agName, "robot_not_found", "Container " + containerId + " not found");
+                System.err.println("[" + agName + "] Container not found: " + containerId);
                 return false;
             }
             List<int[]> adyacentes = container.getAdyacentes(grid, GRID_WIDTH, GRID_HEIGHT);
             for (int[] cell : adyacentes) {
-                if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
-                    // Limpiar errores de path_blocked de intentos anteriores
-                    removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
-                    if (doMoveTo(agName, cell[0], cell[1])) {
-                        return true;
-                    }
-                    // doMoveTo falló (sin ruta BFS), probar siguiente celda adyacente
+                if (!hayContenedorEn(cell[0], cell[1])) {
+                    emitNavTarget(agName, cell[0], cell[1]);
+                    return true;
                 }
             }
-            // Limpiar errores intermedios antes de añadir el definitivo
-            removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
-            addError(agName, "path_blocked", "No free adjacent cell for container " + containerId);
+            System.err.println("[" + agName + "] All adjacent cells occupied for container " + containerId);
             return false;
         } catch (Exception e) {
             e.printStackTrace();
             return false;
+        }
+    }
+
+    /**
+     * Acción: move_step(X, Y)
+     * Primitiva de movimiento atómico: mueve el robot exactamente una celda a (X,Y).
+     * Falla (devuelve false) si la celda está ocupada por otro robot o es un obstáculo
+     * fijo (SHELF, BLOCKED). Si hay un contenedor no recogido en la celda destino,
+     * lo aplasta y continúa (mecánica de aplastamiento).
+     * Emite robot_pos(X,Y) tras el movimiento para que el agente actualice su posición.
+     */
+    private boolean executeMoveStep(String agName, Structure action) {
+        try {
+            int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
+            int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
+
+            Robot robot = robots.get(agName);
+            if (robot == null) return false;
+
+            if (!estaDentroDelMapa(targetX, targetY)) return false;
+            if (grid[targetX][targetY] == CellType.SHELF || grid[targetX][targetY] == CellType.BLOCKED) return false;
+            // Evitar pisar contenedores durante la navegación: el agente elige otra dirección.
+            // La mecánica de aplastamiento dentro del synchronized cubre solo la carrera
+            // en que un contenedor aparece en la celda entre esta comprobación y el movimiento.
+            if (hayContenedorEn(targetX, targetY)) return false;
+
+            synchronized (this) {
+                if (hayRobotCerca(targetX, targetY)) return false;
+
+                // Mecánica de aplastamiento (carrera: contenedor apareció tras el check anterior)
+                List<String> aplastados = new ArrayList<>();
+                for (Container c : containers.values()) {
+                    if (!c.isPicked() && !c.isBroken()
+                            && c.getX() == targetX && c.getY() == targetY) {
+                        aplastados.add(c.getId());
+                    }
+                }
+                for (String crushedId : aplastados) {
+                    containers.remove(crushedId);
+                    System.err.println("[WARNING] " + agName + " aplastó " + crushedId
+                            + " en (" + targetX + "," + targetY + ")");
+                    if (view != null) view.logMessage("💥 " + agName + " aplastó " + crushedId);
+                    try {
+                        addPercept(ASSyntax.parseLiteral("container_broken(\"" + crushedId + "\")"));
+                    } catch (jason.asSyntax.parser.ParseException e) {
+                        e.printStackTrace();
+                    }
+                }
+
+                robot.setPosition(targetX, targetY);
+            }
+
+            // Actualizar percepción de posición del robot
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("robot_pos(_,_)"));
+            addPercept(agName, ASSyntax.parseLiteral("robot_pos(" + targetX + "," + targetY + ")"));
+
+            if (view != null) view.update();
+
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Emite/actualiza la percepción nav_target(X, Y) al agente.
+     * move_to_shelf y move_to_container la usan para comunicar el destino
+     * al agente sin navegar ellos mismos.
+     */
+    private void emitNavTarget(String agName, int x, int y) {
+        try {
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("nav_target(_,_)"));
+            addPercept(agName, ASSyntax.parseLiteral("nav_target(" + x + "," + y + ")"));
+        } catch (jason.asSyntax.parser.ParseException e) {
+            e.printStackTrace();
         }
     }
 
@@ -471,229 +526,6 @@ public class WarehouseArtifact extends Environment {
                 result.add(new int[]{ax, ay});
         }
         return result;
-    }
-
-    /**
-     * Núcleo de navegación: mueve el robot agName hasta (targetX, targetY).
-     *
-     * Navegación coordinada por waypoints.
-     * Cada paso se calcula en O(1) comparando coordenadas; sin BFS ni colas.
-     *
-     * Para destinos en la zona de almacenamiento (x≥10) se usa x=9 como
-     * corredor vertical libre: el robot navega primero a (9, targetY) y luego
-     * desliza horizontalmente hasta (targetX, targetY). Esto evita atravesar
-     * filas de estanterías sin necesidad de búsqueda exhaustiva.
-     *
-     * Si un paso está ocupado por otro robot se espera hasta 3 s; pasado ese
-     * tiempo se recalcula el paso evitando robots. Si sigue bloqueado, fallo.
-     *
-     * La mecánica de aplastamiento ocurre dentro del bucle paso a paso:
-     * si un contenedor no recogido ocupa la celda destino del paso, se elimina
-     * del mapa y se emite container_broken globalmente antes de mover el robot.
-     */
-    private boolean doMoveTo(String agName, int targetX, int targetY) {
-        String destKey = targetX + "," + targetY;
-        try {
-            Robot robot = robots.get(agName);
-            if (robot == null) {
-                addError(agName, "robot_not_found", "Robot " + agName + " not found");
-                return false;
-            }
-
-            // Verificar límites
-            if (targetX < 0 || targetX >= GRID_WIDTH || targetY < 0 || targetY >= GRID_HEIGHT) {
-                addError(agName, "illegal_move", "Position out of bounds: (" + targetX + "," + targetY + ")");
-                return false;
-            }
-
-            // Verificar si hay obstáculos permanentes
-            if (grid[targetX][targetY] == CellType.BLOCKED) {
-                addError(agName, "route_blocked", "Position blocked: (" + targetX + "," + targetY + ")");
-                return false;
-            }
-
-            // Verificar conflictos de destino con otros robots en movimiento
-            if (activeDestinations != null) {
-                String claimingRobot = activeDestinations.putIfAbsent(destKey, agName);
-                if (claimingRobot != null && !claimingRobot.equals(agName)) {
-                    addError(agName, "destination_conflict", "Another robot is moving to this exact destination");
-                    return false;
-                }
-            }
-
-            // Navegación por waypoints con pasos coordinados (O(1) por paso)
-            List<int[]> waypoints = computeWaypointPath(
-                    robot.getX(), robot.getY(), targetX, targetY);
-
-            for (int[] wp : waypoints) {
-                int blockedCount = 0;
-
-                while (robot.getX() != wp[0] || robot.getY() != wp[1]) {
-                    // Paso coordinado: prioriza el eje con mayor distancia restante.
-                    // Tras 3 s bloqueado por un robot, activa avoidRobots para buscar
-                    // una dirección alternativa libre.
-                    List<int[]> step = nextCoordinateStep(
-                            robot.getX(), robot.getY(), wp[0], wp[1], blockedCount >= 3);
-
-                    if (step.isEmpty()) {
-                        addError(agName, "path_blocked",
-                                "No route to waypoint (" + wp[0] + "," + wp[1] + ")");
-                        if (activeDestinations != null) activeDestinations.remove(destKey, agName);
-                        return false;
-                    }
-
-                    int[] siguiente = step.get(0);
-                    boolean moved = false;
-
-                    synchronized (this) {
-                        if (!hayRobotCerca(siguiente[0], siguiente[1])) {
-                            // Mecánica de aplastamiento
-                            List<String> aplastados = new ArrayList<>();
-                            for (Container c : containers.values()) {
-                                if (!c.isPicked() && !c.isBroken()
-                                        && c.getX() == siguiente[0] && c.getY() == siguiente[1]) {
-                                    aplastados.add(c.getId());
-                                }
-                            }
-                            for (String crushedId : aplastados) {
-                                containers.remove(crushedId);
-                                System.err.println("[WARNING] " + agName + " aplastó " + crushedId
-                                        + " en (" + siguiente[0] + "," + siguiente[1] + ")");
-                                if (view != null) view.logMessage("💥 " + agName + " aplastó " + crushedId);
-                                try {
-                                    addPercept(ASSyntax.parseLiteral(
-                                            "container_broken(\"" + crushedId + "\")"));
-                                } catch (jason.asSyntax.parser.ParseException e) {
-                                    e.printStackTrace();
-                                }
-                            }
-                            robot.setPosition(siguiente[0], siguiente[1]);
-                            moved = true;
-                        }
-                    }
-
-                    if (!moved) {
-                        blockedCount++;
-                        if (blockedCount > 6) {
-                            // Bloqueado más de 6 s: fallo definitivo
-                            addError(agName, "path_blocked",
-                                    "Camino permanentemente bloqueado hacia ("
-                                            + wp[0] + "," + wp[1] + ")");
-                            if (activeDestinations != null) activeDestinations.remove(destKey, agName);
-                            return false;
-                        }
-                        try {
-                            Thread.sleep(1000);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-                        continue;
-                    }
-
-                    blockedCount = 0;
-
-                    if (view != null) view.update();
-
-                    try {
-                        Thread.sleep(300);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            }
-
-            // Log a la consola de la GUI al finalizar
-            if (view != null) {
-                view.logMessage(String.format("➡️  %s moved to (%d,%d)", agName, targetX, targetY));
-            }
-
-            // Actualizar percepción final en el agente
-            removePerceptsByUnif(agName, ASSyntax.parseLiteral("robot_at(_,_)"));
-            addPercept(agName, ASSyntax.parseLiteral("robot_at(" + targetX + "," + targetY + ")"));
-
-            if (view != null) view.update();
-
-            return true;
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        } finally {
-            if (activeDestinations != null) {
-                activeDestinations.remove(destKey);
-            }
-        }
-    }
-
-    /**
-     * Calcula el siguiente paso de movimiento coordinado hacia (toX, toY).
-     * Inspirado en el robot doméstico de Jason: O(1) en tiempo y memoria, sin BFS.
-     *
-     * Prioriza el eje con mayor distancia Manhattan restante. Si la dirección
-     * preferida está bloqueada por una estantería u obstáculo, intenta la
-     * perpendicular. Si ambas están bloqueadas, devuelve lista vacía: el robot
-     * esperará (yield) y reintentará en el siguiente ciclo.
-     *
-     * @param avoidRobots si true, trata las celdas ocupadas por robots como bloqueadas
-     */
-    private List<int[]> nextCoordinateStep(int fromX, int fromY, int toX, int toY, boolean avoidRobots) {
-        if (fromX == toX && fromY == toY) return Collections.emptyList();
-
-        int dx = Integer.compare(toX, fromX); // -1, 0 o +1
-        int dy = Integer.compare(toY, fromY); // -1, 0 o +1
-        boolean xFirst = Math.abs(toX - fromX) >= Math.abs(toY - fromY);
-
-        if (xFirst) {
-            if (dx != 0 && isFreeStep(fromX + dx, fromY, avoidRobots)) return List.of(new int[]{fromX + dx, fromY});
-            if (dy != 0 && isFreeStep(fromX, fromY + dy, avoidRobots)) return List.of(new int[]{fromX, fromY + dy});
-        } else {
-            if (dy != 0 && isFreeStep(fromX, fromY + dy, avoidRobots)) return List.of(new int[]{fromX, fromY + dy});
-            if (dx != 0 && isFreeStep(fromX + dx, fromY, avoidRobots)) return List.of(new int[]{fromX + dx, fromY});
-        }
-
-        return Collections.emptyList();
-    }
-
-    private boolean isFreeStep(int x, int y, boolean avoidRobots) {
-        if (!estaDentroDelMapa(x, y)) return false;
-        if (grid[x][y] == CellType.SHELF || grid[x][y] == CellType.BLOCKED) return false;
-        if (hayContenedorEn(x, y)) return false;
-        if (avoidRobots && hayRobotCerca(x, y)) return false;
-        return true;
-    }
-
-    /**
-     * Calcula los waypoints para navegar de (fromX,fromY) a (toX,toY).
-     *
-     * En la zona de almacenamiento (x≥10), los destinos son siempre celdas
-     * adyacentes a estanterías que caen en los corredores horizontales libres
-     * (y=1,4,5,8,9,13). Para llegar a ellos sin cruzar filas de estanterías,
-     * se usa x=9 como corredor vertical libre: primero se alcanza (9, toY) y
-     * luego se desliza horizontalmente hasta (toX, toY).
-     *
-     * Si el robot ya está en el mismo corredor que el destino, va directo.
-     */
-    private List<int[]> computeWaypointPath(int fromX, int fromY, int toX, int toY) {
-        List<int[]> waypoints = new ArrayList<>();
-
-        if (toX >= 10) {
-            // Solo añadir waypoint de corredor si no estamos ya en la misma fila libre
-            boolean sameCorridorRow = (fromY == toY) && isCorridorRow(toY);
-            if (!sameCorridorRow) {
-                waypoints.add(new int[]{9, toY});
-            }
-        }
-
-        waypoints.add(new int[]{toX, toY});
-        return waypoints;
-    }
-
-    /**
-     * Devuelve true si y es una fila de corredor libre en la zona de almacenamiento.
-     * Estas filas no contienen estanterías en ninguna x≥10.
-     */
-    private boolean isCorridorRow(int y) {
-        return y == 1 || y == 4 || y == 5 || y == 8 || y == 9 || y == 13 || y == 14;
     }
 
     private boolean hayContenedorEn(int x, int y) {

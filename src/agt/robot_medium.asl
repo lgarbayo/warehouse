@@ -56,10 +56,10 @@ carrying(none).      // Contenedor que está cargando
 // Ejecutar la tarea completa
 +!execute_task(CId, ShelfId) : true <-
     .print("🚀 Iniciando tarea: ", CId);
-    
-    // Fase 1: Localizar y navegar al contenedor
-    .print("📍 Fase 1: Localizando contenedor ", CId);
-    move_to_container(CId);
+
+    // Fase 1: Localizar y navegar al contenedor (hasta 3 reintentos con nav_target fresco)
+    .print("📍 [MEDIUM] Fase 1: Localizando contenedor ", CId);
+    !get_to_container(CId, 3);
     .wait(600);
 
     // Fase 2: Recoger el contenedor
@@ -72,13 +72,15 @@ carrying(none).      // Contenedor que está cargando
     .print("🚚 Fase 3: Transportando a estantería ", ShelfId);
     -+state(carrying);
     move_to_shelf(ShelfId);
-    
+    ?nav_target(TX2, TY2);
+    !navigate(TX2, TY2);
+
     // Fase 4: Depositar el contenedor
     .print("📥 Fase 4: Depositando en ", ShelfId);
     -+state(dropping);
     drop_at(ShelfId);
     .wait(600);
-    
+
     // Fase 5: Completar y verificar cola
     .print("✨ Tarea completada: ", CId);
     -+carrying(none);
@@ -90,14 +92,32 @@ carrying(none).      // Contenedor que está cargando
  * ============================================================================ */
 
 // Plan de fallo para execute_task: esencial según DEBUGGING.md
-// Se activa cuando una acción dentro de execute_task falla (pickup, drop_at...)
 -!execute_task(CId, ShelfId) : true <-
-    .print("⚠️ Fallo en execute_task para ", CId, ". Limpiando estado...");
-    .wait(1500); // Pausa de seguridad
+    .print("⚠️ [MEDIUM] Fallo en execute_task para ", CId, ". Limpiando estado...");
     -+carrying(none);
     release_task(CId);
     .send(scheduler, tell, task_failed(CId));
+    .wait(5000);       // Esperar a que la zona de entrada se despeje
+    !safe_return;      // Volver a base para salir de zona congestionada
     !check_queue.
+
+// Navegar a la base de forma segura; si también falla, continuar igualmente
++!safe_return : position(InitX, InitY) <- !navigate(InitX, InitY).
+-!safe_return : true <- true.
+
+// Navegar hasta una celda adyacente al contenedor; reintenta hasta N veces
+// recomputando nav_target (cubre: celda ocupada por nuevo contenedor mid-nav).
++!get_to_container(CId, N) : N > 0 <-
+    move_to_container(CId);
+    ?nav_target(TX, TY);
+    !navigate(TX, TY).
+
+-!get_to_container(CId, N) : N > 1 <-
+    .print("⚠️ [MEDIUM] Reintentando nav a ", CId, " (", N, " intentos restantes)");
+    .wait(5000);
+    N1 = N - 1;
+    !get_to_container(CId, N1).
+// N <= 1: sin plan de fallo aplicable → goal falla → propaga a execute_task → -!execute_task
 
 // Verificar si hay más tareas encoladas antes de volver a idle
 +!check_queue : task(CId, ShelfId) <-
@@ -109,12 +129,75 @@ carrying(none).      // Contenedor que está cargando
     !execute_task(CId, ShelfId).
 
 +!check_queue : not task(_, _) & position(InitX, InitY) <-
-    return_to_base(InitX, InitY);
+    !navigate(InitX, InitY);
     -+state(idle).
 
 -!check_queue : not task(_, _) <-
     .abolish(error(_, _));
     -+state(idle).
+
+/* ============================================================================
+ * NAVEGACIÓN AUTÓNOMA
+ * El agente decide cada paso; Java solo ejecuta move_step(X,Y) como primitiva.
+ * corridor_row(Y): filas libres de estanterías en la zona de almacenamiento.
+ * ============================================================================ */
+
+corridor_row(1). corridor_row(4). corridor_row(5).
+corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
+
+// Llegamos al destino
++!navigate(TX, TY) : robot_pos(TX, TY) <- true.
+
+// Destino en zona de almacenamiento (x>=10) y no estamos ya en el corredor correcto:
+// navegar primero al corredor vertical libre (x=9, y=TY), luego deslizar al destino.
++!navigate(TX, TY) : TX >= 10 & robot_pos(X, Y) & not (Y == TY & corridor_row(TY)) <-
+    !navigate(9, TY);
+    !navigate(TX, TY).
+
+// Paso a paso hacia el destino (greedy Manhattan)
++!navigate(TX, TY) : robot_pos(X, Y) <-
+    !step_with_retry(X, Y, TX, TY, 0);
+    !navigate(TX, TY).
+
+// Intentar un paso; si falla (celda ocupada por robot), reintentar hasta 6 veces
++!step_with_retry(X, Y, TX, TY, BC) <- !do_step(X, Y, TX, TY).
+
+-!step_with_retry(X, Y, TX, TY, BC) : BC < 6 <-
+    .wait(1000);
+    BC1 = BC + 1;
+    ?robot_pos(CX, CY);
+    !step_with_retry(CX, CY, TX, TY, BC1).
+
+-!step_with_retry(_, _, _, _, _) <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, path_blocked, "permanently_blocked"));
+    ?nav_abort_signal.   // creencia inexistente: falla y propaga fallo hacia arriba
+
+// step_done: flag temporal que se activa cuando move_step tiene éxito.
+// Permite que ?step_done al final de do_step distinga "movió" de "ambos ejes bloqueados".
+
+// Prioridad X si |dx| >= |dy|
++!do_step(X, Y, TX, TY) : TX > X & TY >= Y & TX - X >= TY - Y <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
++!do_step(X, Y, TX, TY) : TX > X & TY <  Y & TX - X >= Y - TY <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
++!do_step(X, Y, TX, TY) : TX < X & TY >= Y & X - TX >= TY - Y <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
++!do_step(X, Y, TX, TY) : TX < X & TY <  Y & X - TX >= Y - TY <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
++!do_step(X, Y, TX, TY) <- -step_done; !try_y_then_x(X, Y, TX, TY); ?step_done.   // prioridad Y
+
+// Intentar eje X primero; si falla (bloqueado), intentar eje Y como fallback.
+// +step_done marca éxito. Catch-all con body true: no añade step_done → ?step_done falla
+// en do_step → step_with_retry reintenta con delay.
++!try_x_then_y(X, Y, TX, TY) : TX > X <- NX = X + 1; move_step(NX, Y); +step_done.
++!try_x_then_y(X, Y, TX, TY) : TX < X <- NX = X - 1; move_step(NX, Y); +step_done.
+-!try_x_then_y(X, Y, TX, TY) : TY > Y <- NY = Y + 1; move_step(X, NY); +step_done.
+-!try_x_then_y(X, Y, TX, TY) : TY < Y <- NY = Y - 1; move_step(X, NY); +step_done.
+-!try_x_then_y(X, Y, TX, TY) <- true.   // ambos ejes bloqueados o TY==Y sin fallback
+
+// Intentar eje Y primero; si falla (bloqueado), intentar eje X como fallback.
++!try_y_then_x(X, Y, TX, TY) : TY > Y <- NY = Y + 1; move_step(X, NY); +step_done.
++!try_y_then_x(X, Y, TX, TY) : TY < Y <- NY = Y - 1; move_step(X, NY); +step_done.
+-!try_y_then_x(X, Y, TX, TY) : TX > X <- NX = X + 1; move_step(NX, Y); +step_done.
+-!try_y_then_x(X, Y, TX, TY) : TX < X <- NX = X - 1; move_step(NX, Y); +step_done.
+-!try_y_then_x(X, Y, TX, TY) <- true.   // ambos ejes bloqueados o TX==X sin fallback
 
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);

@@ -24,3 +24,10 @@ Memoria: 80
 - Cómo se tiene en cuenta las etiquetas urgent y fragile en la asignación de los contenedores? Realmente se hace como se dice en la memoria? En código los contenedores son asignados a la cola del correspondiente robot sin tener ninguna matización de si es urgente o fragile.
 - El rol que está manteniendo ahora el Scheduler es de broker centralizado, por lo que la arquitectura es centralizada en el Scheduler.
 - Ojo con este tipo de afirmaciones: "El supervisor confirma la operación mediante el reporte periódico, que muestra tasas de éxito del 100 % en escenarios sin saturación.". Estas afirmaciones del 100 % sin un respaldo documentado son complicadas de mantener.
+
+# 2nd Iteration
+The environment can only provide the location of the agents, the shelves and containers.
+A new outbound area located in the area opposite to the entry point.
+Temporal control: the scheduler will indicate which packages must be in the outbound area and the time limit by which they must be there (deadline).
+Scheduler coordination change: the scheduler will no longer act as the central information provider; robots will query the environment to obtain package locations.
+Distributed coordination among robots to organize themselves autonomously and efficiently, without relying on the scheduler to assign specific tasks, in order to optimize workflow.
