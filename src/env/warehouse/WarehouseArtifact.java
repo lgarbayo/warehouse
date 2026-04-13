@@ -27,9 +27,9 @@ public class WarehouseArtifact extends Environment {
     private Map<String, String> taskAssignments; // containerId -> robotId
 
     // Mapa de destinos activos: clave "(X,Y)" → nombre del robot que lo ha reservado.
-    // Evita que dos robots calculen BFS al mismo destino simultáneamente y lleguen
-    // a la misma celda. La clave es la coordenada (no el agente) para que el bloque
-    // finally de doMoveTo la libere correctamente aunque el robot cambie de ruta.
+    // Evita que dos robots naveguen al mismo destino simultáneamente. La clave es la
+    // coordenada (no el agente) para que el bloque finally de doMoveTo la libere
+    // correctamente aunque el robot cambie de ruta.
     private Map<String, String> activeDestinations;
 
     // GUI visual
@@ -473,12 +473,16 @@ public class WarehouseArtifact extends Environment {
     /**
      * Núcleo de navegación: mueve el robot agName hasta (targetX, targetY).
      *
-     * Estrategia en dos fases:
-     *   Fase 1 (optimista): BFS ignorando robots en movimiento. Más eficiente
-     *     y evita que robots se bloqueen mutuamente al calcular rutas simultáneas.
-     *   Fase 2 (reactiva): Si un paso lleva 3 s bloqueado, recalcula con
-     *     avoidRobots=true para esquivar robots que están parados. Se resetea
-     *     tras cada recálculo exitoso para volver a modo optimista.
+     * Navegación coordinada por waypoints.
+     * Cada paso se calcula en O(1) comparando coordenadas; sin BFS ni colas.
+     *
+     * Para destinos en la zona de almacenamiento (x≥10) se usa x=9 como
+     * corredor vertical libre: el robot navega primero a (9, targetY) y luego
+     * desliza horizontalmente hasta (targetX, targetY). Esto evita atravesar
+     * filas de estanterías sin necesidad de búsqueda exhaustiva.
+     *
+     * Si un paso está ocupado por otro robot se espera hasta 3 s; pasado ese
+     * tiempo se recalcula el paso evitando robots. Si sigue bloqueado, fallo.
      *
      * La mecánica de aplastamiento ocurre dentro del bucle paso a paso:
      * si un contenedor no recogido ocupa la celda destino del paso, se elimina
@@ -499,23 +503,11 @@ public class WarehouseArtifact extends Environment {
                 return false;
             }
 
-            // Verificar si hay obstáculos (excepto estanterías que son destinos válidos)
+            // Verificar si hay obstáculos permanentes
             if (grid[targetX][targetY] == CellType.BLOCKED) {
                 addError(agName, "route_blocked", "Position blocked: (" + targetX + "," + targetY + ")");
                 return false;
             }
-
-            /*
-             * // Verificar conflictos finales con otros robots
-             * for (Robot other : robots.values()) {
-             * if (!other.getId().equals(agName) && other.getX() == targetX && other.getY()
-             * == targetY) {
-             * addError(agName, "conflict", "Conflict with " + other.getId() +
-             * " at destination");
-             * return false;
-             * }
-             * }
-             */
 
             // Verificar conflictos de destino con otros robots en movimiento
             if (activeDestinations != null) {
@@ -526,93 +518,84 @@ public class WarehouseArtifact extends Environment {
                 }
             }
 
-            // 1. CÁLCULO INICIAL: Optimista (ignorando robots en movimiento)
-            boolean avoidRobots = false;
-            List<int[]> pos = calcularRuta(robot.getX(), robot.getY(), targetX, targetY, avoidRobots);
+            // Navegación por waypoints con pasos coordinados (O(1) por paso)
+            List<int[]> waypoints = computeWaypointPath(
+                    robot.getX(), robot.getY(), targetX, targetY);
 
-            // Si no hay ruta y el robot no está ya en el destino, fallo
-            if (pos.isEmpty() && (robot.getX() != targetX || robot.getY() != targetY)) {
-                addError(agName, "path_blocked", "No route found to (" + targetX + "," + targetY + ")");
-                if (activeDestinations != null) {
-                    activeDestinations.remove(destKey, agName);
-                }
-                return false;
-            }
+            for (int[] wp : waypoints) {
+                int blockedCount = 0;
 
-            // 2. MOVIMIENTO PASO A PASO (Reactivo)
-            while (!pos.isEmpty()) {
-                // Miramos cuál es nuestro próximo paso inmediato
-                int[] siguientePaso = pos.get(0);
-                int cont = 0;
+                while (robot.getX() != wp[0] || robot.getY() != wp[1]) {
+                    // Paso coordinado: prioriza el eje con mayor distancia restante.
+                    // Tras 3 s bloqueado por un robot, activa avoidRobots para buscar
+                    // una dirección alternativa libre.
+                    List<int[]> step = nextCoordinateStep(
+                            robot.getX(), robot.getY(), wp[0], wp[1], blockedCount >= 3);
 
-                boolean moved = false;
-                while (!moved && cont < 3) {
+                    if (step.isEmpty()) {
+                        addError(agName, "path_blocked",
+                                "No route to waypoint (" + wp[0] + "," + wp[1] + ")");
+                        if (activeDestinations != null) activeDestinations.remove(destKey, agName);
+                        return false;
+                    }
+
+                    int[] siguiente = step.get(0);
+                    boolean moved = false;
+
                     synchronized (this) {
-                        if (!hayRobotCerca(siguientePaso[0], siguientePaso[1])) {
-                            // Comprobar si hay un container en la celda destino y destruirlo
-                            List<String> crushedIds = new ArrayList<>();
+                        if (!hayRobotCerca(siguiente[0], siguiente[1])) {
+                            // Mecánica de aplastamiento
+                            List<String> aplastados = new ArrayList<>();
                             for (Container c : containers.values()) {
                                 if (!c.isPicked() && !c.isBroken()
-                                        && c.getX() == siguientePaso[0] && c.getY() == siguientePaso[1]) {
-                                    crushedIds.add(c.getId());
+                                        && c.getX() == siguiente[0] && c.getY() == siguiente[1]) {
+                                    aplastados.add(c.getId());
                                 }
                             }
-                            for (String crushedId : crushedIds) {
+                            for (String crushedId : aplastados) {
                                 containers.remove(crushedId);
                                 System.err.println("[WARNING] " + agName + " aplastó " + crushedId
-                                        + " en (" + siguientePaso[0] + "," + siguientePaso[1] + ")");
-                                if (view != null) {
-                                    view.logMessage("💥 " + agName + " aplastó " + crushedId);
+                                        + " en (" + siguiente[0] + "," + siguiente[1] + ")");
+                                if (view != null) view.logMessage("💥 " + agName + " aplastó " + crushedId);
+                                try {
+                                    addPercept(ASSyntax.parseLiteral(
+                                            "container_broken(\"" + crushedId + "\")"));
+                                } catch (jason.asSyntax.parser.ParseException e) {
+                                    e.printStackTrace();
                                 }
-                                addPercept(ASSyntax.parseLiteral(
-                                        "container_broken(\"" + crushedId + "\")"));
                             }
-                            robot.setPosition(siguientePaso[0], siguientePaso[1]);
+                            robot.setPosition(siguiente[0], siguiente[1]);
                             moved = true;
                         }
                     }
 
                     if (!moved) {
+                        blockedCount++;
+                        if (blockedCount > 6) {
+                            // Bloqueado más de 6 s: fallo definitivo
+                            addError(agName, "path_blocked",
+                                    "Camino permanentemente bloqueado hacia ("
+                                            + wp[0] + "," + wp[1] + ")");
+                            if (activeDestinations != null) activeDestinations.remove(destKey, agName);
+                            return false;
+                        }
                         try {
                             Thread.sleep(1000);
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                         }
-                        cont++;
-                    }
-                }
-
-                // Si pasaron los 3 segundos y el obstáculo sigue ahí, recalculamos
-                if (!moved) {
-                    avoidRobots = true; // Ahora sí, buscamos ruta esquivando robots fijos
-                    List<int[]> nuevaRuta = calcularRuta(robot.getX(), robot.getY(), targetX, targetY, avoidRobots);
-
-                    if (nuevaRuta.isEmpty()) {
-                        addError(agName, "path_blocked", "Ruta totalmente bloqueada, imposible avanzar.");
-                        if (activeDestinations != null) {
-                            activeDestinations.remove(destKey, agName);
-                        }
-                        return false;
+                        continue;
                     }
 
-                    // Actualizamos nuestra ruta con la nueva y volvemos a evaluar
-                    pos = nuevaRuta;
-                    avoidRobots = false; // Reseteamos por si este obstáculo también se mueve
-                    continue; // Vuelve al inicio del 'while (!pos.isEmpty())'
-                }
+                    blockedCount = 0;
 
-                // Eliminamos el paso que acabamos de dar de la lista
-                pos.remove(0);
+                    if (view != null) view.update();
 
-                if (view != null) {
-                    view.update();
-                }
-
-                try {
-                    // Tiempo de desplazamiento visual (300ms)
-                    Thread.sleep(300);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
+                    try {
+                        Thread.sleep(300);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
             }
 
@@ -625,9 +608,7 @@ public class WarehouseArtifact extends Environment {
             removePerceptsByUnif(agName, ASSyntax.parseLiteral("robot_at(_,_)"));
             addPercept(agName, ASSyntax.parseLiteral("robot_at(" + targetX + "," + targetY + ")"));
 
-            if (view != null) {
-                view.update();
-            }
+            if (view != null) view.update();
 
             return true;
 
@@ -641,64 +622,75 @@ public class WarehouseArtifact extends Environment {
         }
     }
 
-    private List<int[]> calcularRuta(int inicioX, int inicioY, int destinoX, int destinoY, boolean avoidRobots) {
-        // 1. Estructuras de control
-        // 'padres' guarda: [Celda Actual] -> [Celda de la que venimos]
-        Map<List<Integer>, List<Integer>> mapaPadres = new HashMap<>();
-        Deque<List<Integer>> colaExploracion = new ArrayDeque<>();
+    /**
+     * Calcula el siguiente paso de movimiento coordinado hacia (toX, toY).
+     * Inspirado en el robot doméstico de Jason: O(1) en tiempo y memoria, sin BFS.
+     *
+     * Prioriza el eje con mayor distancia Manhattan restante. Si la dirección
+     * preferida está bloqueada por una estantería u obstáculo, intenta la
+     * perpendicular. Si ambas están bloqueadas, devuelve lista vacía: el robot
+     * esperará (yield) y reintentará en el siguiente ciclo.
+     *
+     * @param avoidRobots si true, trata las celdas ocupadas por robots como bloqueadas
+     */
+    private List<int[]> nextCoordinateStep(int fromX, int fromY, int toX, int toY, boolean avoidRobots) {
+        if (fromX == toX && fromY == toY) return Collections.emptyList();
 
-        // 2. Preparar puntos de inicio y destino
-        List<Integer> celdaInicial = Arrays.asList(inicioX, inicioY);
-        List<Integer> celdaDestino = Arrays.asList(destinoX, destinoY);
+        int dx = Integer.compare(toX, fromX); // -1, 0 o +1
+        int dy = Integer.compare(toY, fromY); // -1, 0 o +1
+        boolean xFirst = Math.abs(toX - fromX) >= Math.abs(toY - fromY);
 
-        colaExploracion.addLast(celdaInicial);
-        mapaPadres.put(celdaInicial, null); // La celda inicial no tiene predecesor
+        if (xFirst) {
+            if (dx != 0 && isFreeStep(fromX + dx, fromY, avoidRobots)) return List.of(new int[]{fromX + dx, fromY});
+            if (dy != 0 && isFreeStep(fromX, fromY + dy, avoidRobots)) return List.of(new int[]{fromX, fromY + dy});
+        } else {
+            if (dy != 0 && isFreeStep(fromX, fromY + dy, avoidRobots)) return List.of(new int[]{fromX, fromY + dy});
+            if (dx != 0 && isFreeStep(fromX + dx, fromY, avoidRobots)) return List.of(new int[]{fromX + dx, fromY});
+        }
 
-        boolean rutaEncontrada = false;
+        return Collections.emptyList();
+    }
 
-        // 3. Algoritmo BFS (Búsqueda en Anchura)
-        while (!colaExploracion.isEmpty()) {
-            List<Integer> actual = colaExploracion.removeFirst();
-            int xActual = actual.get(0);
-            int yActual = actual.get(1);
+    private boolean isFreeStep(int x, int y, boolean avoidRobots) {
+        if (!estaDentroDelMapa(x, y)) return false;
+        if (grid[x][y] == CellType.SHELF || grid[x][y] == CellType.BLOCKED) return false;
+        if (hayContenedorEn(x, y)) return false;
+        if (avoidRobots && hayRobotCerca(x, y)) return false;
+        return true;
+    }
 
-            // Si llegamos al destino, dejamos de buscar
-            if (xActual == destinoX && yActual == destinoY) {
-                rutaEncontrada = true;
-                break;
-            }
+    /**
+     * Calcula los waypoints para navegar de (fromX,fromY) a (toX,toY).
+     *
+     * En la zona de almacenamiento (x≥10), los destinos son siempre celdas
+     * adyacentes a estanterías que caen en los corredores horizontales libres
+     * (y=1,4,5,8,9,13). Para llegar a ellos sin cruzar filas de estanterías,
+     * se usa x=9 como corredor vertical libre: primero se alcanza (9, toY) y
+     * luego se desliza horizontalmente hasta (toX, toY).
+     *
+     * Si el robot ya está en el mismo corredor que el destino, va directo.
+     */
+    private List<int[]> computeWaypointPath(int fromX, int fromY, int toX, int toY) {
+        List<int[]> waypoints = new ArrayList<>();
 
-            // Direcciones: Derecha, Izquierda, Abajo, Arriba
-            int[][] movimientos = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
-
-            for (int[] mov : movimientos) {
-                int sigX = xActual + mov[0];
-                int sigY = yActual + mov[1];
-                List<Integer> vecino = Arrays.asList(sigX, sigY);
-
-                // Verificamos: Límites, Obstáculos, Contenedores y si ya pasamos por ahí
-                if (estaDentroDelMapa(sigX, sigY) &&
-                        grid[sigX][sigY] != CellType.BLOCKED &&
-                        grid[sigX][sigY] != CellType.SHELF &&
-                        !hayContenedorEn(sigX, sigY) &&
-                        !mapaPadres.containsKey(vecino)) {
-
-                    if (avoidRobots) {
-                        if (!hayRobotCerca(sigX, sigY)) {
-                            mapaPadres.put(vecino, actual); // Registramos quién es el "padre" de este vecino
-                            colaExploracion.addLast(vecino);
-                        }
-
-                    } else {
-                        mapaPadres.put(vecino, actual); // Registramos quién es el "padre" de este vecino
-                        colaExploracion.addLast(vecino);
-                    }
-                }
+        if (toX >= 10) {
+            // Solo añadir waypoint de corredor si no estamos ya en la misma fila libre
+            boolean sameCorridorRow = (fromY == toY) && isCorridorRow(toY);
+            if (!sameCorridorRow) {
+                waypoints.add(new int[]{9, toY});
             }
         }
 
-        // 4. Reconstrucción de la ruta (de atrás hacia adelante)
-        return construirRutaFinal(rutaEncontrada, celdaDestino, mapaPadres);
+        waypoints.add(new int[]{toX, toY});
+        return waypoints;
+    }
+
+    /**
+     * Devuelve true si y es una fila de corredor libre en la zona de almacenamiento.
+     * Estas filas no contienen estanterías en ninguna x≥10.
+     */
+    private boolean isCorridorRow(int y) {
+        return y == 1 || y == 4 || y == 5 || y == 8 || y == 9 || y == 13 || y == 14;
     }
 
     private boolean hayContenedorEn(int x, int y) {
@@ -726,26 +718,6 @@ public class WarehouseArtifact extends Environment {
 
     private boolean estaDentroDelMapa(int x, int y) {
         return x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT;
-    }
-
-    private List<int[]> construirRutaFinal(boolean encontrada, List<Integer> destino,
-            Map<List<Integer>, List<Integer>> mapaPadres) {
-        List<int[]> ruta = new ArrayList<>();
-
-        if (encontrada) {
-            List<Integer> pasoActual = destino;
-            while (pasoActual != null) {
-                // Insertamos al principio para que el orden sea Inicio -> Destino
-                ruta.add(0, new int[] { pasoActual.get(0), pasoActual.get(1) });
-                pasoActual = mapaPadres.get(pasoActual);
-            }
-
-            // Quitamos la primera posición (donde ya está el robot)
-            if (!ruta.isEmpty()) {
-                ruta.remove(0);
-            }
-        }
-        return ruta;
     }
 
     /**
