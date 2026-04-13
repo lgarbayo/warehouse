@@ -328,3 +328,154 @@ Con los cambios: 15 contenedores procesados sin ningún `path_blocked`. El únic
 ### Limitación conocida documentada en FUTURE_CHANGES
 
 El encolado informal de tareas (creencias `task` acumuladas en la BB del robot) produce inversión de prioridad cuando una tarea nueva llega mientras el robot ya es `idle` y hay tareas encoladas previas: el plan reactivo `+task : state(idle)` procesa la nueva tarea de inmediato, antes que las ya encoladas. La solución correcta es gestionar la cola de despacho en el scheduler (planificación centralizada).
+
+---
+
+## Zona de expansión: desbordamiento de estanterías a zona de clasificación
+
+### Problema
+
+Cuando `drop_at(ShelfId)` fallaba por `shelf_full`, el robot soltaba el contenedor en el pasillo (corredor adyacente a la estantería). Esto bloqueaba otros robots que necesitaban ese corredor para acceder a la misma estantería, podía provocar aplastamientos y dejaba el contenedor en un estado inconsistente (en el suelo, sin asignación).
+
+### Solución
+
+El contenedor se lleva a la **zona de clasificación** (celdas amarillas, `CellType.CLASSIFICATION`, x=3-6, y=0-1) cuando no cabe en la estantería asignada. Esta zona actúa como área de desbordamiento y comparte las mismas reglas de acceso que la zona de entrada (el robot puede recoger y depositar contenedores en ella). El scheduler reintenta la asignación pasados 5 s.
+
+#### Entorno: dos nuevas primitivas (`WarehouseArtifact.java`)
+
+- **`move_to_expansion`** — busca la celda libre de la zona de clasificación más cercana al robot (distancia Manhattan), emite `nav_target(TX, TY)` y retorna. No navega, solo calcula el destino.
+- **`drop_in_expansion(CId)`** — deposita el contenedor que lleva el robot en la celda actual (posición del robot). Equivalente a `drop_at` pero sin comprobar tipo de celda destino.
+
+`executeDropAt` ya no suelta el contenedor al detectar `shelf_full`; devuelve `false` directamente para que el robot siga cargando el contenedor y pueda llevarlo a la zona de expansión.
+
+#### Agentes: plan de fallo específico para `shelf_full`
+
+Se añade en los tres robots un plan `-!execute_task` **antes** del plan genérico, que se activa únicamente cuando el error es `shelf_full` y el robot sigue cargando el contenedor:
+
+```agentspeak
+-!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) <-
+    .print("⚠️ Estantería llena, llevando ", CId, " a zona de expansión");
+    .abolish(error(shelf_full, _));
+    move_to_expansion;
+    ?nav_target(TX, TY);
+    !navigate(TX, TY);
+    drop_in_expansion(CId);
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, container_in_expansion(CId));
+    !check_queue.
+```
+
+Se añade también el manejador de evento `+error(shelf_full, Data) : true <- true.` (no-op) para que el evento de adición de la creencia `error(shelf_full,...)` no active el plan genérico de error — `shelf_full` lo gestiona el plan de fallo del goal, no el manejador de evento.
+
+#### Scheduler: reasignación desde zona de expansión
+
+Al recibir `container_in_expansion(CId)`, el scheduler elimina la asignación, espera 5 s y solicita de nuevo la información del contenedor para reasignarlo:
+
+```agentspeak
++container_in_expansion(CId)[source(Robot)] : true <-
+    .print("📦 [SCHEDULER] ", CId, " en zona de expansión. Buscando estantería en 5s...");
+    -assigned(Robot, CId, _);
+    .wait(5000);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    get_container_info(CId).
+```
+
+### Resumen de cambios
+
+| Archivo | Cambio |
+|---|---|
+| `WarehouseArtifact.java` | `executeDropAt`: no suelta en `shelf_full`; nuevos métodos `executeMoveToExpansion`, `executeDropInExpansion`; nuevos cases en `switch` |
+| `robot_{light,medium,heavy}.asl` | Plan `-!execute_task : error(shelf_full, _)` añadido antes del genérico; `+error(shelf_full, Data)` no-op añadido antes de los manejadores genéricos |
+| `scheduler.asl` | Plan `+container_in_expansion` para reasignación desde zona de expansión |
+
+---
+
+## Mejoras de navegación: backoff general, sorteo de obstáculos y corrección de bucle infinito
+
+### Problema 1: interbloqueo en el corredor x=9
+
+Dos robots que se aproximaban desde lados opuestos en x=9 se bloqueaban mutuamente: cada uno esperaba a que el otro cediera el paso. Sin mecanismo de retroceso, ninguno avanzaba.
+
+### Problema 2: tarea perdida al encolar durante retorno a base
+
+Si llegaba una tarea nueva (`task(CId, ShelfId)`) mientras un robot navegaba de vuelta a su posición base, el robot la encolaba en la base de creencias. Al pasar a `state(idle)`, el plan reactivo `+task : state(idle)` no disparaba porque la creencia `task` ya estaba en la BB (el trigger solo actúa sobre la *adición*, no sobre el estado previo). La tarea quedaba silenciosamente ignorada.
+
+Además, si `!navigate` fallaba durante el retorno y existía tarea encolada, `-!check_queue : not task(_, _)` no aplicaba y el fallo se propagaba hacia arriba como `task_failed` espurio.
+
+### Problema 3: oscilación del backoff hacia atrás
+
+El backoff inicial retrocedía en la dirección opuesta al destino. Esto funcionaba para el corredor, pero al volver al greedy el robot recalculaba el siguiente paso hacia exactamente la misma celda bloqueada, produciendo un bucle oscilatorio indefinido.
+
+### Problema 4: bucle infinito del backoff perpendicular Y en el corredor de almacenamiento
+
+Al generalizar el backoff a movimiento perpendicular (X±1 para movimientos con componente Y), el movimiento funcionaba bien para obstáculos en la zona de entrada. Pero al usarlo en el corredor de almacenamiento con movimiento puramente horizontal (TY==Y), el paso perpendicular en Y sacaba al robot de la fila del corredor. El plan `+!navigate(TX, TY) : TX >= 10 & not (Y == TY & corridor_row(TY))` se reactivaba, generando un nuevo `!step_with_retry` con BC=0, y el BC nunca llegaba a 6. El robot oscilaba indefinidamente.
+
+### Solución
+
+#### 1. Plan `+state(idle) : task(CId, ShelfId)` y `-!check_queue : task(CId, ShelfId)`
+
+Se añade antes del plan `+state(idle) : not task(_, _)` un plan reactivo que procesa la tarea encolada en la transición a idle:
+
+```agentspeak
++state(idle) : task(CId, ShelfId) <-
+    .print("✅ Tarea pendiente al quedar idle: ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
+```
+
+Se añade también el plan de fallo de `check_queue` cuando hay tarea encolada (evita propagar el fallo de navegación):
+
+```agentspeak
+-!check_queue : task(CId, ShelfId) <-
+    .print("⚠️ Fallo al navegar a base, procesando tarea encolada: ", CId);
+    -task(CId, ShelfId)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
+```
+
+#### 2. Backoff general `!path_backoff` con estrategia híbrida
+
+Se sustituye el anterior `!corridor_backoff` (específico de x=9, retroceso en Y) por `!path_backoff` (cualquier posición, movimiento en X):
+
+```agentspeak
+// Con componente Y (TY != Y): perpendicular en X → cambia columna, evita
+// que el greedy recalcule hacia la misma celda bloqueada.
++!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X + 1; move_step(NX, Y).
++!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X + 1; move_step(NX, Y).
+// Horizontal puro (TY == Y): retrocede en X → no altera la fila del corredor,
+// BC incrementa correctamente hasta path_blocked si el obstáculo es permanente.
++!path_backoff(X, Y, TX, TY) : TX > X <- NX = X - 1; move_step(NX, Y).
++!path_backoff(X, Y, TX, TY) : TX < X <- NX = X + 1; move_step(NX, Y).
++!path_backoff(_, _, _, _) <- true.
+// Fallback si X+1/X-1 está también bloqueado:
+-!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X - 1; move_step(NX, Y).
+-!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X - 1; move_step(NX, Y).
+-!path_backoff(_, _, _, _) <- true.
+```
+
+El plan de backoff activa a partir de BC≥2 (dos fallos consecutivos de `!do_step`):
+
+```agentspeak
+-!step_with_retry(X, Y, TX, TY, BC) : BC >= 2 & BC < 6 <-
+    !path_backoff(X, Y, TX, TY);
+    .wait(1000);
+    BC1 = BC + 1;
+    ?robot_pos(CX, CY);
+    !step_with_retry(CX, CY, TX, TY, BC1).
+```
+
+**Por qué perpendicular X para movimiento con Y**: al moverse a X+1 (o X-1) sin cambiar Y, el robot permanece en la misma fila horizontal. El siguiente ciclo de `!navigate` recalcula el siguiente paso greedy desde la nueva columna, lo que suele ofrecer una ruta distinta que sortea el obstáculo sin volver exactamente a la celda bloqueada.
+
+**Por qué retroceso X para movimiento horizontal puro**: si el robot está en el corredor de almacenamiento (TY==Y, fila de corredor) y se mueve perpendicularmente en Y, el plan `+!navigate : TX>=10 & not (Y==TY & corridor_row(TY))` se reactivaría, generando un nuevo `!step_with_retry` con BC=0 — el BC se resetea indefinidamente y el robot nunca llega a `path_blocked`. El retroceso en X mantiene al robot en la misma fila y permite que BC siga incrementando hasta 6.
+
+### Resumen de cambios
+
+| Archivo | Cambio |
+|---|---|
+| `robot_{light,medium,heavy}.asl` | Reemplazado `!corridor_backoff` por `!path_backoff` con estrategia híbrida; añadido `+state(idle) : task(CId, ShelfId)` antes del plan de supervisor; añadido `-!check_queue : task(CId, ShelfId)`; `-!step_with_retry : BC>=2 & BC<6` llama a `!path_backoff` en lugar de `!corridor_backoff` |

@@ -345,6 +345,10 @@ public class WarehouseArtifact extends Environment {
                     return executeReleaseTask(agName, action);
                 case "accept_task":
                     return executeAcceptTask(agName, action);
+                case "move_to_expansion":
+                    return executeMoveToExpansion(agName);
+                case "drop_in_expansion":
+                    return executeDropInExpansion(agName, action);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
@@ -653,13 +657,8 @@ public class WarehouseArtifact extends Environment {
             // El plan -!execute_task del robot notificará task_failed al scheduler,
             // que reintentará assign_shelf hasta shelf_retries >= 3.
             if (!shelf.canStore(container)) {
-                robot.drop();
-                container.setPicked(false);
-                container.setPosition(robot.getX(), robot.getY());
-                robot.setBusy(false);
-
-                addError(agName, "shelf_full",
-                        "Shelf " + shelfId + " full. Dropped at (" + robot.getX() + "," + robot.getY() + ")");
+                // El robot conserva el contenedor: el agente decidirá llevarlo a la zona de expansión.
+                addError(agName, "shelf_full", "Shelf " + shelfId + " full");
                 return false;
             }
 
@@ -803,6 +802,69 @@ public class WarehouseArtifact extends Environment {
             }
             taskAssignments.values().remove(agName);
 
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: move_to_expansion
+     * Encuentra la celda libre más cercana de la zona CLASSIFICATION y emite nav_target(X,Y).
+     */
+    private boolean executeMoveToExpansion(String agName) {
+        try {
+            Robot robot = robots.get(agName);
+            if (robot == null) return false;
+
+            List<int[]> cells = new ArrayList<>();
+            for (int x = 0; x < GRID_WIDTH; x++) {
+                for (int y = 0; y < GRID_HEIGHT; y++) {
+                    if (grid[x][y] == CellType.CLASSIFICATION && !hayContenedorEn(x, y)) {
+                        cells.add(new int[]{x, y});
+                    }
+                }
+            }
+            if (cells.isEmpty()) return false;
+
+            cells.sort((a, b) -> {
+                int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
+                int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
+                return Integer.compare(da, db);
+            });
+
+            emitNavTarget(agName, cells.get(0)[0], cells.get(0)[1]);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: drop_in_expansion(ContainerId)
+     * Deposita el contenedor en la celda actual del robot (zona CLASSIFICATION).
+     */
+    private boolean executeDropInExpansion(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Robot robot = robots.get(agName);
+            Container container = containers.get(containerId);
+
+            if (robot == null || container == null) return false;
+            if (!robot.isCarrying()) return false;
+
+            int rx = robot.getX(), ry = robot.getY();
+            robot.drop();
+            container.setPicked(false);
+            container.setPosition(rx, ry);
+
+            System.out.println("[" + agName + "] " + containerId + " depositado en zona de expansión (" + rx + "," + ry + ")");
+            if (view != null) {
+                view.logMessage("📦 " + agName + " → expansión: " + containerId + " (" + rx + "," + ry + ")");
+                view.update();
+            }
             return true;
         } catch (Exception e) {
             e.printStackTrace();

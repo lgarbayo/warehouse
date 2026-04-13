@@ -12,7 +12,7 @@ There is no formal planning: no action plan is drawn up before execution. The ag
 
 ## CORRECCIÓN ITERACIÓN 1
 Código: 80
-- En el momento en el que están las estanterías llenas, no parece recomendable dejar los contenedores en los pasillos. En tal caso, podrían devolverse a la zona de Entrada o a la de extensión. Esto también puede darse cuando 2 robots seleccionan la misma estantería y el primero, con su contenedor, la llena lo suficiente para que el segundo no pueda depositarla en esa estantería.
+- ~~En el momento en el que están las estanterías llenas, no parece recomendable dejar los contenedores en los pasillos. En tal caso, podrían devolverse a la zona de Entrada o a la de extensión. Esto también puede darse cuando 2 robots seleccionan la misma estantería y el primero, con su contenedor, la llena lo suficiente para que el segundo no pueda depositarla en esa estantería.~~ ✅ Implementado: zona de expansión (CHANGES.md)
 - Se debe tener cuidado a la hora de calcular la ruta, puesto que se hace en base a un estado presente del entorno, y no en el tiempo futuro en el que se va a realizar la acción, por lo que ese estado del entorno no se cumpla (puede que al calcular la ruta, no existan obstáculos que si se pueden dar cuando los robots se están moviendo en el entorno).
 
 Memoria: 80

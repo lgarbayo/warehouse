@@ -127,6 +127,14 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 // Intentar un paso; si falla (celda ocupada por robot), reintentar hasta 6 veces
 +!step_with_retry(X, Y, TX, TY, BC) <- !do_step(X, Y, TX, TY).
 
+// Backoff general tras ≥2 fallos: retroceder para sortear obstáculo o robot de frente
+-!step_with_retry(X, Y, TX, TY, BC) : BC >= 2 & BC < 6 <-
+    !path_backoff(X, Y, TX, TY);
+    .wait(1000);
+    BC1 = BC + 1;
+    ?robot_pos(CX, CY);
+    !step_with_retry(CX, CY, TX, TY, BC1).
+
 -!step_with_retry(X, Y, TX, TY, BC) : BC < 6 <-
     .wait(1000);
     BC1 = BC + 1;
@@ -164,9 +172,37 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 -!try_y_then_x(X, Y, TX, TY) : TX < X <- NX = X - 1; move_step(NX, Y); +step_done.
 -!try_y_then_x(X, Y, TX, TY) <- true.   // ambos ejes bloqueados o TX==X sin fallback
 
+// Sortear obstáculo según el tipo de movimiento:
+// - Con componente Y (TY != Y): perpendicular en X → cambia columna, el greedy
+//   re-ruteará sin romper la lógica de fila de corredor.
+// - Horizontal puro (TY == Y): retrocede en X → no altera la fila actual, el BC
+//   incrementa correctamente hasta path_blocked si el obstáculo es permanente.
++!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X + 1; move_step(NX, Y).
++!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X + 1; move_step(NX, Y).
++!path_backoff(X, Y, TX, TY) : TX > X <- NX = X - 1; move_step(NX, Y).
++!path_backoff(X, Y, TX, TY) : TX < X <- NX = X + 1; move_step(NX, Y).
++!path_backoff(_, _, _, _) <- true.
+-!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X - 1; move_step(NX, Y).
+-!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X - 1; move_step(NX, Y).
+-!path_backoff(_, _, _, _) <- true.
+
 /* ============================================================================
  * MANEJO DE ERRORES Y FALLOS DE PLANES
  * ============================================================================ */
+
+// Estantería llena: llevar el contenedor a la zona de expansión (amarilla) en lugar
+// de dejarlo en el pasillo. El robot sigue cargándolo tras el fallo de drop_at.
+-!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) <-
+    .print("⚠️ [LIGHT] Estantería llena, llevando ", CId, " a zona de expansión");
+    .abolish(error(shelf_full, _));
+    move_to_expansion;
+    ?nav_target(TX, TY);
+    !navigate(TX, TY);
+    drop_in_expansion(CId);
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, container_in_expansion(CId));
+    !check_queue.
 
 // Plan de fallo esencial (DEBUGGING.md): sin esto Jason no puede recuperarse
 -!execute_task(CId, ShelfId) : true <-
@@ -213,7 +249,19 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .abolish(error(_, _));
     -+state(idle).
 
+// Fallo al navegar a base pero hay tareas encoladas: procesar directamente
+-!check_queue : task(CId, ShelfId) <-
+    .print("⚠️ [LIGHT] Fallo al navegar a base, procesando tarea encolada: ", CId);
+    -task(CId, ShelfId)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
+
 // Error al recoger contenedor (muy pesado o grande)
+// shelf_full lo gestiona -!execute_task: el robot lleva el contenedor a la zona de expansión
++error(shelf_full, Data) : true <- true.
+
 +error(container_too_heavy, Data) : carrying(CId) <-
     .print("❌ ERROR: Contenedor muy pesado - ", Data);
     .send(scheduler, tell, container_error(CId, container_too_heavy));
@@ -301,6 +349,15 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 +state(working) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_state_change(Me, working)).
+
+// Tarea encolada durante la vuelta a base: procesarla al quedar idle
++state(idle) : task(CId, ShelfId) <-
+    .print("✅ [LIGHT] Tarea pendiente al quedar idle: ", CId, " a ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
 
 +state(idle) : not task(_, _) <-
     .my_name(Me);

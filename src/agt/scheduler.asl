@@ -290,7 +290,15 @@ shelf_category("shelf_9", heavy).
     .abolish(container_size_category(CId, _));
     .abolish(shelf_retries(CId, _)).
 
-// 5. Trazabilidad: Almacenamiento confirmado
+// 5. Contenedor depositado en zona de expansión: reasignar cuando haya espacio
++container_in_expansion(CId)[source(Robot)] : true <-
+    .print("📦 [SCHEDULER] ", CId, " en zona de expansión. Buscando estantería en 5s...");
+    -assigned(Robot, CId, _);
+    .wait(5000);
+    .abolish(container_info(CId, _, _, _, _, _, _));
+    get_container_info(CId).
+
+// 6. Trazabilidad: Almacenamiento confirmado
 +container_stored(CId, ShelfId)[source(Robot)] : true <-
     .print("✨ [TRACE] ", Robot, " almacenó ", CId, " en ", ShelfId);
     -assigned(Robot, CId, ShelfId);
