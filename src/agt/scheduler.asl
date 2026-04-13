@@ -38,6 +38,19 @@ containers_heavy([]).
 containers_medium([]).
 containers_light([]).
 
+/* Categorías de estanterías — el scheduler razona sobre esto sin delegar al entorno.
+ * shelf_available(ShelfId) llega como percepción del entorno y se retira cuando
+ * la estantería está llena. La decisión de cuál usar es del agente. */
+shelf_category("shelf_1", light).
+shelf_category("shelf_2", light).
+shelf_category("shelf_3", light).
+shelf_category("shelf_4", light).
+shelf_category("shelf_5", medium).
+shelf_category("shelf_6", medium).
+shelf_category("shelf_7", medium).
+shelf_category("shelf_8", heavy).
+shelf_category("shelf_9", heavy).
+
 // 1. Reaccionar a nuevo contenedor.
 // Se usa un goal intermedio (!process_new_container) en lugar de procesar
 // directamente en el trigger +new_container. Esto permite que el plan de fallo
@@ -79,8 +92,61 @@ containers_light([]).
     .abolish(container_size_category(CId, _));
     .abolish(shelf_retries(CId, _)).
 
-+!assign_shelf(CId) : true <-
-    get_free_shelf(CId).
+// El scheduler razona sobre qué estantería usar consultando sus propias creencias:
+// shelf_category (estática), shelf_available y shelf_occupancy (percepciones del entorno).
+// Jason prueba los planes en orden: primero la categoría preferida; si no hay espacio,
+// cae al siguiente plan (fallback natural de Jason).
+//
+// La guardia verifica que EXISTE al menos una estantería de la categoría deseada
+// (ExS vincula la misma variable en shelf_category y shelf_available).
+// El cuerpo recoge TODAS las disponibles con su ocupación actual, y elige
+// la menos cargada replicando el criterio de findBestShelf pero sin código en el entorno.
+
+// Contenedor ligero → estantería pequeña (fallback a mediana/grande si llenas)
++!assign_shelf(CId) :
+    not container_broken(CId) &
+    container_info(CId, W, H, Weight, _, _, _) &
+    not (Weight > 10) & not (W > 1) & not (H > 1) &
+    shelf_category(ExS, light) & shelf_available(ExS) <-
+    !pick_least_occupied(CId, light).
+
+// Contenedor mediano → estantería mediana (fallback a grande si llenas)
++!assign_shelf(CId) :
+    not container_broken(CId) &
+    container_info(CId, W, H, Weight, _, _, _) &
+    not (Weight > 30) & not (W > 1) & not (H > 2) &
+    shelf_category(ExS, medium) & shelf_available(ExS) <-
+    !pick_least_occupied(CId, medium).
+
+// Contenedor pesado/grande → estantería grande
++!assign_shelf(CId) :
+    not container_broken(CId) &
+    container_info(CId, _, _, _, _, _, _) &
+    shelf_category(ExS, heavy) & shelf_available(ExS) <-
+    !pick_least_occupied(CId, heavy).
+
+// Fallback anti-starvation: categoría preferida llena pero hay espacio en otra.
+// Reproduce el fallback de findBestShelf: elige la menos ocupada de todas las disponibles.
++!assign_shelf(CId) :
+    not container_broken(CId) &
+    container_info(CId, _, _, _, _, _, _) &
+    shelf_available(_) <-
+    .findall(pair(Occ, S), (shelf_available(S) & shelf_occupancy(S, Occ)), Pairs);
+    .sort(Pairs, [pair(_, ShelfId)|_]);
+    +free_shelf(CId, ShelfId).
+
+// Selecciona la estantería menos ocupada de una categoría dada.
+// Estrategia: recoger todos los pares (ocupación, id), ordenar por ocupación
+// (Jason compara compound terms argumento a argumento: pair(0,...) < pair(15,...)),
+// y tomar el primero — equivale al sorted(comparingDouble(occupancy)).get(0)
+// del antiguo findBestShelf, pero razonado por el agente.
++!pick_least_occupied(CId, Cat) <-
+    .findall(pair(Occ, S), (shelf_category(S, Cat) & shelf_available(S) & shelf_occupancy(S, Occ)), Pairs);
+    .sort(Pairs, [pair(_, ShelfId)|_]);
+    +free_shelf(CId, ShelfId).
+
+// Ningún plan anterior aplicó → no hay estantería disponible → falla →
+// dispara -!assign_shelf → lógica de reintento existente.
 
 // Sin espacio: si fue aplastado durante reintentos, abortar limpiamente
 -!assign_shelf(CId) : container_broken(CId) <-

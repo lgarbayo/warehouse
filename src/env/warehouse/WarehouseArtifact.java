@@ -5,7 +5,6 @@ import jason.environment.Environment;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collectors;
 
 /**
  * Artefacto del almacén automatizado Proporciona la API para que los agentes
@@ -153,6 +152,8 @@ public class WarehouseArtifact extends Environment {
             grid[x + 1][2] = CellType.SHELF;
             grid[x][3] = CellType.SHELF;
             grid[x + 1][3] = CellType.SHELF;
+            emitShelfAvailable(shelf.getId());
+            emitShelfOccupancy(shelf.getId(), shelf);
         }
 
         // Fila de estanterías medianas
@@ -163,6 +164,8 @@ public class WarehouseArtifact extends Environment {
                 grid[x + dx][6] = CellType.SHELF;
                 grid[x + dx][7] = CellType.SHELF;
             }
+            emitShelfAvailable(shelf.getId());
+            emitShelfOccupancy(shelf.getId(), shelf);
         }
 
         // Fila de estanterías grandes
@@ -174,6 +177,8 @@ public class WarehouseArtifact extends Environment {
                     grid[x + dx][10 + dy] = CellType.SHELF;
                 }
             }
+            emitShelfAvailable(shelf.getId());
+            emitShelfOccupancy(shelf.getId(), shelf);
         }
     }
 
@@ -331,8 +336,6 @@ public class WarehouseArtifact extends Environment {
                     return executeDropAt(agName, action);
                 case "get_container_info":
                     return executeGetContainerInfo(agName, action);
-                case "get_free_shelf":
-                    return executeGetFreeShelf(agName, action);
                 case "release_task":
                     return executeReleaseTask(agName, action);
                 case "accept_task":
@@ -834,6 +837,20 @@ public class WarehouseArtifact extends Environment {
             robot.setBusy(false);
             container.setAssignedShelf(shelfId);
 
+            // Si la estantería ya no admite más carga, retirar su disponibilidad
+            // del scheduler para que no intente asignarla a futuros contenedores.
+            if (shelf.isFull()) {
+                try {
+                    removePerceptsByUnif("scheduler",
+                            ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+                } catch (jason.asSyntax.parser.ParseException e) {
+                    e.printStackTrace();
+                }
+            }
+
+            // Actualizar ocupación para que el scheduler pueda elegir la menos cargada.
+            emitShelfOccupancy(shelfId, shelf);
+
             totalContainersProcessed++;
 
             // Actualizar percepciones
@@ -861,41 +878,33 @@ public class WarehouseArtifact extends Environment {
 
 
     /**
-     * Encuentra la mejor estantería para un contenedor, priorizando por tipo de
-     * carga.
-     * - Ligero (<= 10kg, 1x1): shelves 1-4 (pequeñas)
-     * - Mediano (<= 30kg, <= 1x2): shelves 5-7 (medianas)
-     * - Pesado (> 30kg o grande): shelves 8-9 (grandes)
+     * Emite la percepción shelf_available(ShelfId) al scheduler.
+     * El scheduler la usa como creencia para razonar qué estantería asignar,
+     * sin delegar esa decisión al entorno.
      */
-    private Shelf findBestShelf(Container container) {
-        List<String> preferredShelves;
-        if (container.getWeight() <= 10 && container.getWidth() <= 1 && container.getHeight() <= 1) {
-            preferredShelves = Arrays.asList("shelf_1", "shelf_2", "shelf_3", "shelf_4");
-        } else if (container.getWeight() <= 30 && container.getWidth() <= 1 && container.getHeight() <= 2) {
-            preferredShelves = Arrays.asList("shelf_5", "shelf_6", "shelf_7");
-        } else {
-            preferredShelves = Arrays.asList("shelf_8", "shelf_9");
+    private void emitShelfAvailable(String shelfId) {
+        try {
+            addPercept("scheduler", ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+        } catch (jason.asSyntax.parser.ParseException e) {
+            e.printStackTrace();
         }
+    }
 
-        // 1. Intentar buscar en las estanterías preferidas
-        List<Shelf> availableShelves = shelves.values().stream()
-                .filter(s -> preferredShelves.contains(s.getId()))
-                .filter(s -> s.canStore(container))
-                .sorted(Comparator.comparingDouble(Shelf::getOccupancyPercentage))
-                .collect(Collectors.toList());
-
-        if (!availableShelves.isEmpty()) {
-            return availableShelves.get(0);
+    /**
+     * Emite/actualiza shelf_occupancy(ShelfId, Occ) al scheduler.
+     * Dato puro: el entorno solo reporta el porcentaje actual; el agente
+     * decide qué hacer con él (elegir la menos cargada).
+     */
+    private void emitShelfOccupancy(String shelfId, Shelf shelf) {
+        try {
+            removePerceptsByUnif("scheduler",
+                    ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\",_)"));
+            int occ = (int) Math.round(shelf.getOccupancyPercentage());
+            addPercept("scheduler",
+                    ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\"," + occ + ")"));
+        } catch (jason.asSyntax.parser.ParseException e) {
+            e.printStackTrace();
         }
-
-        // 2. Fallback: Si no hay espacio en las preferidas, buscar en cualquier otra
-        // (evita starvation)
-        List<Shelf> fallbackShelves = shelves.values().stream()
-                .filter(s -> s.canStore(container))
-                .sorted(Comparator.comparingDouble(Shelf::getOccupancyPercentage))
-                .collect(Collectors.toList());
-
-        return fallbackShelves.isEmpty() ? null : fallbackShelves.get(0);
     }
 
     /**
@@ -928,38 +937,6 @@ public class WarehouseArtifact extends Environment {
             return false;
         }
     }
-
-    /**
-     * Acción: get_free_shelf(ContainerId)
-     * Busca una estantería libre para un contenedor
-     */
-    private boolean executeGetFreeShelf(String agName, Structure action) {
-        try {
-            String containerId = action.getTerm(0).toString().replace("\"", "");
-            Container container = containers.get(containerId);
-
-            if (container == null) {
-                return false;
-            }
-
-            Shelf shelf = findBestShelf(container);
-            if (shelf != null) {
-                addPercept(agName, ASSyntax.parseLiteral(
-                        "free_shelf(\"" + containerId + "\",\"" + shelf.getId() + "\")"));
-                return true;
-            }
-
-            // null → no hay estantería disponible → la acción falla en Jason →
-            // dispara -!assign_shelf(CId) en el scheduler, que reintentará
-            // hasta shelf_retries >= 3 antes de notificar no_shelf_space.
-            return false;
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
-
 
     /**
      * Acción: release_task(ContainerId)
