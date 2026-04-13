@@ -12,8 +12,15 @@ entorno grueso: el entorno se encarga de objetivos que debe realiar el agente: c
 
 There is no formal planning: no action plan is drawn up before execution. The agentes react sequentially. A planning agent RyN, Chapter 11 would generate an optimal plan b ytaking into account all pending containers and the avaliability of robots.
 
-Memorias con lagunas, errores gramaticales, no alineadas con lo que se ha codificado o con fuerte carácter "IF". Hay memorias que explican lo que le gustaria hacer al proyecto, no lo que hace realmente. Hay memorias que empizan diciendo que estudiamos telecomunicaciones. Gramática ortografía: aún utilizando generadores chatgpt copilot que huelen a la legua, haay errores gramaticales y ortograficos que cuelan. las ias cometen el error de generar verdades absolutas sobre lo que dicen, cuando se genra una verdad absoluta se tiene que acompañar de sus evidencias, si no carece de sentido. "Ejemplo: calculamos la ruta más óptima... cálculos dinámicos de movimientos..." NO!!! Lo que generano a veces no se corresponden con lo que realmente es, sobretodo si no están entrenadas en diseño bdi e inteligencia artificial.
+## CORRECCIÓN ITERACIÓN 1
+Código: 80
+- En el momento en el que están las estanterías llenas, no parece recomendable dejar los contenedores en los pasillos. En tal caso, podrían devolverse a la zona de Entrada o a la de extensión. Esto también puede darse cuando 2 robots seleccionan la misma estantería y el primero, con su contenedor, la llena lo suficiente para que el segundo no pueda depositarla en esa estantería.
+- En el supervisor se debe tener cuidado con el envío de mensajes con askOne, puesto que es bloqueante. En el caso de que el robot se encuentre en una tarea larga, bloqueará al supervisor durante mucho tiempo.
+- Se debe tener cuidado a la hora de calcular la ruta, puesto que se hace en base a un estado presente del entorno, y no en el tiempo futuro en el que se va a realizar la acción, por lo que ese estado del entorno no se cumpla (puede que al calcular la ruta, no existan obstáculos que si se pueden dar cuando los robots se están moviendo en el entorno).
 
-Trucos: hacerlas jsutificadas de izquierda a derecha.
-
-La metodologia que se esta explicando no es Prometheus. La metodologia prometheus nos sirve de base para empezar a... nos va a ayudar a... La memoria tiene que seguir una metodología. 
+Memoria: 80
+- Se incluyen diagramas y están referenciados en el texto.
+- Memoria con carácter LLM. Debe ser pulido este carácter.
+- Cómo se tiene en cuenta las etiquetas urgent y fragile en la asignación de los contenedores? Realmente se hace como se dice en la memoria? En código los contenedores son asignados a la cola del correspondiente robot sin tener ninguna matización de si es urgente o fragile.
+- El rol que está manteniendo ahora el Scheduler es de broker centralizado, por lo que la arquitectura es centralizada en el Scheduler.
+- Ojo con este tipo de afirmaciones: "El supervisor confirma la operación mediante el reporte periódico, que muestra tasas de éxito del 100 % en escenarios sin saturación.". Estas afirmaciones del 100 % sin un respaldo documentado son complicadas de mantener.
