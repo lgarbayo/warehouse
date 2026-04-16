@@ -70,18 +70,19 @@ report_interval(30000).
  * CÁLCULO Y REPORTE DE ESTADÍSTICAS
  * ============================================================================ */
 
-// Actualiza las creencias de tasas derivadas
-+!update_rates : total_received(Received) & Received > 0 <-
-    ?total_stored(Stored);
-    ?total_errors(Error);
+// Actualiza las creencias de tasas derivadas.
+// total_stored y total_errors se leen en la guardia (atómica) para evitar la carrera
+// en que otra intención borra y re-añade la creencia mientras el cuerpo se ejecuta.
++!update_rates : total_received(Received) & Received > 0 &
+                 total_stored(Stored) & total_errors(Error) <-
     SuccessRate = (Stored * 100) / Received;
     ErrorRate   = (Error * 100) / Received;
     Pending     = Received - Stored - Error;
-    -success_rate(_); 
+    -success_rate(_);
     +success_rate(SuccessRate);
-    -error_rate(_);   
+    -error_rate(_);
     +error_rate(ErrorRate);
-    -pending(_);      
+    -pending(_);
     +pending(Pending).
 
 // Fallback para evitar división por cero antes de recibir contenedores
@@ -155,9 +156,9 @@ report_interval(30000).
     .print("[SUPERVISOR] ", Robot, ": ", Status).
 
 +!print_robot_status : true <-
-    .send(robot_light,  askOne, state(SL), state(SL));
-    .send(robot_medium, askOne, state(SM), state(SM));
-    .send(robot_heavy,  askOne, state(SH), state(SH));
+    ?robot_status(robot_light,  SL);
+    ?robot_status(robot_medium, SM);
+    ?robot_status(robot_heavy,  SH);
     .print("  robot_light: ",  SL);
     .print("  robot_medium: ", SM);
     .print("  robot_heavy: ",  SH).

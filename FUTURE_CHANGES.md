@@ -8,14 +8,23 @@
 ## 09/04
 Errrores generales de laiteracion 1
 
-entorno grueso: el entorno se encarga de objetivos que debe realiar el agente: cálculo de estadísticas, asignar estantería, determinar la posición del siguiente movimiento. El entorno debe proveer solo percepciones primitivas y los agentes ejercen liberación y razonamiento.
-
 There is no formal planning: no action plan is drawn up before execution. The agentes react sequentially. A planning agent RyN, Chapter 11 would generate an optimal plan b ytaking into account all pending containers and the avaliability of robots.
+Goal -> Draw up a formal plan for how to handle pending containers and robot availability (see Russel and Norvig, Chapter 11).
 
-Algoritmos de busqueda de caminos no apropiados: A*, BFS: Problema, los algoritmos necesitan mucha memoria y no sirven. Buscar algo que nos permitta ser mas eficientes. Podemos inspirarnos en el robot doméstico para el algoritmo. Implementar basándonos en coordenadas. Ha dicho algo de Manhattan, pero no se si para bien o para mal. También podemos odecirle que tenemos puntos de guarda/puntos de salvado, osea tengo puntos seguro entonces mando al robot a un punto y luego a otro. Si dos robots se encuentran, muevo a uno de los dos a una adyacente y dejamos paso al otro.
+## CORRECCIÓN ITERACIÓN 1
+Código: 80
+- Se debe tener cuidado a la hora de calcular la ruta, puesto que se hace en base a un estado presente del entorno, y no en el tiempo futuro en el que se va a realizar la acción, por lo que ese estado del entorno no se cumpla (puede que al calcular la ruta, no existan obstáculos que si se pueden dar cuando los robots se están moviendo en el entorno). Tiene que ver con: "Distributed coordination among robots to organize themselves autonomously and efficiently, without relying on the scheduler to assign specific tasks, in order to optimize workflow."
 
-Memorias con lagunas, errores gramaticales, no alineadas con lo que se ha codificado o con fuerte carácter "IF". Hay memorias que explican lo que le gustaria hacer al proyecto, no lo que hace realmente. Hay memorias que empizan diciendo que estudiamos telecomunicaciones. Gramática ortografía: aún utilizando generadores chatgpt copilot que huelen a la legua, haay errores gramaticales y ortograficos que cuelan. las ias cometen el error de generar verdades absolutas sobre lo que dicen, cuando se genra una verdad absoluta se tiene que acompañar de sus evidencias, si no carece de sentido. "Ejemplo: calculamos la ruta más óptima... cálculos dinámicos de movimientos..." NO!!! Lo que generano a veces no se corresponden con lo que realmente es, sobretodo si no están entrenadas en diseño bdi e inteligencia artificial.
+Memoria: 80
+- Se incluyen diagramas y están referenciados en el texto.
+- Memoria con carácter LLM. Debe ser pulido este carácter.
+- Cómo se tiene en cuenta las etiquetas urgent y fragile en la asignación de los contenedores? Realmente se hace como se dice en la memoria? En código los contenedores son asignados a la cola del correspondiente robot sin tener ninguna matización de si es urgente o fragile.
+- El rol que está manteniendo ahora el Scheduler es de broker centralizado, por lo que la arquitectura es centralizada en el Scheduler.
+- Ojo con este tipo de afirmaciones: "El supervisor confirma la operación mediante el reporte periódico, que muestra tasas de éxito del 100 % en escenarios sin saturación.". Estas afirmaciones del 100 % sin un respaldo documentado son complicadas de mantener.
 
-Trucos: hacerlas jsutificadas de izquierda a derecha.
-
-La metodologia que se esta explicando no es Prometheus. La metodologia prometheus nos sirve de base para empezar a... nos va a ayudar a... La memoria tiene que seguir una metodología. 
+# 2nd Iteration
+The environment can only provide the location of the agents, the shelves and containers.
+A new outbound area located in the area opposite to the entry point.
+Temporal control: the scheduler will indicate which packages must be in the outbound area and the time limit by which they must be there (deadline).
+Scheduler coordination change: the scheduler will no longer act as the central information provider; robots will query the environment to obtain package locations.
+Distributed coordination among robots to organize themselves autonomously and efficiently, without relying on the scheduler to assign specific tasks, in order to optimize workflow.
