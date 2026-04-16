@@ -24,7 +24,6 @@ Memoria: 80
 
 # 2nd Iteration
 The environment can only provide the location of the agents, the shelves and containers.
-A new outbound area located in the area opposite to the entry point.
 Temporal control: the scheduler will indicate which packages must be in the outbound area and the time limit by which they must be there (deadline).
 Scheduler coordination change: the scheduler will no longer act as the central information provider; robots will query the environment to obtain package locations.
 Distributed coordination among robots to organize themselves autonomously and efficiently, without relying on the scheduler to assign specific tasks, in order to optimize workflow.

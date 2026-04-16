@@ -98,17 +98,24 @@ public class WarehouseArtifact extends Environment {
             }
         }
 
-        // Zona de entrada (arriba izquierda)
+        // Zona de salida / outbound (x=0-2, y=0-1)
         for (int x = 0; x < 3; x++) {
             for (int y = 0; y < 2; y++) {
-                grid[x][y] = CellType.ENTRANCE;
+                grid[x][y] = CellType.OUTBOUND;
             }
         }
 
-        // Zona de clasificación
-        for (int x = 3; x < 7; x++) {
+        // Zona de clasificación (x=3-4, y=0-1)
+        for (int x = 3; x < 5; x++) {
             for (int y = 0; y < 2; y++) {
                 grid[x][y] = CellType.CLASSIFICATION;
+            }
+        }
+
+        // Zona de entrada / inbound (x=5-7, y=0-1)
+        for (int x = 5; x < 8; x++) {
+            for (int y = 0; y < 2; y++) {
+                grid[x][y] = CellType.ENTRANCE;
             }
         }
     }
@@ -313,8 +320,8 @@ public class WarehouseArtifact extends Environment {
             }
         }
         if (entranceCells.isEmpty()) {
-            // ENTRANCE llena, colocar en (0,0) como fallback
-            container.setPosition(0, 0);
+            // ENTRANCE llena, colocar en (5,0) como fallback (primera celda de la zona de entrada)
+            container.setPosition(5, 0);
         } else {
             int[] cell = entranceCells.get(rand.nextInt(entranceCells.size()));
             container.setPosition(cell[0], cell[1]);

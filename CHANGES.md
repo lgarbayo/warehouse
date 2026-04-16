@@ -479,3 +479,39 @@ El plan de backoff activa a partir de BC≥2 (dos fallos consecutivos de `!do_st
 | Archivo | Cambio |
 |---|---|
 | `robot_{light,medium,heavy}.asl` | Reemplazado `!corridor_backoff` por `!path_backoff` con estrategia híbrida; añadido `+state(idle) : task(CId, ShelfId)` antes del plan de supervisor; añadido `-!check_queue : task(CId, ShelfId)`; `-!step_with_retry : BC>=2 & BC<6` llama a `!path_backoff` en lugar de `!corridor_backoff` |
+
+---
+
+## Reorganización de zonas: inbound desplazada, clasificación reducida, outbound añadida
+
+### Problema
+
+El layout original tenía la zona de entrada (inbound) en x=0-2 y la zona de clasificación en x=3-6, ambas en y=0-1. No existía zona de salida (outbound). Para la segunda iteración se requiere incorporar una zona de salida dedicada y reposicionar las zonas existentes para acomodarla sin alterar la zona de almacenamiento.
+
+### Solución
+
+Se redefinen las tres franjas horizontales de y=0-1 (fila superior del grid) con las nuevas coordenadas:
+
+| Zona | X anterior | X nueva | Y | Color GUI |
+|---|---|---|---|---|
+| Outbound (nueva) | — | 0-2 | 0-1 | Rojo suave (255,180,180) |
+| Clasificación | 3-6 | 3-4 | 0-1 | Amarillo (255,255,200) |
+| Entrada / Inbound | 0-2 | 5-7 | 0-1 | Verde suave (200,255,200) |
+
+Las posiciones iniciales de los robots (y=3) no se ven afectadas por el cambio — siguen en celdas `EMPTY`.
+
+#### Nuevo tipo de celda `OUTBOUND`
+
+Se añade `OUTBOUND` al enum `CellType` para distinguir semánticamente la zona de salida de la de entrada. El entorno puede así razonar sobre qué zona es cada celda sin depender de coordenadas hardcodeadas en los agentes.
+
+#### Fallback de spawn de contenedor
+
+El fallback de `generateRandomContainer()` cuando la zona de entrada está llena se actualiza de `(0,0)` (ahora zona outbound) a `(5,0)` (primera celda de la nueva zona de entrada).
+
+### Resumen de cambios
+
+| Archivo | Cambio |
+|---|---|
+| `CellType.java` | Añadido valor `OUTBOUND` |
+| `WarehouseView.java` | Añadido case `OUTBOUND` con color rojo suave en el render del grid |
+| `WarehouseArtifact.java` | `initializeGrid()`: tres bloques con nuevas coordenadas; fallback spawn de (0,0) a (5,0) |

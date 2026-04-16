@@ -256,6 +256,9 @@ public class WarehouseView extends JFrame {
                         case CLASSIFICATION:
                             g.setColor(new Color(255, 255, 200));
                             break;
+                        case OUTBOUND:
+                            g.setColor(new Color(255, 180, 180));
+                            break;
                         case STORAGE:
                             g.setColor(new Color(220, 220, 255));
                             break;
