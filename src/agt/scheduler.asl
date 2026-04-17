@@ -38,18 +38,21 @@ containers_heavy([]).
 containers_medium([]).
 containers_light([]).
 
-/* Categorías de estanterías — el scheduler razona sobre esto sin delegar al entorno.
+/* Asignación de estanterías por tipo de contenedor y tamaño.
+ * shelf_for(Urgency, SizeCategory, ShelfId)
+ *   Urgency    : urgent | non_urgent  (urgent=S1,S5,S8; non_urgent=S2-S4,S6,S7,S9)
+ *   SizeCategory: light | medium | heavy  (determina qué robot puede transportarlo)
  * shelf_available(ShelfId) llega como percepción del entorno y se retira cuando
  * la estantería está llena. La decisión de cuál usar es del agente. */
-shelf_category("shelf_1", light).
-shelf_category("shelf_2", light).
-shelf_category("shelf_3", light).
-shelf_category("shelf_4", light).
-shelf_category("shelf_5", medium).
-shelf_category("shelf_6", medium).
-shelf_category("shelf_7", medium).
-shelf_category("shelf_8", heavy).
-shelf_category("shelf_9", heavy).
+shelf_for(urgent, light, "shelf_1").
+shelf_for(urgent, medium, "shelf_5").
+shelf_for(urgent, heavy, "shelf_8").
+shelf_for(non_urgent, light, "shelf_2").
+shelf_for(non_urgent, light, "shelf_3").
+shelf_for(non_urgent, light, "shelf_4").
+shelf_for(non_urgent, medium, "shelf_6").
+shelf_for(non_urgent, medium, "shelf_7").
+shelf_for(non_urgent, heavy,  "shelf_9").
 
 // 1. Reaccionar a nuevo contenedor.
 // Se usa un goal intermedio (!process_new_container) en lugar de procesar
@@ -93,40 +96,67 @@ shelf_category("shelf_9", heavy).
     .abolish(shelf_retries(CId, _)).
 
 // El scheduler razona sobre qué estantería usar consultando sus propias creencias:
-// shelf_category (estática), shelf_available y shelf_occupancy (percepciones del entorno).
-// Jason prueba los planes en orden: primero la categoría preferida; si no hay espacio,
+// shelf_for (estática), shelf_available y shelf_occupancy (percepciones del entorno).
+// Jason prueba los planes en orden: primero urgency+size preferida; si no hay espacio,
 // cae al siguiente plan (fallback natural de Jason).
 //
-// La guardia verifica que EXISTE al menos una estantería de la categoría deseada
-// (ExS vincula la misma variable en shelf_category y shelf_available).
-// El cuerpo recoge TODAS las disponibles con su ocupación actual, y elige
-// la menos cargada replicando el criterio de findBestShelf pero sin código en el entorno.
+// Urgencia: si el tipo del contenedor es "urgent" → urgency=urgent; en otro caso → non_urgent.
+// Tamaño: determinado por peso y dimensiones (igual que antes, para elegir el robot correcto).
+// La guardia ExS verifica que EXISTE al menos una estantería compatible y disponible.
 
-// Contenedor ligero → estantería pequeña (fallback a mediana/grande si llenas)
+// ── URGENT ──────────────────────────────────────────────────────────────────
+
+// Urgente ligero (≤10kg, 1×1) → shelf_1
 +!assign_shelf(CId) :
     not container_broken(CId) &
-    container_info(CId, W, H, Weight, _, _, _) &
+    container_info(CId, W, H, Weight, urgent, _, _) &
     not (Weight > 10) & not (W > 1) & not (H > 1) &
-    shelf_category(ExS, light) & shelf_available(ExS) <-
-    !pick_least_occupied(CId, light).
+    shelf_for(urgent, light, ExS) & shelf_available(ExS) <-
+    !pick_least_occupied(CId, urgent, light).
 
-// Contenedor mediano → estantería mediana (fallback a grande si llenas)
+// Urgente mediano (≤30kg, 1×2) → shelf_5
 +!assign_shelf(CId) :
     not container_broken(CId) &
-    container_info(CId, W, H, Weight, _, _, _) &
+    container_info(CId, W, H, Weight, urgent, _, _) &
     not (Weight > 30) & not (W > 1) & not (H > 2) &
-    shelf_category(ExS, medium) & shelf_available(ExS) <-
-    !pick_least_occupied(CId, medium).
+    shelf_for(urgent, medium, ExS) & shelf_available(ExS) <-
+    !pick_least_occupied(CId, urgent, medium).
 
-// Contenedor pesado/grande → estantería grande
+// Urgente pesado/grande → shelf_8
 +!assign_shelf(CId) :
     not container_broken(CId) &
-    container_info(CId, _, _, _, _, _, _) &
-    shelf_category(ExS, heavy) & shelf_available(ExS) <-
-    !pick_least_occupied(CId, heavy).
+    container_info(CId, _, _, _, urgent, _, _) &
+    shelf_for(urgent, heavy, ExS) & shelf_available(ExS) <-
+    !pick_least_occupied(CId, urgent, heavy).
 
-// Fallback anti-starvation: categoría preferida llena pero hay espacio en otra.
-// Reproduce el fallback de findBestShelf: elige la menos ocupada de todas las disponibles.
+// ── NON-URGENT (standard y fragile) ─────────────────────────────────────────
+
+// Non-urgent ligero (≤10kg, 1×1) → S2, S3, S4
++!assign_shelf(CId) :
+    not container_broken(CId) &
+    container_info(CId, W, H, Weight, Type, _, _) & not (Type == urgent) &
+    not (Weight > 10) & not (W > 1) & not (H > 1) &
+    shelf_for(non_urgent, light, ExS) & shelf_available(ExS) <-
+    !pick_least_occupied(CId, non_urgent, light).
+
+// Non-urgent mediano (≤30kg, 1×2) → S6, S7
++!assign_shelf(CId) :
+    not container_broken(CId) &
+    container_info(CId, W, H, Weight, Type, _, _) & not (Type == urgent) &
+    not (Weight > 30) & not (W > 1) & not (H > 2) &
+    shelf_for(non_urgent, medium, ExS) & shelf_available(ExS) <-
+    !pick_least_occupied(CId, non_urgent, medium).
+
+// Non-urgent pesado/grande → S9
++!assign_shelf(CId) :
+    not container_broken(CId) &
+    container_info(CId, _, _, _, Type, _, _) & not (Type == urgent) &
+    shelf_for(non_urgent, heavy, ExS) & shelf_available(ExS) <-
+    !pick_least_occupied(CId, non_urgent, heavy).
+
+// ── FALLBACK anti-starvation ─────────────────────────────────────────────────
+// Ningún plan de tipo/tamaño aplicó (todas las estanterías compatibles llenas)
+// pero hay espacio en otra → elige la menos ocupada de todas las disponibles.
 +!assign_shelf(CId) :
     not container_broken(CId) &
     container_info(CId, _, _, _, _, _, _) &
@@ -135,13 +165,11 @@ shelf_category("shelf_9", heavy).
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +free_shelf(CId, ShelfId).
 
-// Selecciona la estantería menos ocupada de una categoría dada.
-// Estrategia: recoger todos los pares (ocupación, id), ordenar por ocupación
-// (Jason compara compound terms argumento a argumento: pair(0,...) < pair(15,...)),
-// y tomar el primero — equivale al sorted(comparingDouble(occupancy)).get(0)
-// del antiguo findBestShelf, pero razonado por el agente.
-+!pick_least_occupied(CId, Cat) <-
-    .findall(pair(Occ, S), (shelf_category(S, Cat) & shelf_available(S) & shelf_occupancy(S, Occ)), Pairs);
+// Selecciona la estantería menos ocupada para una urgency+size dadas.
++!pick_least_occupied(CId, Urgency, SizeCat) <-
+    .findall(pair(Occ, S),
+             (shelf_for(Urgency, SizeCat, S) & shelf_available(S) & shelf_occupancy(S, Occ)),
+             Pairs);
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +free_shelf(CId, ShelfId).
 

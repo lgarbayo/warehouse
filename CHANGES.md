@@ -583,3 +583,41 @@ EVENT | time=H:M:S | agent=scheduler  | type=output_phase_started | data=urgent
 | `WarehouseArtifact.java` | `emitShelfAvailable`: añade percept también a supervisor; `executeDropAt`: retira percept también de supervisor |
 | `supervisor.asl` | Añadidas creencias `shelf_type/2`; plan `-shelf_available` con detección y log obligatorio; creencia `no_space_notified` anti-duplicado |
 | `scheduler.asl` | Plan `+no_shelf_space(ContainerType)[source(supervisor)]` con log obligatorio |
+
+---
+
+## Asignación de estanterías por tipo de contenedor (urgent vs non_urgent)
+
+### Problema
+
+El scheduler asignaba estanterías exclusivamente por peso y tamaño del contenedor (light/medium/heavy), sin tener en cuenta el tipo (urgent/standard/fragile). Los contenedores urgentes y no urgentes competían por las mismas estanterías, lo que impedía reservar espacio dedicado para cada tipo.
+
+### Solución
+
+Se sustituye la creencia `shelf_category(ShelfId, SizeCat)` por `shelf_for(Urgency, SizeCat, ShelfId)`, que cruza las dos dimensiones de clasificación:
+
+```agentspeak
+shelf_for(urgent,     light,  "shelf_1").   // S1 → urgentes pequeños
+shelf_for(urgent,     medium, "shelf_5").   // S5 → urgentes medianos
+shelf_for(urgent,     heavy,  "shelf_8").   // S8 → urgentes pesados/grandes
+shelf_for(non_urgent, light,  "shelf_2").   // S2, S3, S4 → no urgentes pequeños
+shelf_for(non_urgent, light,  "shelf_3").
+shelf_for(non_urgent, light,  "shelf_4").
+shelf_for(non_urgent, medium, "shelf_6").   // S6, S7 → no urgentes medianos
+shelf_for(non_urgent, medium, "shelf_7").
+shelf_for(non_urgent, heavy,  "shelf_9").   // S9 → no urgentes pesados/grandes
+```
+
+Los seis planes `assign_shelf` se reescriben en dos grupos: uno para `urgent` (Type == urgent en la guardia) y otro para `non_urgent` (not (Type == urgent)). Dentro de cada grupo se mantiene la progresión light → medium → heavy por si el tamaño preferido está lleno.
+
+`pick_least_occupied` pasa de dos argumentos `(CId, Cat)` a tres `(CId, Urgency, SizeCat)` y consulta `shelf_for` en lugar de `shelf_category`.
+
+El fallback anti-starvation (cualquier estantería disponible cuando todas las compatibles están llenas) se mantiene sin cambios.
+
+La asignación de robot (`free_shelf`) no cambia: sigue siendo por peso y dimensiones, que determinan qué robot puede transportar el contenedor.
+
+### Resumen de cambios
+
+| Archivo | Cambio |
+|---|---|
+| `scheduler.asl` | `shelf_category` → `shelf_for(Urgency, SizeCat, ShelfId)`; 6 planes `assign_shelf` tipados; `pick_least_occupied` con 3 argumentos |
