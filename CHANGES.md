@@ -1,5 +1,26 @@
 # Changes
 
+## Nota de diseño: distancia Manhattan como heurística implícita de navegación
+
+El plan `!do_step` elige en cada paso el eje con mayor distancia restante al destino:
+
+```agentspeak
+// Prioridad X si |dx| >= |dy|
++!do_step(X, Y, TX, TY) : TX > X & TX - X >= TY - Y <- !try_x_then_y(...)
++!do_step(X, Y, TX, TY) : TY > Y                     <- !try_y_then_x(...)
+```
+
+Esto es equivalente a usar la **distancia Manhattan** como función heurística:
+```
+h(n) = |TX - X| + |TY - Y|
+```
+
+La distancia Manhattan es una heurística **admisible** — nunca sobreestima el coste real porque en un grid ortogonal ningún camino puede ser más corto que la suma de las diferencias en cada eje. Esta propiedad es la que Russell & Norvig (Cap. 4) requieren para que A* garantice la solución óptima.
+
+La diferencia con A* es que el greedy Manhattan no hace backtracking: si el paso preferido está bloqueado, prueba el eje secundario, y si ambos fallan, `!step_with_retry` espera y reintenta. No explora caminos alternativos — confía en que el entorno se despejará. Esto es correcto para un almacén dinámico donde los obstáculos principales son otros robots en movimiento.
+
+---
+
 ## Nota de diseño: fallo de retorno a base no se reporta al supervisor
 
 El plan `-!check_queue : not task(_, _)` absorbe silenciosamente cualquier fallo de navegación al volver a la posición base, pasando el robot a `idle` desde donde esté. No se reporta al supervisor porque el retorno a base es una funcionalidad de comodidad — si el robot no puede volver, sigue operativo para la siguiente tarea desde su posición actual. Reportarlo contaminaría `total_errors` con algo que no es un error real de la operación.
