@@ -237,13 +237,3 @@ shelf_type("shelf_9", non_urgent).
 // Ignorar retirada de percepciones de estanterías ya notificadas
 -shelf_available(_) : true <- true.
 
-
-    +navigation_error_occurred(Robot, ErrorType, Data);
-    .count(error_occurred(_,_), CE);
-    .count(navigation_error_occurred(_,_,_), NE);
-    N = CE + NE;
-    -total_errors(_);
-    +total_errors(N);
-    !update_rates;
-    .print("[SUPERVISOR] Error de navegacion en ", Robot, ": ", ErrorType).
-

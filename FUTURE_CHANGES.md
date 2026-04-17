@@ -4,12 +4,6 @@ Temporal control: the scheduler will indicate which packages must be in the outb
 Scheduler coordination change: the scheduler will no longer act as the central information provider; robots will query the environment to obtain package locations.
 Distributed coordination among robots to organize themselves autonomously and efficiently, without relying on the scheduler to assign specific tasks, in order to optimize workflow.
 
-# 09/04
-Errrores generales de laiteracion 1
-
-There is no formal planning: no action plan is drawn up before execution. The agentes react sequentially. A planning agent RyN, Chapter 11 would generate an optimal plan b ytaking into account all pending containers and the avaliability of robots.
-Goal -> Draw up a formal plan for how to handle pending containers and robot availability (see Russel and Norvig, Chapter 11).
-
 # CORRECCIÓN ITERACIÓN 1
 Código: 80
 - Se debe tener cuidado a la hora de calcular la ruta, puesto que se hace en base a un estado presente del entorno, y no en el tiempo futuro en el que se va a realizar la acción, por lo que ese estado del entorno no se cumpla (puede que al calcular la ruta, no existan obstáculos que si se pueden dar cuando los robots se están moviendo en el entorno). Tiene que ver con: "Distributed coordination among robots to organize themselves autonomously and efficiently, without relying on the scheduler to assign specific tasks, in order to optimize workflow."

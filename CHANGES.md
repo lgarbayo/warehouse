@@ -650,3 +650,147 @@ La asignación de robot (`free_shelf`) no cambia: sigue siendo por peso y dimens
 | Archivo | Cambio |
 |---|---|
 | `scheduler.asl` | `shelf_category` → `shelf_for(Urgency, SizeCat, ShelfId)`; 6 planes `assign_shelf` tipados; `pick_least_occupied` con 3 argumentos |
+
+
+
+# IMPORTANTE -> Planificación Formal — R&N Capítulo 11 (scheduler.asl + supervisor.asl)
+
+## Motivación
+
+El scheduler de la iteración anterior reaccionaba de forma puramente secuencial: al llegar cada contenedor buscaba una estantería disponible y asignaba un robot de inmediato, sin elaborar ningún plan previo. Esto cumplía el objetivo básico, pero carecía de los tres elementos que define la planificación formal según Russell & Norvig (Cap. 11): (1) representación explícita del estado del mundo, (2) esquemas de acción con precondiciones y efectos, y (3) búsqueda guiada por una heurística admisible. El ticket de segunda semana exigía incorporar estos elementos.
+
+---
+
+## Qué se implementó
+
+### 1. Estado del mundo proyectado (`ps_*`)
+
+Se introdujo un conjunto de creencias de planificación prefijadas con `ps_` que representan un **snapshot del mundo** en el momento de iniciar cada ciclo del planificador, y que se modifican a medida que el planificador aplica acciones sobre ellas (sin tocar el estado real del agente):
+
+- `ps_robot_free(Robot)` — robot sin tarea activa asignada en la proyección.
+- `ps_shelf(ShelfId, Occ)` — ocupación proyectada de cada estantería disponible.
+- `ps_pending(CId, W, H, Weight, Type)` — contenedor aún sin asignar en la proyección.
+
+El plan `!build_planning_state` limpia cualquier proyección anterior con `.abolish` y reconstruye las tres vistas desde el estado real: consulta `assigned(R, _, _)` para saber qué robots están libres, `shelf_available(S) & shelf_occupancy(S, Occ)` para las estanterías, y `planner_pending(CId, ...)` (la cola de entrada del planificador) para los pendientes.
+
+La cola de entrada `planner_pending(CId, W, H, Weight, Type)` es la creencia en la que cada contenedor queda registrado al llegar su `container_info` del entorno. Permanece hasta que el plan la ejecuta (`-planner_pending`) o hasta que se detecta que el contenedor fue aplastado.
+
+### 2. Esquema de acción `assign(Robot, CId, ShelfId)`
+
+La única acción del planificador es `assign/3`. Tiene precondiciones implícitas (evaluadas en `!get_applicable_actions`) y efectos explícitos (aplicados por `!apply_action`):
+
+**Precondiciones:**
+- `ps_robot_free(Robot)` — el robot debe estar libre en la proyección.
+- `ps_pending(CId, W, H, Weight, Type)` — el contenedor debe estar sin asignar.
+- `ps_shelf(ShelfId, _)` — la estantería debe existir y tener espacio en la proyección.
+- Compatibilidad robot ↔ contenedor (peso y dimensiones).
+- Compatibilidad estantería ↔ tipo de contenedor (urgent/non_urgent).
+- `not blocked_type(urgency)` — el tipo no está bloqueado por saturación (outbound).
+
+**Efectos (aplicados sobre `ps_*`):**
+- Se elimina `ps_robot_free(Robot)` → el robot queda ocupado en la proyección.
+- Se elimina `ps_pending(CId, ...)` → el contenedor queda asignado en la proyección.
+- Se incrementa `ps_shelf(ShelfId, Occ+1)` → la ocupación proyectada aumenta en 1.
+
+Esto permite que el planificador proyecte correctamente múltiples asignaciones en un mismo ciclo sin que las primeras contaminen las siguientes.
+
+### 3. Heurística admisible `h(assign(Robot, CId, ShelfId)) → Score`
+
+```
+h = urgency_weight + fit_bonus - occupancy_penalty
+```
+
+- **urgency_weight**: 10 si el contenedor es `"urgent"`, 5 si es `standard` o `fragile`. Prioriza contenedores urgentes en cada paso de búsqueda.
+- **fit_bonus**: fijo en 3 (simplificación; todos los robots asignados son exactamente compatibles con el contenedor por construcción de las acciones aplicables).
+- **occupancy_penalty**: ocupación proyectada de la estantería destino. Distribuye la carga entre estanterías del mismo tipo evitando llenar siempre la misma.
+
+Score mayor = mejor acción. El planificador ordena la lista de acciones puntuadas con `.sort` (ascendente) + `.reverse` y toma la primera, obteniendo la de mayor score. En caso de empate entre estanterías, la ordenación alfabética de Jason hace que se elija la última alfabéticamente (ej. shelf_7 antes que shelf_6 cuando ambas tienen Occ=0).
+
+La heurística es admisible: en cada paso del forward search evalúa solo el beneficio inmediato sin sobreestimar el coste real hasta el objetivo.
+
+### 4. Forward search greedy best-first
+
+El plan `!run_planner` orquesta el ciclo completo:
+
+1. `!build_planning_state` — construye el snapshot `ps_*`.
+2. `!forward_search([], Plan)` — bucle recursivo:
+   - Genera todas las acciones aplicables en el estado proyectado actual (`!get_applicable_actions`).
+   - Si hay acciones: puntúa cada una con `!heuristic`, selecciona la mejor (`!pick_best_action`), aplica sus efectos sobre `ps_*` (`!apply_action`), y llama recursivamente con la acción acumulada.
+   - Si no hay acciones (robots saturados o estanterías llenas): detiene la búsqueda y devuelve el plan parcial.
+   - Caso base: cuando `ps_pending` queda vacío, el plan está completo.
+3. `.reverse(Plan, OrderedPlan)` — el plan se acumuló en orden inverso; se invierte para ejecutarlo en el orden correcto.
+4. `!execute_plan(OrderedPlan)` — envía las tareas a los robots en el orden planificado.
+
+Este flujo genera el plan **completo antes de enviar ningún mensaje a ningún robot**, satisfaciendo el requisito formal de planificación previa.
+
+### 5. Restricciones estrictas robot ↔ contenedor ↔ estantería
+
+Se mantienen exactamente las mismas restricciones de la iteración anterior:
+
+| Robot | Contenedor | Estanterías |
+|---|---|---|
+| `robot_light` | ≤10kg, 1×1 | urgent: shelf_1 / non_urgent: shelf_2, shelf_3, shelf_4 |
+| `robot_medium` | ≤30kg, 1×2, NO ligero | urgent: shelf_5 / non_urgent: shelf_6, shelf_7 |
+| `robot_heavy` | no cabe en medium | urgent: shelf_8 / non_urgent: shelf_9 |
+
+"No ligero" se expresa como: Weight>10 OR H>1 (dos condiciones OR → dos `.findall` separados + `.concat`, para evitar `not` anidado en Jason).
+
+"No cabe en medium" se expresa como: Weight>30 OR W>1 OR H>2 (tres `.findall` + `.concat`).
+
+### 6. `planning_active` — mutex para evitar planificadores concurrentes
+
+El planificador puede ser disparado desde múltiples eventos: llegada de un nuevo `container_info`, o confirmación de almacenamiento de un robot (`container_stored`). Para evitar que dos instancias del planificador se ejecuten en paralelo y generen asignaciones duplicadas, se usa la creencia `planning_active` como semáforo:
+
+- Al iniciar: `+planning_active`.
+- Al terminar: `-planning_active`.
+- Antes de lanzar: `if (not planning_active) { ... }`.
+
+Hay además un `.wait(300)` al inicio del ciclo para acumular contenedores que llegan casi simultáneamente en el mismo ciclo de planificación, evitando lanzar N planes para N contenedores que podrían planificarse de golpe.
+
+### 7. Relanzamiento automático al liberar robot
+
+Cuando un robot confirma el almacenamiento (`+container_stored`), el scheduler elimina la creencia `assigned(Robot, CId, ShelfId)` y comprueba si hay contenedores en `planner_pending` que no pudieron asignarse en el ciclo anterior (por falta de robots o espacio). Si los hay, relanza el planificador. Esto resuelve el caso en que llega un contenedor pesado pero `robot_heavy` estaba ocupado: el contenedor queda en `planner_pending` y se asigna en cuanto el robot queda libre.
+
+---
+
+## Bugs encontrados y corregidos durante el desarrollo
+
+### Bug 1: `=<` no funciona en reglas ni en guardias de Jason
+
+Jason evalúa `=<` como unificación estructural, no como comparación aritmética, cuando aparece en reglas `:-` o en guardias de planes. Cualquier regla como `can_carry(robot, W, H, Weight) :- Weight =< 10 & ...` falla en tiempo de parseo. La solución fue eliminar todas las reglas auxiliares con aritmética (`can_carry`, `shelf_type_ok`) e inline todas las condiciones numéricas directamente en los findalls usando únicamente `>` (ej. `not (Weight > 10)` en lugar de `Weight =< 10`).
+
+### Bug 2: Reglas y facts con lookup no se evalúan dentro de `.findall`
+
+Ni las reglas `:-` con aritmética ni los facts como `urgency_of(Type, non_urgent)` se evalúan correctamente dentro del cuerpo de un `.findall` en Jason — devuelven resultados vacíos silenciosamente. La solución fue no usar ningún predicado derivado dentro de findalls; todas las condiciones deben ser directas (comparaciones, accesos a creencias base).
+
+### Bug 3: `not` anidado falla silenciosamente en `.findall`
+
+La condición `not (not A & not B)` (equivalente lógico a `A OR B`) no funciona en Jason dentro de `.findall`. Por ejemplo, para expresar "el contenedor NO es ligero" (es decir, Weight>10 OR H>1) no se puede escribir `not (not (Weight > 10) & not (H > 1))`. La solución fue dividir cada condición OR en `.findall`s separados y concatenar los resultados. Posibles duplicados son inofensivos ya que el planificador selecciona la mejor acción por score.
+
+### Bug 4: Aritmética en `.findall` (`S-Occ` interpretado como resta)
+
+Al intentar construir un functor `shelf(S, Occ)` dentro de un `.findall` como `S-Occ`, Jason lo interpretaba como una resta aritmética en lugar de un término compuesto, produciendo errores en tiempo de ejecución. La solución fue usar el functor `shelf(S, Occ)` con notación de paréntesis en lugar de guion.
+
+### Bug 5: Código huérfano en `supervisor.asl` causaba error de parseo
+
+El supervisor tenía un bloque de código (cuerpo de plan de errores de navegación) sin cabecera de plan, resultado de un refactor incompleto anterior. Jason no podía parsear el fichero. Se eliminaron las líneas huérfanas (el robot_heavy especializado de esta iteración nunca enviaba eventos de navegación al supervisor).
+
+### Bug 6 (crítico): Tipos de contenedor como strings en el entorno vs átomos en el código
+
+El entorno Java construye el percepto `container_info` usando interpolación de strings:
+```java
+"container_info(\"" + containerId + "\"," + ... + ",\"" + container.getType() + "\"," + ...
+```
+Esto hace que `Type` llegue a Jason como una **cadena entre comillas** (`"urgent"`, `"standard"`, `"fragile"`), no como un átomo (`urgent`, `standard`, `fragile`). En Jason, `"urgent" \== urgent`: son tipos distintos.
+
+Consecuencia: todas las guardias y findalls que usaban el átomo `urgent` fallaban silenciosamente — `ps_pending(CId, W, H, Weight, urgent)` nunca unificaba con `ps_pending(CId, W, H, Weight, "urgent")`. El efecto observable era que **todos los contenedores urgentes se asignaban a estanterías non_urgent**: las secciones `AM_U` y `AH_U` devolvían listas vacías, y los contenedores urgentes se colaban en `AM_N`/`AH_N` porque `not (Type == urgent)` evaluaba como `not ("urgent" == urgent)` = `true`.
+
+La solución fue cambiar todos los literales de tipo de contenedor en el código AgentSpeak a strings con comillas: `"urgent"` en los patrones de findall, `not (Type == "urgent")` en los filtros, e `if (Type == "urgent")` en la heurística.
+
+---
+
+## Estado del sistema tras estos cambios
+
+- Contenedores `urgent` se asignan correctamente a las estanterías priority (shelf_1, shelf_5, shelf_8).
+- Contenedores `standard` y `fragile` (non_urgent) se asignan a shelf_2–4, shelf_6–7, shelf_9 según peso.
+- La saturación de `shelf_9` (única estantería heavy non_urgent) provoca que contenedores heavy non_urgent queden en zona de expansión y reboten indefinidamente. Este es el límite esperado de la iteración actual: **se resolverá cuando se implemente el ciclo outbound**.
