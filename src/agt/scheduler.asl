@@ -304,6 +304,11 @@ shelf_category("shelf_9", heavy).
     -assigned(Robot, CId, ShelfId);
     -container_stored(CId, ShelfId)[source(Robot)].
 
+// 7. Notificación de saturación desde el supervisor: activar ciclo outbound
++no_shelf_space(ContainerType)[source(supervisor)] : true <-
+    .time(H, M, S);
+    .print("EVENT | time=", H, ":", M, ":", S, " | agent=scheduler | type=output_phase_started | data=", ContainerType).
+
 // 6. Trazabilidad: Errores reportados
 +container_error(CId, ErrorType)[source(Robot)] : true <-
     .print("❌ [TRACE] Error reportado por ", Robot, " para ", CId, ": ", ErrorType);

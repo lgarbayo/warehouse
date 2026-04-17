@@ -50,6 +50,19 @@ robot_status(robot_heavy, idle).
 /* Intervalo del reporte periódico (ms) */
 report_interval(30000).
 
+/* Clasificación de estanterías por tipo de contenedor (segunda iteración).
+ * urgent    → S1, S5, S8
+ * non_urgent → S2, S3, S4, S6, S7, S9 (standard y fragile) */
+shelf_type("shelf_1", urgent).
+shelf_type("shelf_5", urgent).
+shelf_type("shelf_8", urgent).
+shelf_type("shelf_2", non_urgent).
+shelf_type("shelf_3", non_urgent).
+shelf_type("shelf_4", non_urgent).
+shelf_type("shelf_6", non_urgent).
+shelf_type("shelf_7", non_urgent).
+shelf_type("shelf_9", non_urgent).
+
 /* ============================================================================
  * ARRANQUE - Lanza el ciclo de reportes periódico
  * ============================================================================ */
@@ -204,8 +217,27 @@ report_interval(30000).
     !update_rates;
     .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot, " | Total errores: ", N).
 
-// Errores de navegacion enviados directamente desde Java (sin CId: route_blocked, etc.)
-+robot_error(Robot, ErrorType, Data) : true <-
+/* ============================================================================
+ * DETECCIÓN DE SATURACIÓN POR TIPO DE CONTENEDOR
+ * Cuando el entorno retira shelf_available para una estantería, el supervisor
+ * comprueba si quedan estanterías disponibles del mismo tipo. Si no queda
+ * ninguna, emite el evento obligatorio y notifica al scheduler.
+ * no_space_notified(Type) evita emitir el evento más de una vez por tipo.
+ * ============================================================================ */
+
+-shelf_available(ShelfId) : shelf_type(ShelfId, Type) & not no_space_notified(Type) <-
+    .findall(S, (shelf_type(S, Type) & shelf_available(S)), Available);
+    if (Available == []) {
+        +no_space_notified(Type);
+        .time(H, M, S);
+        .print("EVENT | time=", H, ":", M, ":", S, " | agent=supervisor | type=no_space_detected | data=", Type);
+        .send(scheduler, tell, no_shelf_space(Type));
+    }.
+
+// Ignorar retirada de percepciones de estanterías ya notificadas
+-shelf_available(_) : true <- true.
+
+
     +navigation_error_occurred(Robot, ErrorType, Data);
     .count(error_occurred(_,_), CE);
     .count(navigation_error_occurred(_,_,_), NE);

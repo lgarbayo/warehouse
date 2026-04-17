@@ -6,10 +6,6 @@ Adapt the system architecture to introduce the outbound zone and prepare the con
 
 Specific objectives
 
-    Implement the outbound zone in the environment and reorganise the zones:
-        the outbound zone is located in the cells: (0,0) (0,1) (1,0) (1,1) (2,0) (2,1).
-        the inbound zone is now located in the cells: (5,0) (5,1) (6,0) (6,1) (7,0) (7,1).
-        the sorting zone is now located in the cells: (3,0) (3,1) (4,0) (4,1).
     Adapt the behaviour of the robots so that they:
         query the Scheduler (the Environment provides this information) for container locations,
         maintain local beliefs about the state of the system,
@@ -26,12 +22,3 @@ Specific objectives
         can receive the supervisor’s notification,
         activates the outbound cycle for the corresponding container type,
         stops accepting new containers of that type until storage space becomes available again.
-
-Mandatory logging
-
-    When the supervisor detects that there is no remaining storage space for a container type, the following event must be displayed in the console:
-    EVENT | time=T | agent=supervisor | type=no_space_detected | data=container_type
-    where container_type indicates whether the containers are urgent or non-urgent.
-
-    When the scheduler receives the supervisor’s notification and activates the corresponding outbound cycle, the following event must be displayed in the console:
-    EVENT | time=T0 | agent=scheduler | type=output_phase_started | data=container_type

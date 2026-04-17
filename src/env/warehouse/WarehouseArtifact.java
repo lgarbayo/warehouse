@@ -676,10 +676,12 @@ public class WarehouseArtifact extends Environment {
             container.setAssignedShelf(shelfId);
 
             // Si la estantería ya no admite más carga, retirar su disponibilidad
-            // del scheduler para que no intente asignarla a futuros contenedores.
+            // del scheduler y del supervisor para que no intenten asignarla a futuros contenedores.
             if (shelf.isFull()) {
                 try {
                     removePerceptsByUnif("scheduler",
+                            ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+                    removePerceptsByUnif("supervisor",
                             ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
                 } catch (jason.asSyntax.parser.ParseException e) {
                     e.printStackTrace();
@@ -716,13 +718,14 @@ public class WarehouseArtifact extends Environment {
 
 
     /**
-     * Emite la percepción shelf_available(ShelfId) al scheduler.
-     * El scheduler la usa como creencia para razonar qué estantería asignar,
-     * sin delegar esa decisión al entorno.
+     * Emite la percepción shelf_available(ShelfId) al scheduler y al supervisor.
+     * El scheduler la usa para razonar qué estantería asignar; el supervisor la
+     * monitoriza para detectar saturación por tipo de contenedor.
      */
     private void emitShelfAvailable(String shelfId) {
         try {
             addPercept("scheduler", ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+            addPercept("supervisor", ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }

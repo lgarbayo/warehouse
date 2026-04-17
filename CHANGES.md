@@ -515,3 +515,71 @@ El fallback de `generateRandomContainer()` cuando la zona de entrada está llena
 | `CellType.java` | Añadido valor `OUTBOUND` |
 | `WarehouseView.java` | Añadido case `OUTBOUND` con color rojo suave en el render del grid |
 | `WarehouseArtifact.java` | `initializeGrid()`: tres bloques con nuevas coordenadas; fallback spawn de (0,0) a (5,0) |
+
+---
+
+## Logging obligatorio: detección de saturación por tipo de contenedor
+
+### Problema
+
+El sistema no detectaba ni registraba cuándo las estanterías de un tipo de contenedor (urgent / non_urgent) quedaban completamente llenas, ni notificaba al scheduler para que activara el ciclo de salida.
+
+### Solución
+
+#### Supervisor: monitorización de saturación
+
+Se añaden creencias estáticas `shelf_type/2` que clasifican cada estantería según el tipo de contenedor que almacena:
+
+```agentspeak
+shelf_type("shelf_1", urgent).   // S1, S5, S8 → urgentes
+shelf_type("shelf_5", urgent).
+shelf_type("shelf_8", urgent).
+shelf_type("shelf_2", non_urgent). // S2-S4, S6-S7, S9 → standard y fragile
+...
+```
+
+Cuando el entorno retira `shelf_available(ShelfId)` (la estantería se llena), el plan reactivo `-shelf_available` comprueba con `.findall` si quedan estanterías disponibles del mismo tipo. Si no queda ninguna, emite el evento obligatorio y notifica al scheduler:
+
+```agentspeak
+-shelf_available(ShelfId) : shelf_type(ShelfId, Type) & not no_space_notified(Type) <-
+    .findall(S, (shelf_type(S, Type) & shelf_available(S)), Available);
+    if (Available == []) {
+        +no_space_notified(Type);
+        .time(H, M, S);
+        .print("EVENT | time=", H, ":", M, ":", S,
+               " | agent=supervisor | type=no_space_detected | data=", Type);
+        .send(scheduler, tell, no_shelf_space(Type));
+    }.
+```
+
+La creencia `no_space_notified(Type)` garantiza que el evento se emite exactamente una vez por tipo.
+
+#### Scheduler: activación del ciclo outbound
+
+Al recibir la notificación del supervisor, el scheduler emite el segundo evento obligatorio:
+
+```agentspeak
++no_shelf_space(ContainerType)[source(supervisor)] : true <-
+    .time(H, M, S);
+    .print("EVENT | time=", H, ":", M, ":", S,
+           " | agent=scheduler | type=output_phase_started | data=", ContainerType).
+```
+
+#### Entorno: percepciones al supervisor
+
+`emitShelfAvailable` y la retirada en `executeDropAt` se actualizan para emitir/retirar `shelf_available` tanto al scheduler como al supervisor, permitiendo que el supervisor monitorice el estado de las estanterías de forma independiente.
+
+### Formato de los eventos en consola
+
+```
+EVENT | time=H:M:S | agent=supervisor | type=no_space_detected | data=urgent
+EVENT | time=H:M:S | agent=scheduler  | type=output_phase_started | data=urgent
+```
+
+### Resumen de cambios
+
+| Archivo | Cambio |
+|---|---|
+| `WarehouseArtifact.java` | `emitShelfAvailable`: añade percept también a supervisor; `executeDropAt`: retira percept también de supervisor |
+| `supervisor.asl` | Añadidas creencias `shelf_type/2`; plan `-shelf_available` con detección y log obligatorio; creencia `no_space_notified` anti-duplicado |
+| `scheduler.asl` | Plan `+no_shelf_space(ContainerType)[source(supervisor)]` con log obligatorio |
