@@ -1,5 +1,13 @@
 # Changes
 
+## Nota de diseño: fallo de retorno a base no se reporta al supervisor
+
+El plan `-!check_queue : not task(_, _)` absorbe silenciosamente cualquier fallo de navegación al volver a la posición base, pasando el robot a `idle` desde donde esté. No se reporta al supervisor porque el retorno a base es una funcionalidad de comodidad — si el robot no puede volver, sigue operativo para la siguiente tarea desde su posición actual. Reportarlo contaminaría `total_errors` con algo que no es un error real de la operación.
+
+En la práctica, este plan nunca se ha activado: los robots siempre han llegado correctamente a su posición base. Existe como red de seguridad defensiva para el caso extremo de bloqueo permanente de la posición base.
+
+---
+
 ## Sustitución del algoritmo de pathfinding: BFS → Movimiento coordinado con waypoints
 
 ### Problema
