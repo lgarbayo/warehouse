@@ -89,14 +89,23 @@ carrying(none).
 -!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) <-
     .print("⚠️ [HEAVY2] Estantería llena, llevando ", CId, " a zona de expansión");
     .abolish(error(shelf_full, _));
+    !go_to_expansion(CId);
+    !check_queue.
+
++!go_to_expansion(CId) <-
     move_to_expansion;
     ?nav_target(TX, TY);
     !navigate(TX, TY);
     drop_in_expansion(CId);
     -+carrying(none);
     release_task(CId);
-    .send(scheduler, tell, container_in_expansion(CId));
-    !check_queue.
+    .send(scheduler, tell, container_in_expansion(CId)).
+
+-!go_to_expansion(CId) <-
+    .print("⚠️ [HEAVY2] No se pudo llegar a expansión con ", CId, ". Liberando tarea.");
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, task_failed(CId)).
 
 -!execute_task(CId, ShelfId) : true <-
     .print("⚠️ [HEAVY2] Fallo en execute_task para ", CId, ". Limpiando estado...");

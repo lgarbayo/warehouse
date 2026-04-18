@@ -198,14 +198,23 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 -!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) <-
     .print("⚠️ [LIGHT] Estantería llena, llevando ", CId, " a zona de expansión");
     .abolish(error(shelf_full, _));
+    !go_to_expansion(CId);
+    !check_queue.
+
++!go_to_expansion(CId) <-
     move_to_expansion;
     ?nav_target(TX, TY);
     !navigate(TX, TY);
     drop_in_expansion(CId);
     -+carrying(none);
     release_task(CId);
-    .send(scheduler, tell, container_in_expansion(CId));
-    !check_queue.
+    .send(scheduler, tell, container_in_expansion(CId)).
+
+-!go_to_expansion(CId) <-
+    .print("⚠️ [LIGHT] No se pudo llegar a expansión con ", CId, ". Liberando tarea.");
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, task_failed(CId)).
 
 // Plan de fallo esencial (DEBUGGING.md): sin esto Jason no puede recuperarse
 -!execute_task(CId, ShelfId) : true <-

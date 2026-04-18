@@ -952,3 +952,38 @@ Desde (X, Y+1) el greedy no tiene incentivo para volver a (X, Y) si el destino s
 ```
 
 Aplicado en los cuatro robots: `robot_light`, `robot_medium`, `robot_heavy`, `robot_heavy2`.
+
+---
+
+### Corrección: crash al fallar la navegación a la zona de expansión tras `shelf_full`
+
+**Causa raíz:** el plan `-!execute_task : error(shelf_full, _)` incluía `!navigate(TX, TY)` directamente en su cuerpo. Si esa navegación fallaba (p. ej. `path_blocked` por bloqueo permanente), Jason intentaba generar un nuevo evento de fallo para `-!execute_task` — pero ya estábamos dentro de un plan de fallo de ese mismo goal, por lo que Jason no podía generar otro y abortaba con `"No failure event was generated"`. El estado `carrying(CId)` quedaba activo y el robot no enviaba `task_failed` al scheduler, dejando el sistema en un estado inconsistente permanente.
+
+**Solución:** se extrae la recuperación a un sub-goal independiente `!go_to_expansion(CId)`, que tiene su propio plan de fallo `-!go_to_expansion(CId)`. Cualquier fallo dentro de la recuperación (incluyendo la navegación) se captura en ese plan de fallo y limpia el estado correctamente:
+
+```agentspeak
+-!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) <-
+    .abolish(error(shelf_full, _));
+    !go_to_expansion(CId);
+    !check_queue.
+
++!go_to_expansion(CId) <-
+    move_to_expansion;
+    ?nav_target(TX, TY);
+    !navigate(TX, TY);
+    drop_in_expansion(CId);
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, container_in_expansion(CId)).
+
+-!go_to_expansion(CId) <-
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, task_failed(CId)).
+```
+
+El plan de fallo de `-!execute_task : shelf_full` ya no puede romperse: si `!go_to_expansion` tiene éxito, el contenedor queda en la zona de expansión; si falla, `-!go_to_expansion` limpia el estado y libera la tarea. En ningún caso el robot queda con `carrying(CId)` activo sin que el scheduler sea notificado.
+
+| Archivo | Cambio |
+|---|---|
+| `robot_{light,medium,heavy,heavy2}.asl` | Extraída navegación a expansión al sub-goal `!go_to_expansion(CId)` con su plan de fallo `-!go_to_expansion(CId)` |
