@@ -92,6 +92,17 @@ public class Shelf {
     }
     
     /**
+     * Elimina un contenedor de la estantería (ciclo outbound).
+     */
+    public boolean remove(Container container) {
+        if (!storedContainers.contains(container.getId())) return false;
+        storedContainers.remove(container.getId());
+        currentWeight -= container.getWeight();
+        currentVolume -= container.getArea();
+        return true;
+    }
+
+    /**
      * Verifica si la estantería está llena
      */
     public boolean isFull() {

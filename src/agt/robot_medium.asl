@@ -27,8 +27,9 @@ carrying(none).      // Contenedor que está cargando
 
 // Ciclo de trabajo principal
 +!work_cycle : state(idle) <-
-    .print("[MEDIUM] Esperando tarea del planificador central...");
-    .wait(3000);  // Esperar 3 segundos
+    .print("[MEDIUM] Consultando scheduler para nueva tarea...");
+    .send(scheduler, tell, request_task);
+    .wait(3000);
     !work_cycle.
 
 +!work_cycle : not state(idle) <-
@@ -96,14 +97,23 @@ carrying(none).      // Contenedor que está cargando
 -!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) <-
     .print("⚠️ [MEDIUM] Estantería llena, llevando ", CId, " a zona de expansión");
     .abolish(error(shelf_full, _));
+    !go_to_expansion(CId);
+    !check_queue.
+
++!go_to_expansion(CId) <-
     move_to_expansion;
     ?nav_target(TX, TY);
     !navigate(TX, TY);
     drop_in_expansion(CId);
     -+carrying(none);
     release_task(CId);
-    .send(scheduler, tell, container_in_expansion(CId));
-    !check_queue.
+    .send(scheduler, tell, container_in_expansion(CId)).
+
+-!go_to_expansion(CId) <-
+    .print("⚠️ [MEDIUM] No se pudo llegar a expansión con ", CId, ". Liberando tarea.");
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, task_failed(CId)).
 
 // Plan de fallo para execute_task: esencial según DEBUGGING.md
 -!execute_task(CId, ShelfId) : true <-
@@ -133,7 +143,73 @@ carrying(none).      // Contenedor que está cargando
     !get_to_container(CId, N1).
 // N <= 1: sin plan de fallo aplicable → goal falla → propaga a execute_task → -!execute_task
 
+/* ============================================================================
+ * CICLO OUTBOUND — extraer contenedor de estantería y llevar a zona de salida
+ * ============================================================================ */
+
++outbound_available(CId, ShelfId, W, H, Weight) : state(idle) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
+                                                  & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
+    .print("📤 [MEDIUM] Tomando outbound: ", CId, " de ", ShelfId);
+    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_outbound_task(CId, ShelfId).
+
++outbound_available(CId, ShelfId, W, H, Weight) : not state(idle) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
+                                                  & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
+    .print("⚠️ [MEDIUM] Ocupado, guardando outbound: ", CId).
+
++outbound_available(CId, ShelfId, W, H, Weight) : true <-
+    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)].
+
++!execute_outbound_task(CId, ShelfId) : true <-
+    .print("📤 [MEDIUM] Fase 1: Navegando a estantería ", ShelfId);
+    move_to_shelf(ShelfId);
+    ?nav_target(TX, TY);
+    !navigate(TX, TY);
+
+    .print("📦 [MEDIUM] Fase 2: Recogiendo de estantería ", ShelfId);
+    -+state(picking);
+    pickup_from_shelf(ShelfId, CId);
+    .wait(600);
+
+    .print("🚚 [MEDIUM] Fase 3: Navegando a zona outbound");
+    -+state(carrying);
+    move_to_outbound;
+    ?nav_target(TX2, TY2);
+    !navigate(TX2, TY2);
+
+    .print("📤 [MEDIUM] Fase 4: Entregando contenedor");
+    -+state(dropping);
+    drop_in_outbound(CId);
+    .wait(600);
+
+    .print("✨ [MEDIUM] Outbound completado: ", CId);
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, container_shipped(CId, ShelfId));
+    !check_queue.
+
+-!execute_outbound_task(CId, ShelfId) : true <-
+    .print("⚠️ [MEDIUM] Fallo en tarea outbound: ", CId);
+    -+carrying(none);
+    release_task;
+    .send(scheduler, tell, outbound_failed(CId, ShelfId));
+    !check_queue.
+
++shipped(CId) : true <- true.
+
 // Verificar si hay más tareas encoladas antes de volver a idle
++!check_queue : outbound_available(CId, ShelfId, W, H, Weight) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
+              & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
+    .print("✅ [MEDIUM] Procesando outbound disponible: ", CId, " desde ", ShelfId);
+    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_outbound_task(CId, ShelfId).
+
 +!check_queue : task(CId, ShelfId) <-
     .print("✅ Procesando tarea encolada: ", CId, " a ", ShelfId);
     -task(CId, ShelfId)[source(scheduler)];
@@ -142,11 +218,21 @@ carrying(none).      // Contenedor que está cargando
     -+carrying(CId);
     !execute_task(CId, ShelfId).
 
-+!check_queue : not task(_, _) & position(InitX, InitY) <-
-    !navigate(InitX, InitY);
-    -+state(idle).
++!check_queue : not task(_, _) & not outbound_available(_, _, _, _, _) & position(InitX, InitY) <-
+    .send(scheduler, tell, request_task);
+    .wait(2000);
+    if (task(CId, ShelfId)) {
+        -task(CId, ShelfId)[source(scheduler)];
+        accept_task(CId);
+        -+state(working);
+        -+carrying(CId);
+        !execute_task(CId, ShelfId);
+    } else {
+        !navigate(InitX, InitY);
+        -+state(idle);
+    }.
 
--!check_queue : not task(_, _) <-
+-!check_queue : not task(_, _) & not outbound_available(_, _, _, _, _) <-
     .abolish(error(_, _));
     -+state(idle).
 
@@ -235,13 +321,15 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 //   re-ruteará sin romper la lógica de fila de corredor.
 // - Horizontal puro (TY == Y): retrocede en X → no altera la fila actual, el BC
 //   incrementa correctamente hasta path_blocked si el obstáculo es permanente.
-+!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X + 1; move_step(NX, Y).
-+!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X + 1; move_step(NX, Y).
-+!path_backoff(X, Y, TX, TY) : TX > X <- NX = X - 1; move_step(NX, Y).
-+!path_backoff(X, Y, TX, TY) : TX < X <- NX = X + 1; move_step(NX, Y).
++!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X + 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
++!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X + 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
++!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y + 1; move_step(X, NY).
++!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y + 1; move_step(X, NY).
 +!path_backoff(_, _, _, _) <- true.
--!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X - 1; move_step(NX, Y).
--!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X - 1; move_step(NX, Y).
+-!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X - 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
+-!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X - 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
+-!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y - 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y - 1; move_step(X, NY).
 -!path_backoff(_, _, _, _) <- true.
 
 // shelf_full lo gestiona -!execute_task: el robot lleva el contenedor a la zona de expansión
