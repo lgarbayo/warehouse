@@ -39,10 +39,11 @@ carrying(none).      // Contenedor que está cargando
     // !test_movement;
     !work_cycle.
 
-// Ciclo de trabajo principal
+// Ciclo de trabajo principal: consulta activamente al scheduler cuando idle
 +!work_cycle : state(idle) <-
-    .print("[LIGHT] Esperando tarea del planificador central...");
-    .wait(3000);  // Esperar 3 segundos
+    .print("[LIGHT] Consultando scheduler para nueva tarea...");
+    .send(scheduler, tell, request_task);
+    .wait(3000);
     !work_cycle.
 
 +!work_cycle : not state(idle) <-
@@ -177,13 +178,15 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 //   re-ruteará sin romper la lógica de fila de corredor.
 // - Horizontal puro (TY == Y): retrocede en X → no altera la fila actual, el BC
 //   incrementa correctamente hasta path_blocked si el obstáculo es permanente.
-+!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X + 1; move_step(NX, Y).
-+!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X + 1; move_step(NX, Y).
-+!path_backoff(X, Y, TX, TY) : TX > X <- NX = X - 1; move_step(NX, Y).
-+!path_backoff(X, Y, TX, TY) : TX < X <- NX = X + 1; move_step(NX, Y).
++!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X + 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
++!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X + 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
++!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y + 1; move_step(X, NY).
++!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y + 1; move_step(X, NY).
 +!path_backoff(_, _, _, _) <- true.
--!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X - 1; move_step(NX, Y).
--!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X - 1; move_step(NX, Y).
+-!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X - 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
+-!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X - 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
+-!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y - 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y - 1; move_step(X, NY).
 -!path_backoff(_, _, _, _) <- true.
 
 /* ============================================================================
@@ -242,8 +245,18 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     !execute_task(CId, ShelfId).
 
 +!check_queue : not task(_, _) & position(InitX, InitY) <-
-    !navigate(InitX, InitY);
-    -+state(idle).
+    .send(scheduler, tell, request_task);
+    .wait(2000);
+    if (task(CId, ShelfId)) {
+        -task(CId, ShelfId)[source(scheduler)];
+        accept_task(CId);
+        -+state(working);
+        -+carrying(CId);
+        !execute_task(CId, ShelfId);
+    } else {
+        !navigate(InitX, InitY);
+        -+state(idle);
+    }.
 
 -!check_queue : not task(_, _) <-
     .abolish(error(_, _));

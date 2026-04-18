@@ -14,13 +14,15 @@
  * CREENCIAS INICIALES
  * ============================================================================ */
 
-robot_capacity(robot_light, 10, 1, 1, 3).    // (Robot, MaxPeso, MaxW, MaxH, Velocidad)
-robot_capacity(robot_medium, 30, 1, 2, 2).
-robot_capacity(robot_heavy, 100, 2, 3, 1).
+robot_capacity(robot_light,  10,  1, 1, 3).    // (Robot, MaxPeso, MaxW, MaxH, Velocidad)
+robot_capacity(robot_medium, 30,  1, 2, 2).
+robot_capacity(robot_heavy,  100, 2, 3, 1).
+robot_capacity(robot_heavy2, 100, 2, 3, 1).
 
 robot_available(robot_light).
 robot_available(robot_medium).
 robot_available(robot_heavy).
+robot_available(robot_heavy2).
 
 total_containers_received(0).
 total_tasks_assigned(0).
@@ -107,7 +109,8 @@ urgency_of(fragile,  non_urgent).
     .abolish(ps_pending(_, _, _, _, _));
 
     // Robots libres: aquellos sin tarea assigned activa
-    for (.member(R, [robot_light, robot_medium, robot_heavy])) {
+    .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
+    for (.member(R, AllRobots)) {
         if (not assigned(R, _, _)) { +ps_robot_free(R); }
     };
 
@@ -297,18 +300,53 @@ urgency_of(fragile,  non_urgent).
         .concat(AH_N_tmp, AH_N3, AH_N);
     } else { AH_N = []; };
     .concat(AH_U, AH_N, AH);
+
+    // robot_heavy2 + urgent
+    if (ps_robot_free(robot_heavy2) & not blocked_type(urgent)) {
+        .findall(assign(robot_heavy2, CId, ShelfId),
+            (ps_pending(CId, _, _, Weight, "urgent") & Weight > 30 &
+             ps_shelf(ShelfId, _) & shelf_for(urgent, heavy, ShelfId)), AH2_U1);
+        .findall(assign(robot_heavy2, CId, ShelfId),
+            (ps_pending(CId, W, _, _, "urgent") & W > 1 &
+             ps_shelf(ShelfId, _) & shelf_for(urgent, heavy, ShelfId)), AH2_U2);
+        .findall(assign(robot_heavy2, CId, ShelfId),
+            (ps_pending(CId, _, H, _, "urgent") & H > 2 &
+             ps_shelf(ShelfId, _) & shelf_for(urgent, heavy, ShelfId)), AH2_U3);
+        .concat(AH2_U1, AH2_U2, AH2_U_tmp);
+        .concat(AH2_U_tmp, AH2_U3, AH2_U);
+    } else { AH2_U = []; };
+    // robot_heavy2 + non_urgent
+    if (ps_robot_free(robot_heavy2) & not blocked_type(non_urgent)) {
+        .findall(assign(robot_heavy2, CId, ShelfId),
+            (ps_pending(CId, _, _, Weight, Type) & not (Type == "urgent") & Weight > 30 &
+             ps_shelf(ShelfId, _) & shelf_for(non_urgent, heavy, ShelfId)), AH2_N1);
+        .findall(assign(robot_heavy2, CId, ShelfId),
+            (ps_pending(CId, W, _, _, Type) & not (Type == "urgent") & W > 1 &
+             ps_shelf(ShelfId, _) & shelf_for(non_urgent, heavy, ShelfId)), AH2_N2);
+        .findall(assign(robot_heavy2, CId, ShelfId),
+            (ps_pending(CId, _, H, _, Type) & not (Type == "urgent") & H > 2 &
+             ps_shelf(ShelfId, _) & shelf_for(non_urgent, heavy, ShelfId)), AH2_N3);
+        .concat(AH2_N1, AH2_N2, AH2_N_tmp);
+        .concat(AH2_N_tmp, AH2_N3, AH2_N);
+    } else { AH2_N = []; };
+    .concat(AH2_U, AH2_N, AH2);
+
     .concat(AL, AM, Tmp);
-    .concat(Tmp, AH, Actions).
+    .concat(Tmp, AH, Tmp2);
+    .concat(Tmp2, AH2, Actions).
 
 // Selecciona la acción con mayor puntuación heurística
 +!pick_best_action(Actions, Best) <-
     !score_actions(Actions, Scored);
     .sort(Scored, Sorted);
-    .reverse(Sorted, [s(_, Best)|_]).
+    .reverse(Sorted, [s(_, _, Best)|_]).
 
 +!score_actions([], []) <- true.
-+!score_actions([A|Rest], [s(Score, A)|SRest]) <-
-    !heuristic(A, Score);
++!score_actions([assign(R, CId, ShelfId)|Rest], [s(Score, Priority, assign(R, CId, ShelfId))|SRest]) <-
+    !heuristic(assign(R, CId, ShelfId), Score);
+    .findall(Rx, robot_capacity(Rx, _, _, _, _), AllRobots);
+    .nth(Idx, AllRobots, R);
+    Priority = -Idx;
     !score_actions(Rest, SRest).
 
 /* ============================================================================
@@ -353,11 +391,11 @@ urgency_of(fragile,  non_urgent).
 
     +assigned(Robot, CId, ShelfId);
     +task_history(Robot, CId, ShelfId);
-    .send(Robot, tell, task(CId, ShelfId));
+    +ready_task(Robot, CId, ShelfId);
     .count(task_history(_, _, _), T);
     -total_tasks_assigned(_);
     +total_tasks_assigned(T);
-    .print("[TRACE] assigned: ", Robot, " -> ", CId, " -> ", ShelfId);
+    .print("[TRACE] ready_task: ", Robot, " -> ", CId, " -> ", ShelfId);
     !execute_plan(Rest).
 
 // Fallback: info del contenedor ya no disponible al ejecutar
@@ -447,3 +485,37 @@ urgency_of(fragile,  non_urgent).
     +blocked_type(ContainerType);
     .time(H, M, S);
     .print("EVENT | time=", H, ":", M, ":", S, " | agent=scheduler | type=output_phase_started | data=", ContainerType).
+
+/* ============================================================================
+ * 12. PROTOCOLO PULL — robots consultan activamente al scheduler
+ *     Los robots envían request_task cuando están idle. El scheduler responde
+ *     con la tarea planificada (ready_task) o relanza el planificador si no hay
+ *     ninguna preparada para ese robot.
+ * ============================================================================ */
+
+// Caso 1: hay una tarea lista para este robot → enviar inmediatamente
++request_task[source(Robot)] : ready_task(Robot, CId, ShelfId) <-
+    -ready_task(Robot, CId, ShelfId);
+    -request_task[source(Robot)];
+    .print("[SCHEDULER] Respondiendo a ", Robot, " con tarea: ", CId, " → ", ShelfId);
+    .send(Robot, tell, task(CId, ShelfId)).
+
+// Caso 2: no hay tarea lista pero hay pendientes → replanificar y responder
++request_task[source(Robot)] : planner_pending(_, _, _, _, _) & not planning_active <-
+    -request_task[source(Robot)];
+    +planning_active;
+    .wait(100);
+    !run_planner;
+    -planning_active;
+    if (ready_task(Robot, CId, ShelfId)) {
+        -ready_task(Robot, CId, ShelfId);
+        .print("[SCHEDULER] Respondiendo a ", Robot, " tras replanificar: ", CId, " → ", ShelfId);
+        .send(Robot, tell, task(CId, ShelfId));
+    } else {
+        .print("[SCHEDULER] Sin tarea disponible para ", Robot);
+    }.
+
+// Caso 3: no hay nada — robot esperará y volverá a preguntar
++request_task[source(Robot)] : true <-
+    -request_task[source(Robot)];
+    .print("[SCHEDULER] Sin tarea disponible para ", Robot).

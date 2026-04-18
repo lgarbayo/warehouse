@@ -794,3 +794,161 @@ La solución fue cambiar todos los literales de tipo de contenedor en el código
 - Contenedores `urgent` se asignan correctamente a las estanterías priority (shelf_1, shelf_5, shelf_8).
 - Contenedores `standard` y `fragile` (non_urgent) se asignan a shelf_2–4, shelf_6–7, shelf_9 según peso.
 - La saturación de `shelf_9` (única estantería heavy non_urgent) provoca que contenedores heavy non_urgent queden en zona de expansión y reboten indefinidamente. Este es el límite esperado de la iteración actual: **se resolverá cuando se implemente el ciclo outbound**.
+
+---
+
+# Cambios realizados — 2ª semana (pull model + robot_heavy2)
+
+## Ticket resuelto: adaptación del comportamiento de los robots (pull-based architecture)
+
+### Problema que resolvía
+
+El modelo anterior era push: el scheduler asignaba tareas a robots de forma proactiva llamando a `.send(Robot, tell, task(...))` directamente desde `!execute_plan`. Los robots eran receptores pasivos, sin capacidad de decidir cuándo estaban listos para aceptar trabajo. Esto contradecía el objetivo de que los robots no dependieran de asignaciones explícitas del scheduler.
+
+### Cambios en scheduler.asl
+
+**`!execute_plan`** dejó de enviar `task(CId, ShelfId)` directamente al robot. En su lugar almacena la asignación como una creencia local:
+
+```agentspeak
++ready_task(Robot, CId, ShelfId);
+```
+
+**Sección 12 — Protocolo pull** (añadida al final del archivo): el scheduler reacciona cuando un robot envía `request_task`:
+
+- Si existe un `ready_task` pendiente para ese robot, lo consume y responde con `task(CId, ShelfId)`.
+- Si no hay tarea pero hay pendientes sin planificar (`planner_pending`), lanza el planificador y vuelve a intentarlo.
+- Si no hay nada disponible, responde con un mensaje de log y no hace nada.
+
+### Cambios en los robots (robot_light, robot_medium, robot_heavy)
+
+El plan `+!work_cycle : state(idle)` pasó de esperar pasivamente a enviar activamente una petición al scheduler:
+
+```agentspeak
++!work_cycle : state(idle) <-
+    .send(scheduler, tell, request_task);
+    .wait(3000);   // 4000 para heavy
+    !work_cycle.
+```
+
+Los robots siguen manteniendo creencias locales de estado: `state(idle/working/picking/carrying/dropping)`, `carrying(CId)`, `position(X,Y)` y `robot_pos(X,Y)`.
+
+### Bug crítico resuelto: string vs. átomo en tipos de contenedor
+
+`WarehouseArtifact.java` emite el tipo de contenedor como string Java → Jason lo recibe como `"urgent"` (con comillas). Todos los findalls y guardas del planificador usaban el átomo `urgent` (sin comillas), que nunca unificaba. Efecto: los contenedores urgentes se asignaban siempre a estanterías non-urgent.
+
+Corrección: todos los literales de tipo en scheduler.asl cambiados a strings:
+
+```agentspeak
+not (Type == "urgent")   // antes: not (Type == urgent)
+if (Type == "urgent")    // ídem
+```
+
+Verificado: `container_10` (urgent, 2×3, 89.3 kg) → `shelf_8` ✅
+
+### Nueva instancia: robot_heavy2
+
+Se añadió una segunda instancia del robot pesado con posición base (4,3):
+
+- **`src/agt/robot_heavy2.asl`** — copia de robot_heavy con `position(4,3)` y prefijo `[HEAVY2]` en todos los prints. Mismo protocolo pull, misma lógica de navegación y manejo de errores.
+- **`src/env/warehouse/WarehouseArtifact.java`** — objeto `Robot heavy2` inicializado en (4,3) y percepción `robot_pos(4,3)` emitida al agente.
+- **`warehouse.mas2j`** — entrada `robot_heavy2` con las mismas creencias de capacidad que `robot_heavy`.
+- **`src/agt/supervisor.asl`** — creencia inicial `robot_status(robot_heavy2, idle)` añadida; `!print_robot_status` actualizado para imprimir su estado.
+- **`src/agt/scheduler.asl`** — `robot_capacity(robot_heavy2, 100, 2, 3, 1)` y `robot_available(robot_heavy2)` añadidos como creencias iniciales.
+
+### Bug resuelto: robot_heavy2 nunca recibía tareas
+
+El planificador tenía dos sitios hardcodeados con la lista de robots:
+
+1. Las creencias `robot_capacity` / `robot_available` — faltaba `robot_heavy2`.
+2. El bucle `for (.member(R, [robot_light, robot_medium, robot_heavy]))` en `!snapshot_state` — tampoco lo incluía, por lo que `robot_heavy2` nunca aparecía en `ps_robot_free` y el planificador lo ignoraba.
+
+### Mejora de diseño: eliminación de hardcoding en el planificador
+
+El bucle de construcción del snapshot se reescribió para derivar la lista de robots directamente de `robot_capacity`, que actúa como única fuente de verdad:
+
+```agentspeak
+.findall(R, robot_capacity(R, _, _, _, _), AllRobots);
+for (.member(R, AllRobots)) {
+    if (not assigned(R, _, _)) { +ps_robot_free(R); }
+};
+```
+
+Añadir un nuevo robot ahora solo requiere una línea en `robot_capacity`.
+
+### Mejora: robots no vuelven a la base si hay tarea disponible
+
+**Comportamiento anterior:** al terminar una tarea, `!check_queue` comprobaba la cola local del robot. Como en el modelo pull nunca hay tarea local pre-encolada, siempre navegaba de vuelta a la base antes de pedir trabajo.
+
+**Comportamiento nuevo:** `!check_queue : not task(_, _)` envía primero `request_task` al scheduler y espera 2 segundos. Si el scheduler responde con una tarea, el robot la ejecuta directamente desde donde está. Solo navega a la base si no hay ninguna tarea disponible:
+
+```agentspeak
++!check_queue : not task(_, _) & position(InitX, InitY) <-
+    .send(scheduler, tell, request_task);
+    .wait(2000);
+    if (task(CId, ShelfId)) {
+        -task(CId, ShelfId)[source(scheduler)];
+        accept_task(CId);
+        -+state(working);
+        -+carrying(CId);
+        !execute_task(CId, ShelfId);
+    } else {
+        !navigate(InitX, InitY);
+        -+state(idle);
+    }.
+```
+
+Aplicado en los cuatro robots: `robot_light`, `robot_medium`, `robot_heavy`, `robot_heavy2`.
+
+### Mejora: desempate por orden de declaración en `robot_capacity`
+
+**Problema:** cuando dos robots tienen el mismo score heurístico para un contenedor, `!pick_best_action` usaba `.sort` + `.reverse` sobre términos `s(Score, Action)`. Jason ordena términos compuestos alfabéticamente, por lo que `robot_heavy2 > robot_heavy` → `robot_heavy2` ganaba siempre el desempate, independientemente del orden deseado.
+
+**Solución:** se añade un segundo campo `Priority` al término de score, calculado como el índice negado del robot en la lista `robot_capacity`:
+
+```agentspeak
++!score_actions([assign(R, CId, ShelfId)|Rest], [s(Score, Priority, assign(R, CId, ShelfId))|SRest]) <-
+    !heuristic(assign(R, CId, ShelfId), Score);
+    .findall(Rx, robot_capacity(Rx, _, _, _, _), AllRobots);
+    .nth(Idx, AllRobots, R);
+    Priority = -Idx;
+    !score_actions(Rest, SRest).
+
++!pick_best_action(Actions, Best) <-
+    !score_actions(Actions, Scored);
+    .sort(Scored, Sorted);
+    .reverse(Sorted, [s(_, _, Best)|_]).
+```
+
+`robot_heavy` está en índice 2 → `Priority = -2`. `robot_heavy2` está en índice 3 → `Priority = -3`. Como el sort es ascendente y se invierte, `s(10, -2, ...)` queda por delante de `s(10, -3, ...)` → `robot_heavy` gana el desempate.
+
+El orden de preferencia entre robots con igual score queda determinado por su posición en `robot_capacity`, que actúa como única fuente de verdad.
+
+### Corrección: oscilación del backoff horizontal (robot bloqueado por otro robot)
+
+**Causa raíz:** cuando un robot intentaba moverse horizontalmente y otro robot bloqueaba la celda destino, el backoff movía al robot a (X, Y+1). Desde ahí el greedy recalculaba y volvía inmediatamente a (X, Y) porque ese punto estaba más cerca del destino. El BC nunca llegaba a 6 porque cada ciclo oscilatorio completaba un paso exitoso que lo reseteaba.
+
+**Solución:** para movimiento horizontal bloqueado, el backoff ahora se mueve en Y (perpendicular al movimiento), en lugar de retroceder en X:
+
+```agentspeak
++!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y + 1; move_step(X, NY).
++!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y + 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y - 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y - 1; move_step(X, NY).
+```
+
+Desde (X, Y+1) el greedy no tiene incentivo para volver a (X, Y) si el destino sigue en X — avanza hacia él desde la nueva fila.
+
+### Corrección: oscilación del backoff vertical (robot o contenedor bloqueando acceso)
+
+**Causa raíz:** idéntica al caso horizontal pero en vertical. El backoff movía al robot a (X+1, Y). Desde ahí, el greedy volvía a (X, Y) porque TX == X y (X, Y) está más cerca del destino vertical. BC se reseteaba en cada ciclo.
+
+**Solución:** para movimiento vertical bloqueado, el backoff hace **dos pasos**: lateral (X±1) seguido de un paso en la dirección del destino (Y±1). El robot queda en (X+1, Y+1) — desde ahí el greedy ya no regresa a (X, Y) porque eso aumentaría |dy|:
+
+```agentspeak
++!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X + 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
++!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X + 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
+-!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X - 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
+-!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X - 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
+```
+
+Aplicado en los cuatro robots: `robot_light`, `robot_medium`, `robot_heavy`, `robot_heavy2`.

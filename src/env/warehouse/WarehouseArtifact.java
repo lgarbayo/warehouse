@@ -136,12 +136,17 @@ public class WarehouseArtifact extends Environment {
         heavy.setPosition(3, 3);
         robots.put("robot_heavy", heavy);
 
+        Robot heavy2 = new Robot("robot_heavy2", "heavy", 100, 2, 3, 1);
+        heavy2.setPosition(4, 3);
+        robots.put("robot_heavy2", heavy2);
+
         // Emitir posición inicial de cada robot para que sus planes de navegación
         // tengan robot_pos disponible desde el primer ciclo.
         try {
-            addPercept("robot_light",  ASSyntax.parseLiteral("robot_pos(1,3)"));
-            addPercept("robot_medium", ASSyntax.parseLiteral("robot_pos(2,3)"));
-            addPercept("robot_heavy",  ASSyntax.parseLiteral("robot_pos(3,3)"));
+            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,3)"));
+            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(2,3)"));
+            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(3,3)"));
+            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(4,3)"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }

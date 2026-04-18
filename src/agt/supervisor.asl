@@ -46,6 +46,7 @@ errors_by_type(invalid_drop, 0).
 robot_status(robot_light, idle).
 robot_status(robot_medium, idle).
 robot_status(robot_heavy, idle).
+robot_status(robot_heavy2, idle).
 
 /* Intervalo del reporte periódico (ms) */
 report_interval(30000).
@@ -169,12 +170,14 @@ shelf_type("shelf_9", non_urgent).
     .print("[SUPERVISOR] ", Robot, ": ", Status).
 
 +!print_robot_status : true <-
-    ?robot_status(robot_light,  SL);
-    ?robot_status(robot_medium, SM);
-    ?robot_status(robot_heavy,  SH);
-    .print("  robot_light: ",  SL);
-    .print("  robot_medium: ", SM);
-    .print("  robot_heavy: ",  SH).
+    ?robot_status(robot_light,   SL);
+    ?robot_status(robot_medium,  SM);
+    ?robot_status(robot_heavy,   SH);
+    ?robot_status(robot_heavy2,  SH2);
+    .print("  robot_light: ",   SL);
+    .print("  robot_medium: ",  SM);
+    .print("  robot_heavy: ",   SH);
+    .print("  robot_heavy2: ",  SH2).
 
 /* ============================================================================
  * MONITORIZACIÓN - Contenedores recibidos
