@@ -130,6 +130,72 @@ carrying(none).
     N1 = N - 1;
     !get_to_container(CId, N1).
 
+/* ============================================================================
+ * CICLO OUTBOUND — extraer contenedor de estantería y llevar a zona de salida
+ * ============================================================================ */
+
++outbound_available(CId, ShelfId, W, H, Weight) : state(idle) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
+                                                  & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
+    .print("📤 [HEAVY2] Tomando outbound: ", CId, " de ", ShelfId);
+    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_outbound_task(CId, ShelfId).
+
++outbound_available(CId, ShelfId, W, H, Weight) : not state(idle) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
+                                                  & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
+    .print("⚠️ [HEAVY2] Ocupado, guardando outbound: ", CId).
+
++outbound_available(CId, ShelfId, W, H, Weight) : true <-
+    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)].
+
++!execute_outbound_task(CId, ShelfId) : true <-
+    .print("📤 [HEAVY2] Fase 1: Navegando a estantería ", ShelfId);
+    move_to_shelf(ShelfId);
+    ?nav_target(TX, TY);
+    !navigate(TX, TY);
+
+    .print("📦 [HEAVY2] Fase 2: Recogiendo de estantería ", ShelfId);
+    -+state(picking);
+    pickup_from_shelf(ShelfId, CId);
+    .wait(1000);
+
+    .print("🚚 [HEAVY2] Fase 3: Navegando a zona outbound");
+    -+state(carrying);
+    move_to_outbound;
+    ?nav_target(TX2, TY2);
+    !navigate(TX2, TY2);
+
+    .print("📤 [HEAVY2] Fase 4: Entregando contenedor");
+    -+state(dropping);
+    drop_in_outbound(CId);
+    .wait(1000);
+
+    .print("✨ [HEAVY2] Outbound completado: ", CId);
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, container_shipped(CId, ShelfId));
+    !check_queue.
+
+-!execute_outbound_task(CId, ShelfId) : true <-
+    .print("⚠️ [HEAVY2] Fallo en tarea outbound: ", CId);
+    -+carrying(none);
+    release_task;
+    .send(scheduler, tell, outbound_failed(CId, ShelfId));
+    !check_queue.
+
++shipped(CId) : true <- true.
+
++!check_queue : outbound_available(CId, ShelfId, W, H, Weight) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
+              & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
+    .print("✅ [HEAVY2] Procesando outbound disponible: ", CId, " desde ", ShelfId);
+    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_outbound_task(CId, ShelfId).
+
 +!check_queue : task(CId, ShelfId) <-
     .print("✅ [HEAVY2] Procesando tarea encolada: ", CId, " a ", ShelfId);
     -task(CId, ShelfId)[source(scheduler)];
@@ -138,7 +204,7 @@ carrying(none).
     -+carrying(CId);
     !execute_task(CId, ShelfId).
 
-+!check_queue : not task(_, _) & position(InitX, InitY) <-
++!check_queue : not task(_, _) & not outbound_available(_, _, _, _, _) & position(InitX, InitY) <-
     .send(scheduler, tell, request_task);
     .wait(2000);
     if (task(CId, ShelfId)) {
@@ -152,7 +218,7 @@ carrying(none).
         -+state(idle);
     }.
 
--!check_queue : not task(_, _) <-
+-!check_queue : not task(_, _) & not outbound_available(_, _, _, _, _) <-
     .abolish(error(_, _));
     -+state(idle).
 

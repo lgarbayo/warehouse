@@ -987,3 +987,106 @@ El plan de fallo de `-!execute_task : shelf_full` ya no puede romperse: si `!go_
 | Archivo | Cambio |
 |---|---|
 | `robot_{light,medium,heavy,heavy2}.asl` | Extraída navegación a expansión al sub-goal `!go_to_expansion(CId)` con su plan de fallo `-!go_to_expansion(CId)` |
+
+---
+
+# Ciclo outbound — extracción de contenedores saturados a zona de salida
+
+## Motivación
+
+Cuando todas las estanterías de un tipo (urgent / non_urgent) están llenas, el sistema bloqueaba nuevas asignaciones de ese tipo (`blocked_type`) pero no hacía nada para liberar espacio. Los contenedores se acumulaban en la zona de expansión o generaban fallos de `shelf_full` indefinidamente. El ciclo outbound activa el vaciado activo de las estanterías saturadas hacia la zona de salida (roja, x=0–2, y=0–1) para reanudar el inbound.
+
+## Flujo completo
+
+```
+supervisor detecta estantería llena
+    → -shelf_available(ShelfId) → .findall de misma categoría vacía
+    → if vacía: no_space_notified, EVENT, .send(scheduler, no_shelf_space(Type))
+
+scheduler recibe no_shelf_space(Type)
+    → +blocked_type(Type)   ← planificador ignorará ese tipo
+    → EVENT output_phase_started
+    → !dispatch_outbound(Type)
+        → .findall de stored_at(CId, ShelfId) del tipo
+        → para cada (CId, ShelfId) × para cada robot:
+              .send(robot, tell, outbound_available(CId, ShelfId, W, H, Weight))
+        (broadcast: el scheduler anuncia, NO asigna)
+
+robot recibe outbound_available(CId, ShelfId, W, H, Weight)
+    → si state(idle) & compatible (max_weight, max_size):
+          -outbound_available, accept_task, -+state(working), !execute_outbound_task
+    → si not state(idle) & compatible:
+          mantiene creencia en BB (la procesará al terminar tarea actual)
+    → si incompatible:
+          -outbound_available (descarta)
+    (decisión autónoma: el scheduler no decide qué robot extrae qué contenedor)
+
+robot ejecuta !execute_outbound_task
+    → move_to_shelf → navigate → pickup_from_shelf → move_to_outbound → navigate → drop_in_outbound
+    → release_task(CId), .send(scheduler, container_shipped(CId, ShelfId))
+
+pickup_from_shelf (Java)
+    → shelf.remove(container)
+    → si shelf estaba llena: emitShelfAvailable(shelfId) → +shelf_available percept
+
+condición de carrera: dos robots intentan el mismo contenedor
+    → el primero en llamar pickup_from_shelf gana (atómico en Java)
+    → el segundo recibe container_not_on_shelf → -!execute_outbound_task dispara
+          → release_task (sin args), .send(scheduler, outbound_failed(CId, ShelfId))
+
++shelf_available en scheduler
+    → si blocked_type(Type) & shelf_for(Type, _, ShelfId): -blocked_type(Type)
+    → inbound de ese tipo se reanuda
+
++shelf_available en supervisor
+    → si no_space_notified(Type): -no_space_notified(Type)
+    → el ciclo de detección puede dispararse de nuevo si es necesario
+```
+
+## Cambios por archivo
+
+### `Shelf.java`
+
+Nuevo método `remove(Container)` — inverso de `store`: decrementa `currentWeight` y `currentVolume` y elimina el ID de `storedContainers`. Necesario para que `pickup_from_shelf` libere el espacio de la estantería correctamente.
+
+### `WarehouseArtifact.java`
+
+Tres nuevas acciones:
+
+- **`pickup_from_shelf(ShelfId, CId)`** — recoge un contenedor almacenado en una estantería. Comprueba proximidad (≤3), compatibilidad de peso/tamaño, y que el contenedor está efectivamente en la estantería. Llama a `shelf.remove(container)`, hace `robot.pickup`, y si la estantería estaba llena re-emite `shelf_available` al scheduler y al supervisor. Actualiza `shelf_occupancy`.
+
+- **`move_to_outbound`** — calcula la celda OUTBOUND más cercana al robot (zona roja, x=0–2, y=0–1) y emite `nav_target(X,Y)`. Análogo a `move_to_expansion`.
+
+- **`drop_in_outbound(CId)`** — el robot deposita el contenedor en la zona outbound y lo elimina de `containers` (enviado; no vuelve a aparecer en la simulación). Análogo a `drop_in_expansion` pero sin zona de clasificación.
+
+### `scheduler.asl`
+
+- **`+container_stored`**: añadido `+stored_at(CId, ShelfId)` para rastrear qué contenedores están en qué estantería.
+- **`+no_shelf_space`**: llama a `!dispatch_outbound(Type)` tras fijar `blocked_type`.
+- **`+!dispatch_outbound(Type)`**: broadcast puro — con `.findall` recoge todos los `stored_at(CId, ShelfId)` del tipo y envía `outbound_available(CId, ShelfId, W, H, Weight)` a **todos** los robots. No asigna ningún robot concreto.
+- **`+shelf_available`**: nuevo plan reactivo — si `blocked_type(Type)` y la estantería es de ese tipo, elimina `blocked_type` y reanuda el inbound.
+- **Protocolo `request_task`**: sin cambios respecto al inbound — el outbound ya no pasa por `request_task`; los robots reciben `outbound_available` directamente y deciden de forma autónoma.
+- **`+container_shipped`**: elimina `stored_at` y `container_info` al confirmar envío.
+- **`+outbound_failed`** (2 planes): si el contenedor sigue en la estantería (`container_info` existe) → re-broadcast a todos los robots; si ya no existe → elimina `stored_at`.
+
+### `supervisor.asl`
+
+- **`+shelf_available`**: nuevo plan reactivo — si `no_space_notified(Type)` y la estantería es de ese tipo, retira `no_space_notified` para que el ciclo de detección pueda volver a dispararse si se vuelve a llenar.
+
+### `robot_{light,medium,heavy,heavy2}.asl`
+
+- **`+outbound_available(CId, ShelfId, W, H, Weight)`** (3 planes):
+  1. `state(idle) & compatible` → elimina la creencia, `accept_task`, `-+state(working)`, `!execute_outbound_task`.
+  2. `not state(idle) & compatible` → mantiene la creencia en BB para procesarla al quedar idle.
+  3. `true` (incompatible) → elimina la creencia (`-outbound_available[source(scheduler)]`).
+- **`+!execute_outbound_task(CId, ShelfId)`**: 4 fases — navegar a estantería, `pickup_from_shelf`, navegar a outbound, `drop_in_outbound`. Al completar: `release_task(CId)`, envía `container_shipped` al scheduler.
+- **`-!execute_outbound_task`**: limpia estado, llama `release_task` **sin args** (evita re-encolar el contenedor al inbound) y notifica `outbound_failed`.
+- **`+!check_queue`**: comprueba `outbound_available` compatible *antes* que `task` inbound. El plan de "pedir tarea" solo se activa si no hay ni `task` ni `outbound_available` pendiente (eliminado el `else if outbound_task` del bloque inline).
+
+| Archivo | Cambio |
+|---|---|
+| `Shelf.java` | Añadido `remove(Container)` |
+| `WarehouseArtifact.java` | Nuevas acciones `pickup_from_shelf`, `move_to_outbound`, `drop_in_outbound` |
+| `scheduler.asl` | `stored_at`, `dispatch_outbound` (broadcast), `shelf_available` reactivo, `container_shipped`, `outbound_failed` (re-broadcast) |
+| `supervisor.asl` | `+shelf_available` reactivo para resetear `no_space_notified` |
+| `robot_{light,medium,heavy,heavy2}.asl` | 3 planes `+outbound_available` (idle+compatible / busy+compatible / incompatible), `execute_outbound_task`, `check_queue` actualizado |

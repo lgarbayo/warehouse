@@ -413,7 +413,8 @@ urgency_of(fragile,  non_urgent).
 
 +container_stored(CId, ShelfId)[source(Robot)] : true <-
     .print("✨ [TRACE] ", Robot, " almacenó ", CId, " en ", ShelfId);
-    -assigned(Robot, CId, ShelfId);
+    +stored_at(CId, ShelfId);
+    -assigned(Robot, CId, _);
     -container_stored(CId, ShelfId)[source(Robot)];
     if (planner_pending(_, _, _, _, _) & not planning_active) {
         +planning_active;
@@ -484,7 +485,30 @@ urgency_of(fragile,  non_urgent).
 +no_shelf_space(ContainerType)[source(supervisor)] : true <-
     +blocked_type(ContainerType);
     .time(H, M, S);
-    .print("EVENT | time=", H, ":", M, ":", S, " | agent=scheduler | type=output_phase_started | data=", ContainerType).
+    .print("EVENT | time=", H, ":", M, ":", S, " | agent=scheduler | type=output_phase_started | data=", ContainerType);
+    !dispatch_outbound(ContainerType).
+
+// El scheduler hace broadcast a todos los robots — no asigna ninguno específico.
+// Cada robot decide autónomamente si toma el contenedor según sus capacidades.
+// El entorno gestiona la concurrencia: solo el primero en pickup_from_shelf tiene éxito.
++!dispatch_outbound(Type) <-
+    .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
+    .findall(info(CId, ShelfId, W, H, Weight),
+             (stored_at(CId, ShelfId) & shelf_for(Type, _, ShelfId)
+              & container_info(CId, W, H, Weight, _, _, _)),
+             Containers);
+    .print("[SCHEDULER] Anunciando outbound (", Type, "): ", Containers);
+    for (.member(info(CId, ShelfId, W, H, Weight), Containers)) {
+        for (.member(R, AllRobots)) {
+            .send(R, tell, outbound_available(CId, ShelfId, W, H, Weight));
+        };
+    }.
+
++shelf_available(ShelfId) : blocked_type(Type) & shelf_for(Type, _, ShelfId) <-
+    -blocked_type(Type);
+    .print("[SCHEDULER] Tipo ", Type, " desbloqueado — espacio disponible en ", ShelfId).
+
++shelf_available(_) : true <- true.
 
 /* ============================================================================
  * 12. PROTOCOLO PULL — robots consultan activamente al scheduler
@@ -493,14 +517,12 @@ urgency_of(fragile,  non_urgent).
  *     ninguna preparada para ese robot.
  * ============================================================================ */
 
-// Caso 1: hay una tarea lista para este robot → enviar inmediatamente
 +request_task[source(Robot)] : ready_task(Robot, CId, ShelfId) <-
     -ready_task(Robot, CId, ShelfId);
     -request_task[source(Robot)];
     .print("[SCHEDULER] Respondiendo a ", Robot, " con tarea: ", CId, " → ", ShelfId);
     .send(Robot, tell, task(CId, ShelfId)).
 
-// Caso 2: no hay tarea lista pero hay pendientes → replanificar y responder
 +request_task[source(Robot)] : planner_pending(_, _, _, _, _) & not planning_active <-
     -request_task[source(Robot)];
     +planning_active;
@@ -515,7 +537,29 @@ urgency_of(fragile,  non_urgent).
         .print("[SCHEDULER] Sin tarea disponible para ", Robot);
     }.
 
-// Caso 3: no hay nada — robot esperará y volverá a preguntar
 +request_task[source(Robot)] : true <-
     -request_task[source(Robot)];
     .print("[SCHEDULER] Sin tarea disponible para ", Robot).
+
+/* ============================================================================
+ * 13. CICLO OUTBOUND — handlers de confirmación y fallo
+ * ============================================================================ */
+
++container_shipped(CId, ShelfId)[source(Robot)] : true <-
+    .print("🚚 [SCHEDULER] ", CId, " enviado por outbound.");
+    -stored_at(CId, ShelfId);
+    -container_shipped(CId, ShelfId)[source(Robot)];
+    .abolish(container_info(CId, _, _, _, _, _, _)).
+
++outbound_failed(CId, ShelfId)[source(Robot)] : container_info(CId, W, H, Weight, _, _, _) <-
+    .print("⚠️ [SCHEDULER] Fallo outbound para ", CId, ". Reanunciando.");
+    -outbound_failed(CId, ShelfId)[source(Robot)];
+    .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
+    for (.member(R, AllRobots)) {
+        .send(R, tell, outbound_available(CId, ShelfId, W, H, Weight));
+    }.
+
++outbound_failed(CId, ShelfId)[source(Robot)] : true <-
+    .print("⚠️ [SCHEDULER] Fallo outbound para ", CId, ". Contenedor no encontrado.");
+    -stored_at(CId, ShelfId);
+    -outbound_failed(CId, ShelfId)[source(Robot)].

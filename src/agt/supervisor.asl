@@ -240,3 +240,10 @@ shelf_type("shelf_9", non_urgent).
 // Ignorar retirada de percepciones de estanterías ya notificadas
 -shelf_available(_) : true <- true.
 
+// Cuando se libera espacio (robot retiró contenedor de estantería), resetear
+// no_space_notified para que el ciclo de saturación pueda dispararse de nuevo.
++shelf_available(ShelfId) : shelf_type(ShelfId, Type) & no_space_notified(Type) <-
+    -no_space_notified(Type).
+
++shelf_available(_) : true <- true.
+

@@ -7,16 +7,9 @@ Distributed coordination among robots to organize themselves autonomously and ef
 
 ---
 
-El entorno sólo podrá dar la ubicación de los agentes, de las estanterías y los contenedores.
-Nueva zona de salida.
-Control temporal el scheduler señalará los contenedores que deben estar en la zona de salida y el tiempo límite en el que se deben encontrar allí (deadline).
-Coordinación del scheduler deja de ser el proveedor central de información, los robots consultan al entorno la ubicación de contenedores.
-Coordinación distribuida entre los robots para organizarse de forma autónoma y eficiente sin depender del scheduler para asignar tareas específicas. Optimizar el flujo de trabajo.
-
----
-
 > [!NOTE]
 > Nota: cambiar light por L, medium por M, heavy por H, heavy por H2??
+>
 > Nota: cambiar zonas hardcodeadas?
 
 > [!WARNING]
@@ -33,21 +26,24 @@ Coordinación distribuida entre los robots para organizarse de forma autónoma y
 > (`.wait()` adicional), dejando que BC se acumule de forma natural hasta que `path_blocked` active
 > la recuperación de error, o bien implementar un algoritmo de pathfinding real (A*).
 
-# 2nd week
+> [!WARNING]
+> **REVISAR LO IMPLEMENTADO EN EL OUTBOUND**
+> **Inbound: el scheduler sigue asignando tareas y robots**
+>
+> El objetivo de la 2ª semana exige que el scheduler "no asigne tareas ni robots". En el ciclo
+> outbound esto se cumple: el scheduler hace broadcast de `outbound_available` a todos los robots
+> y cada uno decide autónomamente según sus capacidades.
+>
+> En el ciclo **inbound** no se cumple: el planificador formal genera `assign(Robot, CId, ShelfId)`
+> y el scheduler responde a cada `request_task` con `ready_task(Robot, CId, ShelfId)` — asignación
+> robot-específica. El robot que pide trabajo recibe exactamente la tarea que el scheduler ha
+> decidido para él, sin autonomía de decisión.
+>
+> **Pendiente:** adaptar el inbound para que el scheduler anuncie contenedores pendientes
+> (`task_available(CId, ShelfId, W, H, Weight)`) a todos los robots y cada uno decida si lo toma,
+> igual que en el outbound. El planificador puede seguir existiendo para decidir *a qué estantería*
+> va cada contenedor — lo que debe eliminarse es la asignación del robot concreto.
 
-General objective
-
-Adapt the system architecture to introduce the outbound zone and prepare the controlled transition from the inbound cycle to the outbound cycle, incorporating the explicit classification of containers by shelving, while maintaining a lean environment.
-
-Specific objectives
-    Modify the scheduler so that it:
-        does not assign tasks or robots,
-        can receive the supervisor’s notification,
-        activates the outbound cycle for the corresponding container type,
-        stops accepting new containers of that type until storage space becomes available again.
-
-    Modificar el scheduler para que:
-        no asigne tareas ni robots,
-        pueda recibir el aviso del supervisor,
-        active el ciclo de salida del tipo de contenedor correspondiente,
-        deje de aceptar nuevos contenedores de ese tipo hasta que quede espacio para nuevos contenedores.
+> [!WARNING]
+>
+> Revisar bugs de movimiento cuando se dejan robots en la zona de clasification

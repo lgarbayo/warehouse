@@ -361,6 +361,12 @@ public class WarehouseArtifact extends Environment {
                     return executeMoveToExpansion(agName);
                 case "drop_in_expansion":
                     return executeDropInExpansion(agName, action);
+                case "pickup_from_shelf":
+                    return executePickupFromShelf(agName, action);
+                case "move_to_outbound":
+                    return executeMoveToOutbound(agName);
+                case "drop_in_outbound":
+                    return executeDropInOutbound(agName, action);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
@@ -880,6 +886,126 @@ public class WarehouseArtifact extends Environment {
                 view.logMessage("📦 " + agName + " → expansión: " + containerId + " (" + rx + "," + ry + ")");
                 view.update();
             }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: pickup_from_shelf(ShelfId, ContainerId)
+     * Recoge un contenedor almacenado en una estantería (ciclo outbound).
+     * Libera espacio en la estantería inmediatamente.
+     */
+    private boolean executePickupFromShelf(String agName, Structure action) {
+        try {
+            String shelfId = action.getTerm(0).toString().replace("\"", "");
+            String containerId = action.getTerm(1).toString().replace("\"", "");
+
+            Robot robot = robots.get(agName);
+            Shelf shelf = shelves.get(shelfId);
+            Container container = containers.get(containerId);
+
+            if (robot == null || shelf == null || container == null) return false;
+
+            if (!shelf.getStoredContainers().contains(containerId)) {
+                addError(agName, "container_not_on_shelf", containerId);
+                return false;
+            }
+            if (robot.distanceTo(shelf.getX(), shelf.getY()) > 3) {
+                addError(agName, "too_far", "Shelf too far away");
+                return false;
+            }
+            if (!robot.canCarry(container)) {
+                if (container.getWeight() > robot.getMaxWeight()) {
+                    addError(agName, "container_too_heavy", containerId);
+                } else {
+                    addError(agName, "container_too_big", containerId);
+                }
+                return false;
+            }
+
+            boolean wasFull = shelf.isFull();
+            shelf.remove(container);
+            container.setPicked(true);
+            container.setPosition(robot.getX(), robot.getY());
+            robot.pickup(container);
+
+            if (wasFull) {
+                emitShelfAvailable(shelfId);
+            }
+            emitShelfOccupancy(shelfId, shelf);
+
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("picked(_)"));
+            addPercept(agName, ASSyntax.parseLiteral("picked(\"" + containerId + "\")"));
+
+            if (view != null) {
+                view.logMessage("📦 " + agName + " retiró " + containerId + " de " + shelfId + " (outbound)");
+                view.update();
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: move_to_outbound
+     * Encuentra la celda libre más cercana de la zona OUTBOUND y emite nav_target(X,Y).
+     */
+    private boolean executeMoveToOutbound(String agName) {
+        try {
+            Robot robot = robots.get(agName);
+            if (robot == null) return false;
+
+            List<int[]> cells = new ArrayList<>();
+            for (int x = 0; x < GRID_WIDTH; x++) {
+                for (int y = 0; y < GRID_HEIGHT; y++) {
+                    if (grid[x][y] == CellType.OUTBOUND) {
+                        cells.add(new int[]{x, y});
+                    }
+                }
+            }
+            if (cells.isEmpty()) return false;
+
+            cells.sort((a, b) -> {
+                int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
+                int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
+                return Integer.compare(da, db);
+            });
+
+            emitNavTarget(agName, cells.get(0)[0], cells.get(0)[1]);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: drop_in_outbound(ContainerId)
+     * Deposita el contenedor en la zona outbound y lo elimina de la simulación (enviado).
+     */
+    private boolean executeDropInOutbound(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Robot robot = robots.get(agName);
+            Container container = containers.get(containerId);
+
+            if (robot == null || container == null) return false;
+            if (!robot.isCarrying()) return false;
+
+            robot.drop();
+            containers.remove(containerId);
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("picked(_)"));
+
+            if (view != null) {
+                view.logMessage("🚚 " + agName + " → outbound: " + containerId + " enviado");
+                view.update();
+            }
+            System.out.println("[" + agName + "] " + containerId + " enviado por outbound");
             return true;
         } catch (Exception e) {
             e.printStackTrace();
