@@ -14,6 +14,8 @@
  * 
  ******************************************************************************/
 
+{ include("common.asl") }
+
 /* ============================================================================
  * CREENCIAS INICIALES
  * ============================================================================ */
@@ -202,7 +204,36 @@ report_interval(30000).
     -total_errors(_);
     +total_errors(N);
     !update_rates;
-    .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot, " | Total errores: ", N).
+    .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot, " | Total errores: ", N);
+    !maybe_notify_storage_full(CId, ErrorType).
+
+/* ============================================================================
+ * DETECCIÓN - Sin espacio de almacenamiento para un tipo de contenedor
+ * ============================================================================ */
+
+// Llamado desde +container_error cuando el scheduler no encontró estantería tras reintentos.
+// Consulta el tipo del contenedor al scheduler (container_info aún existe en ese momento)
+// y, si ese tipo aún no fue notificado, registra T0 y envía storage_full al scheduler.
++!maybe_notify_storage_full(CId, no_shelf_space) : true <-
+    !query_container_type_and_notify(CId).
+
+// Cualquier otro tipo de error: sin acción de saturación.
++!maybe_notify_storage_full(_, _) : true <- true.
+
++!query_container_type_and_notify(CId) : true <-
+    .send(scheduler, askOne, container_info(CId, _, _, _, Type, _, _), container_info(_, _, _, _, Type, _, _));
+    if (not storage_saturated(Type)) {
+        .time(H, M, S);
+        T0 = H * 3600 + M * 60 + S;
+        +storage_saturated(Type);
+        .print("[SUPERVISOR] Almacenamiento saturado para tipo '", Type, "'. T0=", T0, "s. Notificando al scheduler.");
+        .send(scheduler, tell, storage_full(Type, T0))
+    }.
+
+// Si el scheduler ya no tiene container_info (edge case: contenedor aplastado entre
+// el envío de no_shelf_space y el procesamiento del supervisor).
+-!query_container_type_and_notify(CId) : true <-
+    .print("[SUPERVISOR] No se pudo determinar el tipo de ", CId, " para notificación de saturación.").
 
 // Errores de navegacion enviados directamente desde Java (sin CId: route_blocked, etc.)
 +robot_error(Robot, ErrorType, Data) : true <-

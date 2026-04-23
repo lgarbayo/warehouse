@@ -1,15 +1,17 @@
 /*******************************************************************************
  * ROBOT LIGERO - Sistema de Gestión Logística de Almacén
- * 
+ *
  * Universidad de Vigo - Sistemas Inteligentes
  * Curso 2025-2026
- * 
+ *
  * CAPACIDADES:
  *   - Peso máximo: 10 kg
  *   - Tamaño máximo: 1×1
  *   - Velocidad: Alta (3)
- * 
+ *
  ******************************************************************************/
+
+{ include("common.asl") }
 
 /* ============================================================================
  * CREENCIAS INICIALES
