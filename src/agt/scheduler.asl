@@ -81,6 +81,13 @@ urgency_of(fragile,  non_urgent).
 +container_info(CId, W, H, Weight, Type, X, Y) : container_broken(CId) <-
     .print("💥 [SCHEDULER] ", CId, " fue aplastado antes de clasificar. Ignorando.").
 
+// Ciclo de salida activo para este tipo: descartar sin asignar ni procesar
++container_info(CId, _, _, _, Type, _, _) :
+    not container_broken(CId) &
+    exit_cycle(Type, _) <-
+    .print("[SCHEDULER] ⛔ ", CId, " (tipo '", Type, "') descartado: ciclo de salida activo.");
+    .abolish(container_info(CId, _, _, _, _, _, _)).
+
 // Registrar contenedor en la cola de planificación y activar el planificador
 +container_info(CId, W, H, Weight, Type, X, Y) : not container_broken(CId) <-
     .print("[PLANNER] Contenedor registrado: ", CId, " (", Weight, "kg, tipo=", Type, ")");
@@ -476,6 +483,62 @@ urgency_of(fragile,  non_urgent).
     .print("❌ [TRACE] Error reportado por ", Robot, " para ", CId, ": ", ErrorType);
     -assigned(Robot, CId, _);
     -container_error(CId, ErrorType)[source(Robot)].
+
+/* ============================================================================
+ * 7. CICLO DE SALIDA - Recepción del aviso de saturación del supervisor
+ * ============================================================================ */
+
+// El supervisor detectó que no hay espacio para más contenedores de Type.
+// Se registra T0 como instante local de recepción (no el del supervisor),
+// se activa el bloqueo vía exit_cycle(Type, T0) y se guarda el estado del ciclo.
++storage_full(Type, _)[source(supervisor)] : not exit_cycle(Type, _) <-
+    .time(H, M, S);
+    T0 = H * 3600 + M * 60 + S;
+    +exit_cycle(Type, T0);
+    .abolish(storage_full(Type, _));
+    .print("[SCHEDULER] ⛔ Ciclo de salida activado para tipo '", Type, "'. T0=", T0, "s. Bloqueando nuevas llegadas.").
+
+// Idempotente: ya hay un ciclo activo para este tipo.
++storage_full(Type, _)[source(supervisor)] : exit_cycle(Type, T0existing) <-
+    .abolish(storage_full(Type, _));
+    .print("[SCHEDULER] Ciclo de salida para '", Type, "' ya activo (T0=", T0existing, "s). Ignorando.").
+
+/* ============================================================================
+ * 8. CICLO DE SALIDA - Gestión de deadlines
+ * ============================================================================ */
+
+// Disparado automáticamente al añadirse exit_cycle(Type, T0) a la BB.
++exit_cycle(Type, T0) : true <-
+    !run_exit_cycle(Type, T0).
+
++!run_exit_cycle(Type, T0) : delta_t(DT) <-
+
+    // ---- Deadline corto: [T0, T0+ΔT) — salen contenedores urgentes ----
+    +active_deadline(short, urgent, T0);
+    .time(H1, M1, S1);
+    Tstart1 = H1 * 3600 + M1 * 60 + S1;
+    .print("EVENT | time=", Tstart1, " | agent=scheduler | type=deadline_started | data=urgent");
+    .send(transport, tell, start_transport(urgent, T0));
+    DurShort = DT * 1000;
+    .wait(DurShort);
+    -active_deadline(short, urgent, T0);
+    .time(H2, M2, S2);
+    Tend1 = H2 * 3600 + M2 * 60 + S2;
+    .print("EVENT | time=", Tend1, " | agent=scheduler | type=deadline_ended | data=urgent");
+
+    // ---- Deadline largo: [T0+ΔT, T0+3·ΔT) — salen contenedores no urgentes ----
+    T1 = T0 + DT;
+    +active_deadline(long, non_urgent, T1);
+    .time(H3, M3, S3);
+    Tstart2 = H3 * 3600 + M3 * 60 + S3;
+    .print("EVENT | time=", Tstart2, " | agent=scheduler | type=deadline_started | data=non_urgent");
+    .send(transport, tell, start_transport(non_urgent, T1));
+    DurLong = DT * 2 * 1000;
+    .wait(DurLong);
+    -active_deadline(long, non_urgent, T1);
+    .time(H4, M4, S4);
+    Tend2 = H4 * 3600 + M4 * 60 + S4;
+    .print("EVENT | time=", Tend2, " | agent=scheduler | type=deadline_ended | data=non_urgent").
 
 /* ============================================================================
  * 11. CICLO OUTBOUND — saturación de estanterías
