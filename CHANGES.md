@@ -806,6 +806,7 @@ EVENT | time=T | agent=scheduler | type=deadline_ended   | data=non_urgent
 |---|---|
 | `scheduler.asl` | `shelf_category` → `shelf_for(Urgency, SizeCat, ShelfId)`; 6 planes `assign_shelf` tipados; `pick_least_occupied` con 3 argumentos |
 | `scheduler.asl` | Sección 8 añadida: trigger `+exit_cycle`, plan `+!run_exit_cycle` con gestión de `active_deadline`, logs EVENT y llamadas a Transport |
+| `robot_{light,medium,heavy}.asl` | `work_cycle` (idle): `request_task` → `!check_exit_cycle`; nueva sección "Ciclo de salida" con `!check_exit_cycle`, `!select_for_exit/2`, log `EVENT container_delivered` |
 
 
 
@@ -1246,3 +1247,86 @@ Tres nuevas acciones:
 | `scheduler.asl` | `stored_at`, `dispatch_outbound` (broadcast), `shelf_available` reactivo, `container_shipped`, `outbound_failed` (re-broadcast) |
 | `supervisor.asl` | `+shelf_available` reactivo para resetear `no_space_notified` |
 | `robot_{light,medium,heavy,heavy2}.asl` | 3 planes `+outbound_available` (idle+compatible / busy+compatible / incompatible), `execute_outbound_task`, `check_queue` actualizado |
+
+---
+
+## Robots: selección autónoma de contenedores en ciclo de salida
+
+### Motivación
+
+Durante el ciclo de salida los robots no reciben asignaciones del scheduler. Deben consultar qué deadline está activo, filtrar sus contenedores almacenados por el tipo correspondiente, y delegar el transporte al agente Transport de forma autónoma.
+
+### Diseño de la selección autónoma
+
+**Cuándo se ejecuta**: en cada iteración de `work_cycle` cuando el robot está `idle`, antes del `.wait`. El robot consulta el scheduler, hace la selección si hay deadline activo, y luego sigue esperando. Si no hay deadline el ciclo es un no-op.
+
+**Criterio de selección**: orden de almacenamiento (FIFO sobre `stored/2`). El robot usa `.findall` sobre su propia BB para construir la lista `[pair(CId, ShelfId), ...]` de contenedores que almacenó y aún no ha reclamado para salida. Recorre la lista y elige el primer candidato cuyo tipo coincide con el deadline activo.
+
+**Respeto de capacidades**: `stored(CId, ShelfId)` solo contiene contenedores que el propio robot transportó originalmente, es decir, aquellos que ya cumplían sus límites de peso y tamaño. No se necesita revalidación.
+
+### Flujo por deadline
+
+```agentspeak
++!check_exit_cycle : true <-
+    .send(scheduler, askOne, active_deadline(_, Category, _), active_deadline(_, Category, _));
+    .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
+    !select_for_exit(Candidates, Category).
+
+-!check_exit_cycle : true <- true.   // sin deadline activo
+```
+
+**Idempotencia**: `exit_claimed(CId)` persiste en la BB del robot y evita reclamar el mismo contenedor en ciclos de `work_cycle` posteriores mientras el deadline sigue activo.
+
+### Resumen de cambios
+
+| Archivo | Cambio |
+|---|---|
+| `robot_{light,medium,heavy}.asl` | `work_cycle` (idle): añadido `!check_exit_cycle` al inicio del cuerpo; nueva sección "Ciclo de salida" con `!check_exit_cycle`, `!select_for_exit/2` (urgente y no urgente), fallbacks y caso base |
+
+---
+
+## Log obligatorio: EVENT container_delivered al depositar en zona de salida
+
+### Motivación
+
+Los objetivos de la semana exigen que cada vez que un robot deposite un contenedor en la zona de salida quede registrado el evento estructurado:
+
+```
+EVENT | time=T | agent=robot_id | type=container_delivered | data=container_id
+```
+
+### Cambios en `+!select_for_exit` (los tres robots)
+
+Antes del `.send(transport, tell, exit_transport(CId, ShelfId))` se añaden tres líneas en cada plan:
+
+```agentspeak
+.time(Hd, Md, Sd);
+Td = Hd * 3600 + Md * 60 + Sd;
+.print("EVENT | time=", Td, " | agent=", Me, " | type=container_delivered | data=", CId);
+```
+
+### Resumen de cambios
+
+| Archivo | Cambio |
+|---|---|
+| `robot_light.asl` | `+!select_for_exit/urgent` y `+!select_for_exit/non_urgent`: 3 líneas de log EVENT añadidas antes del `.send(transport, ...)` |
+| `robot_medium.asl` | Ídem |
+| `robot_heavy.asl` | Ídem |
+
+---
+
+## Verificación manual — Objetivos de la semana
+
+Se ejecutó el sistema durante ~2 minutos con `delta_t(30)`. La sesión terminó antes de saturar ningún tipo (ciclo de salida no activado), pero todos los objetivos fueron verificados estáticamente en código.
+
+| # | Objetivo | Estado | Evidencia |
+|---|---|---|---|
+| 1 | Activar ciclo de salida al saturar tipo y definir T0 | ✅ Implementado | `+storage_full(Type,_)[source(supervisor)]` añade `exit_cycle(Type,T0)` — `scheduler.asl` sección 7 |
+| 2a | Deadline corto para urgentes (`T0 + ΔT`) | ✅ Implementado | `+active_deadline(short, urgent, T0)` + `.wait(DT*1000)` — sección 8 |
+| 2b | Deadline largo para no urgentes (`T0 + 3·ΔT`) | ✅ Implementado | `+active_deadline(long, non_urgent, T1)` + `.wait(DT*2*1000)` |
+| 2c | ΔT configurable y justificado | ✅ Implementado | `delta_t(30)` en `common.asl` |
+| 3 | Solo un deadline activo en cada instante | ✅ Garantizado | `.wait()` bloqueante: `active_deadline(long,...)` no se añade hasta retirar `active_deadline(short,...)` |
+| 4a-4c | Robots autónomos en ciclo salida | ✅ Implementado | FIFO sobre `stored/2` local; `exit_claimed` evita duplicados; sin asignación explícita |
+| LOG-1 | `EVENT deadline_started` | ✅ Implementado | Emitido en `+!run_exit_cycle` |
+| LOG-2 | `EVENT deadline_ended` | ✅ Implementado | Emitido tras cada `.wait()` |
+| LOG-3 | `EVENT container_delivered` | ✅ Implementado | Emitido en `+!select_for_exit` de los tres robots |
