@@ -11,6 +11,8 @@
  * 
  ******************************************************************************/
 
+{ include("common.asl") }
+
 /* Estado inicial del robot */
 state(idle).         // Estados posibles: idle, moving, picking, carrying, dropping
 position(3,3).       // Posición inicial

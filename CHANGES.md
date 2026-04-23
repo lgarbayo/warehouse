@@ -537,6 +537,45 @@ Se añade `OUTBOUND` al enum `CellType` para distinguir semánticamente la zona 
 
 El fallback de `generateRandomContainer()` cuando la zona de entrada está llena se actualiza de `(0,0)` (ahora zona outbound) a `(5,0)` (primera celda de la nueva zona de entrada).
 
+---
+
+## Constantes globales y clasificación de tipos de contenedor (`common.asl`)
+
+### Motivación
+
+Las constantes y clasificaciones usadas por varios agentes estaban dispersas o implícitas en la lógica. Se necesitaba un lugar único, fácilmente modificable, para:
+
+- El parámetro temporal ΔT que el scheduler usa para razonar sobre el ciclo de salida de contenedores urgentes.
+- La clasificación de tipos de contenedor en dos grupos semánticamente distintos: urgentes y no urgentes.
+
+### Solución
+
+Se crea el archivo `src/agt/common.asl`, incluido desde los cinco agentes con `{ include("common.asl") }`. Contiene únicamente hechos base — sin planes ni triggers.
+
+#### `delta_t`
+
+```agentspeak
+// ΔT: tiempo mínimo razonable (en ciclos de razonamiento) para que los robots
+// urgentes completen sus transportes dado el layout del almacén.
+delta_t(30).
+```
+
+Valor de referencia: robot ligero (speed=3) ida+vuelta a `shelf_1` (y=2 desde ENTRANCE en y≈0) ≈ 20 pasos → margen con δt=30. Ajustable sin tocar lógica de agente.
+
+#### Clasificación de tipos de contenedor
+
+```agentspeak
+urgent_container_type("urgent").
+urgent_shelf("shelf_1").
+urgent_shelf("shelf_5").
+urgent_shelf("shelf_8").
+
+non_urgent_container_type("standard").
+non_urgent_container_type("fragile").
+```
+
+`urgent_shelf` designa una estantería representante por categoría de peso (light/medium/heavy). La clasificación es independiente del criterio de asignación por peso del scheduler — expresa la urgencia semántica del contenedor, no su categoría física.
+
 ### Resumen de cambios
 
 | Archivo | Cambio |
@@ -544,6 +583,8 @@ El fallback de `generateRandomContainer()` cuando la zona de entrada está llena
 | `CellType.java` | Añadido valor `OUTBOUND` |
 | `WarehouseView.java` | Añadido case `OUTBOUND` con color rojo suave en el render del grid |
 | `WarehouseArtifact.java` | `initializeGrid()`: tres bloques con nuevas coordenadas; fallback spawn de (0,0) a (5,0) |
+| `src/agt/common.asl` | Creado con `delta_t(30)`, `urgent_container_type`, `urgent_shelf`, `non_urgent_container_type` |
+| `robot_{light,medium,heavy}.asl`, `scheduler.asl`, `supervisor.asl` | Añadido `{ include("common.asl") }` al inicio |
 
 ---
 
@@ -605,6 +646,55 @@ EVENT | time=H:M:S | agent=supervisor | type=no_space_detected | data=urgent
 EVENT | time=H:M:S | agent=scheduler  | type=output_phase_started | data=urgent
 ```
 
+---
+
+## Supervisor: detección de saturación de almacenamiento por tipo
+
+### Problema
+
+Cuando el scheduler agotaba sus 3 reintentos para encontrar estantería a un contenedor (`no_shelf_space`), el supervisor registraba el error genéricamente pero no distinguía si el sistema había alcanzado una condición estructural: ninguna estantería puede aceptar más contenedores de un tipo concreto. Sin esta señal, el scheduler continuaba recibiendo y encolando contenedores de ese tipo sin posibilidad de almacenarlos.
+
+### Solución
+
+El supervisor detecta la saturación por tipo al recibir `no_shelf_space` y notifica al scheduler con `storage_full(Type, T0)`.
+
+#### Por qué `askOne` al scheduler
+
+`shelf_available` y `shelf_occupancy` se emiten exclusivamente al scheduler (`addPercept("scheduler", ...)`); el supervisor no las percibe. El tipo del contenedor tampoco está disponible directamente: `container_info` es un percepto privado que el entorno añade solo al agente que ejecuta `get_container_info(CId)`.
+
+Sin embargo, en el path `no_shelf_space` del scheduler, la creencia `container_info(CId, W, H, Weight, Type, X, Y)` **no se abole** (a diferencia del path `container_broken`). Está disponible en la base de creencias del scheduler cuando el supervisor procesa el mensaje. Se usa `.send(scheduler, askOne, ...)` para consultarla en ese momento.
+
+#### Flujo
+
+```agentspeak
+// Al final del handler genérico de errores:
++container_error(CId, ErrorType)[source(Robot)] : true <-
+    ...
+    !maybe_notify_storage_full(CId, ErrorType).
+
+// Solo actúa para no_shelf_space:
++!maybe_notify_storage_full(CId, no_shelf_space) : true <-
+    !query_container_type_and_notify(CId).
++!maybe_notify_storage_full(_, _) : true <- true.
+
++!query_container_type_and_notify(CId) : true <-
+    .send(scheduler, askOne,
+          container_info(CId, _, _, _, Type, _, _),
+          container_info(_, _, _, _, Type, _, _));
+    if (not storage_saturated(Type)) {
+        .time(H, M, S);
+        T0 = H * 3600 + M * 60 + S;
+        +storage_saturated(Type);
+        .send(scheduler, tell, storage_full(Type, T0))
+    }.
+
+// Edge case: container_info ya no existe (contenedor aplastado justo antes)
+-!query_container_type_and_notify(CId) : true <-
+    .print("[SUPERVISOR] No se pudo determinar el tipo de ", CId, " para notificación de saturación.").
+```
+
+La creencia `storage_saturated(Type)` actúa como semáforo por tipo: la notificación se envía **una sola vez** por tipo, independientemente de cuántos `no_shelf_space` lleguen. T0 se expresa en segundos desde medianoche (`H×3600 + M×60 + S`), usando `.time/3` de Jason.
+
 ### Resumen de cambios
 
 | Archivo | Cambio |
@@ -612,6 +702,7 @@ EVENT | time=H:M:S | agent=scheduler  | type=output_phase_started | data=urgent
 | `WarehouseArtifact.java` | `emitShelfAvailable`: añade percept también a supervisor; `executeDropAt`: retira percept también de supervisor |
 | `supervisor.asl` | Añadidas creencias `shelf_type/2`; plan `-shelf_available` con detección y log obligatorio; creencia `no_space_notified` anti-duplicado |
 | `scheduler.asl` | Plan `+no_shelf_space(ContainerType)[source(supervisor)]` con log obligatorio |
+| `supervisor.asl` | `+container_error`: añadida llamada `!maybe_notify_storage_full(CId, ErrorType)`; nuevos planes `!maybe_notify_storage_full`, `!query_container_type_and_notify`, `-!query_container_type_and_notify` |
 
 ---
 
