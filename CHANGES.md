@@ -580,3 +580,73 @@ La creencia `storage_saturated(Type)` actúa como semáforo por tipo: la notific
 | Archivo | Cambio |
 |---|---|
 | `supervisor.asl` | `+container_error`: añadida llamada `!maybe_notify_storage_full(CId, ErrorType)`; nuevos planes `!maybe_notify_storage_full`, `!query_container_type_and_notify`, `-!query_container_type_and_notify` |
+
+---
+
+## Scheduler: gestión de deadlines del ciclo de salida
+
+### Motivación
+
+Una vez registrado `exit_cycle(Type, T0)`, el scheduler debe orquestar dos fases de salida con duraciones definidas por ΔT, emitir los eventos de log estructurados y notificar al agente Transport. Las dos fases deben ser mutuamente excluyentes: la fase larga no puede empezar hasta que la corta haya terminado.
+
+### Solución
+
+Se añade la sección 8 a `scheduler.asl` con dos planes: un trigger reactivo sobre `+exit_cycle` y el plan principal `+!run_exit_cycle`.
+
+#### Trigger reactivo
+
+```agentspeak
++exit_cycle(Type, T0) : true <-
+    !run_exit_cycle(Type, T0).
+```
+
+Se dispara en el ciclo de razonamiento siguiente a que `+storage_full` añada la creencia, manteniendo la separación entre "recibir el aviso" (sección 7) y "gestionar los deadlines" (sección 8).
+
+#### Secuencia de deadlines
+
+```agentspeak
++!run_exit_cycle(Type, T0) : delta_t(DT) <-
+
+    // Deadline corto: [T0, T0+ΔT) — salen contenedores urgentes
+    +active_deadline(short, urgent, T0);
+    .time(H1, M1, S1); Tstart1 = H1 * 3600 + M1 * 60 + S1;
+    .print("EVENT | time=", Tstart1, " | agent=scheduler | type=deadline_started | data=urgent");
+    .send(transport, tell, start_transport(urgent, T0));
+    .wait(DT * 1000);
+    -active_deadline(short, urgent, T0);
+    .time(H2, M2, S2); Tend1 = H2 * 3600 + M2 * 60 + S2;
+    .print("EVENT | time=", Tend1, " | agent=scheduler | type=deadline_ended | data=urgent");
+
+    // Deadline largo: [T0+ΔT, T0+3·ΔT) — salen contenedores no urgentes
+    T1 = T0 + DT;
+    +active_deadline(long, non_urgent, T1);
+    .time(H3, M3, S3); Tstart2 = H3 * 3600 + M3 * 60 + S3;
+    .print("EVENT | time=", Tstart2, " | agent=scheduler | type=deadline_started | data=non_urgent");
+    .send(transport, tell, start_transport(non_urgent, T1));
+    .wait(DT * 2 * 1000);
+    -active_deadline(long, non_urgent, T1);
+    .time(H4, M4, S4); Tend2 = H4 * 3600 + M4 * 60 + S4;
+    .print("EVENT | time=", Tend2, " | agent=scheduler | type=deadline_ended | data=non_urgent").
+```
+
+**Exclusión mutua**: `.wait()` es bloqueante dentro de la intención — `active_deadline(long,...)` no se añade hasta que `active_deadline(short,...)` se retira. No es necesario un semáforo explícito.
+
+**Duraciones**: `DT * 1000` ms para el deadline corto; `DT * 2 * 1000` ms para el largo (span `T0+ΔT` a `T0+3·ΔT` = 2·ΔT de duración).
+
+**Llamada a Transport**: `.send(transport, tell, start_transport(Category, StartTime))` donde `Category` es `urgent` o `non_urgent`. En Jason Centralised, el envío a un agente no registrado se descarta silenciosamente — el plan no falla si Transport aún no existe.
+
+**Formato de log**:
+```
+EVENT | time=T | agent=scheduler | type=deadline_started | data=urgent
+EVENT | time=T | agent=scheduler | type=deadline_ended   | data=urgent
+EVENT | time=T | agent=scheduler | type=deadline_started | data=non_urgent
+EVENT | time=T | agent=scheduler | type=deadline_ended   | data=non_urgent
+```
+
+`T` se calcula con `.time(H, M, S)` → `H*3600 + M*60 + S` en el instante exacto de inicio/fin de cada deadline.
+
+### Resumen de cambios
+
+| Archivo | Cambio |
+|---|---|
+| `scheduler.asl` | Sección 8 añadida: trigger `+exit_cycle`, plan `+!run_exit_cycle` con gestión de `active_deadline`, logs EVENT y llamadas a Transport |
