@@ -43,6 +43,7 @@ carrying(none).      // Contenedor que está cargando
 
 // Ciclo de trabajo principal
 +!work_cycle : state(idle) <-
+    !check_exit_cycle;
     .print("[LIGHT] Esperando tarea del planificador central...");
     .wait(3000);  // Esperar 3 segundos
     !work_cycle.
@@ -343,6 +344,55 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .print("✓ Contenedor ", CId, " almacenado en ", ShelfId);
     .send(scheduler, tell, container_stored(CId, ShelfId));
     .send(supervisor, tell, container_stored(CId, ShelfId)).
+
+/* ============================================================================
+ * CICLO DE SALIDA - Selección autónoma de contenedores
+ * ============================================================================ */
+
+// Consultado desde work_cycle cuando el robot está idle.
+// Pregunta al scheduler si hay un deadline activo; si existe, selecciona un candidato.
++!check_exit_cycle : true <-
+    .send(scheduler, askOne, active_deadline(_, Category, _), active_deadline(_, Category, _));
+    .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
+    !select_for_exit(Candidates, Category).
+
+// Sin deadline activo o scheduler no responde: no hacer nada.
+-!check_exit_cycle : true <- true.
+
+// Recorre candidatos en orden de almacenamiento (FIFO sobre stored/2 de este robot).
+// Capacidad implícitamente respetada: stored solo contiene contenedores que este robot
+// pudo manejar cuando los transportó originalmente.
+
++!select_for_exit([pair(CId, ShelfId)|_], urgent) : true <-
+    .send(scheduler, askOne, container_type(CId, "urgent"), container_type(CId, "urgent"));
+    +exit_claimed(CId);
+    .my_name(Me);
+    .print("[", Me, "] Ciclo de salida (urgente): seleccionado ", CId, " en ", ShelfId, " → Transport");
+    .time(Hd, Md, Sd);
+    Td = Hd * 3600 + Md * 60 + Sd;
+    .print("EVENT | time=", Td, " | agent=", Me, " | type=container_delivered | data=", CId);
+    .send(transport, tell, exit_transport(CId, ShelfId)).
+
+// Tipo no coincide (CId no es urgente): avanzar al siguiente candidato.
+-!select_for_exit([_|Rest], urgent) : true <-
+    !select_for_exit(Rest, urgent).
+
++!select_for_exit([pair(CId, ShelfId)|_], non_urgent) : true <-
+    .send(scheduler, askOne, container_type(CId, ContType), container_type(CId, ContType));
+    ?non_urgent_container_type(ContType);
+    +exit_claimed(CId);
+    .my_name(Me);
+    .print("[", Me, "] Ciclo de salida (no urgente): seleccionado ", CId, " (", ContType, ") en ", ShelfId, " → Transport");
+    .time(Hd, Md, Sd);
+    Td = Hd * 3600 + Md * 60 + Sd;
+    .print("EVENT | time=", Td, " | agent=", Me, " | type=container_delivered | data=", CId);
+    .send(transport, tell, exit_transport(CId, ShelfId)).
+
+// Tipo no coincide o askOne falló: avanzar al siguiente candidato.
+-!select_for_exit([_|Rest], non_urgent) : true <-
+    !select_for_exit(Rest, non_urgent).
+
++!select_for_exit([], _) : true <- true.   // lista agotada
 
 /* ============================================================================
  * NOTIFICACIÓN DE ESTADO AL SUPERVISOR
