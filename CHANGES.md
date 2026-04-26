@@ -29,6 +29,134 @@ En la práctica, este plan nunca se ha activado: los robots siempre han llegado 
 
 ---
 
+## Iteración 2: Coordinación distribuida y ciclo de salida físico
+
+### Objetivos cumplidos
+
+1. El entorno solo provee localización de agentes, estanterías y contenedores.
+2. Nueva zona de salida (OUTBOUND) en el lado opuesto a la entrada.
+3. Control temporal con deadlines gestionado por el scheduler.
+4. El scheduler deja de ser proveedor central de información.
+5. Coordinación distribuida: los robots seleccionan y reclaman contenedores autónomamente.
+
+---
+
+### 1. Zona OUTBOUND y nuevas acciones Java (`WarehouseArtifact.java`, `CellType.java`, `Shelf.java`, `WarehouseView.java`)
+
+Se añade `CellType.OUTBOUND` (celdas x=17-19, y=0-1) en el extremo opuesto a la entrada (ENTRANCE x=0-2, y=0-1). Se visualizan en azul claro en la GUI.
+
+`Shelf.java` añade `remove(Container)` para retirar contenedores en el ciclo de salida.
+
+Nuevas acciones Java en `executeAction`:
+
+| Acción | Descripción |
+|---|---|
+| `claim_container(CId)` | Reclamo atómico con `ConcurrentHashMap.putIfAbsent`. Retira `container_at_entrance` de todos los agentes si tiene éxito. Falla si ya reclamado. |
+| `unclaim_container(CId)` | Libera el reclamo. Si el robot lleva físicamente ese contenedor (estado inconsistente tras error), lo suelta (`robot.drop()`) antes de re-emitir el percept `container_at_entrance`. |
+| `pickup_from_shelf(CId, ShelfId)` | Recoge un contenedor ya almacenado en una estantería. Comprueba adyacencia, llama `shelf.remove()` y restaura `shelf_available`. |
+| `move_to_outbound` | Calcula la celda libre de la zona OUTBOUND más cercana y emite `nav_target`. |
+| `drop_in_outbound(CId)` | Deposita el contenedor en la zona OUTBOUND. Requiere que el robot esté en una celda OUTBOUND. Incrementa `totalContainersProcessed` y emite `container_exited(CId)` al scheduler. |
+| `discard_container(CId)` | Elimina el contenedor del mapa Java y de `claimedContainers`. Retira el percept `container_at_entrance` de todos los agentes. |
+
+`container_at_entrance` pasa de `addPercept("scheduler", ...)` a `addPercept(...)` (broadcast a todos los agentes). Incluye todas las propiedades del contenedor: `container_at_entrance(CId, Type, Weight, W, H)`.
+
+`shelf_available` y `shelf_occupancy` también se vuelven broadcast (antes solo al scheduler).
+
+---
+
+### 2. Scheduler: solo gestión de deadlines y fallos (`scheduler.asl`)
+
+**Eliminado**: toda la lógica de asignación de tareas (`new_container`, `process_new_container`, `container_info`, `assign_shelf`, `pick_least_occupied`, `free_shelf`, creencias `robot_capacity`, `robot_available`, `assigned`, categorías de contenedor, `container_type`).
+
+**Conservado y ampliado**:
+- Gestión del ciclo de salida: `storage_full → exit_cycle → run_exit_cycle` con `active_deadline`.
+- Seguimiento de fallos permanentes con `container_requeue_count` (hasta 3 intentos cross-robot; al 3.º llama `discard_container` y notifica al supervisor).
+- Handler `container_exited(CId)` para confirmación de entrega.
+
+---
+
+### 3. Supervisor: percepción directa de contenedores (`supervisor.asl`)
+
+- Handler cambiado de `+new_container(CId)` a `+container_at_entrance(CId, Type, Weight, W, H)`.
+- Se añade `container_received_type(CId, Type)` para trackear el tipo localmente.
+- `+!query_container_type_and_notify(CId)` ya no usa `askOne` al scheduler: consulta la creencia local `container_received_type(CId, Type)` para determinar el tipo antes de enviar `storage_full` al scheduler.
+
+---
+
+### 4. `common.asl`: creencias de categoría de estantería y selección autónoma
+
+`common.asl` se amplía con:
+- Creencias estáticas `shelf_category(ShelfId, Cat)` (light/medium/heavy) para las 9 estanterías.
+- Planes compartidos `!pick_shelf(CId, Weight, W, H)` y `!pick_least_occupied_shelf(CId, Cat)` para selección autónoma de estantería según peso y tamaño del contenedor, con fallback a expansión tras 3 reintentos.
+
+---
+
+### 5. Robots: reclamación autónoma y ciclo de salida físico
+
+Los tres robots reescriben su arquitectura de tareas:
+
+**Eliminado**: plan `+task(CId, ShelfId)` recibido del scheduler.
+
+**Añadido**:
+
+- `+container_at_entrance(CId, Type, Weight, W, H)`: trigger reactivo con guardia de capacidad hardcodeada (sin `max_weight/max_size` del `.mas2j`, que Jason no carga al tener múltiples `beliefs=`). Se usa `|` eliminado a favor de múltiples planes separados (Jason 3.x no soporta `|` fiablemente en guardias).
+  - robot_light: `Weight <= 10 & W <= 1 & H <= 1`
+  - robot_medium: dos planes — `Weight > 10` y `H > 1` (hasta 30kg, 1×2)
+  - robot_heavy: tres planes — `Weight > 30`, `W > 1`, `H > 2` (hasta 100kg, 2×3)
+
+- `+container_at_entrance(...) : nav_failed(CId) <- true.` — skip plan: evita reclamar contenedores a los que el robot falló navegar recientemente.
+
+- `-container_at_entrance(...) : nav_failed(CId) <- -nav_failed(CId).` — limpia el skip cuando el percept es retirado (por otro robot que lo reclamó, o por `discard_container`).
+
+- `!try_claim(CId, ...)`: llama `claim_container(CId)` como acción directa. Si falla (ya reclamado), `-!try_claim : true <- true` absorbe silenciosamente.
+
+- `!check_pending_containers`: versión de polling (work_cycle), con guarda `not nav_failed(CId)`.
+
+- `!select_shelf_and_execute → !pick_shelf → !execute_task`: flujo de almacenamiento igual que iteración 1 pero con estantería seleccionada autónomamente.
+
+- `+!execute_exit(CId, ShelfId)`: ciclo de salida físico.
+  1. `move_to_shelf(ShelfId)` + `!navigate` → adyacente a la estantería.
+  2. `pickup_from_shelf(CId, ShelfId)` → recoge de la estantería.
+  3. `move_to_outbound` + `!navigate` → zona OUTBOUND.
+  4. `drop_in_outbound(CId)` → entrega.
+  5. Limpia `stored(CId, ShelfId)`, `claimed_type(CId, _)`, `exit_claimed(CId)`, `carrying`.
+
+- `+!select_for_exit([pair(CId,ShelfId)|_], Category) : claimed_type(CId, ...) & state(idle)`: guarda `state(idle)` añadida para evitar iniciar exit cycle concurrentemente con execute_task (el `askOne` al scheduler suspende la intención, abriendo una ventana donde un trigger reactivo podría cambiar el estado).
+
+- `stored(CId, ShelfId)` handler: notifica solo al supervisor (ya no al scheduler).
+
+**Correcciones de bugs en robustez**:
+
+- `-!execute_task : not carrying(CId) & nav_failed(CId)`: el cleanup ya fue hecho por `-!get_to_container(CId,1)`, solo hace `!safe_return; !check_queue`.
+- `-!execute_task : not carrying(CId)`: (sin `nav_failed`) el error ocurrió después del pickup (ej. `path_blocked` durante navigate a estantería). Hace `release_task + unclaim_container + task_failed` completo. `unclaim_container` con la nueva lógica Java fuerza-suelta el contenedor si el robot lo lleva físicamente.
+- `-!get_to_container(CId,1)`: añade `+nav_failed(CId)` antes de `unclaim_container` para activar el mecanismo de skip.
+
+---
+
+## Ejercicio 3: Registro de eventos en fichero (warehouse.log_event)
+
+### Problema
+Los logs EVENT requeridos por el enunciado (`deadline_started`, `deadline_ended`, `container_delivered`) solo se emitían por consola con `.print()`. El enunciado exige que se almacenen en fichero.
+
+### Solución
+Nueva acción interna Java `warehouse.log_event` en `src/java/warehouse/log_event.java`:
+- Acepta los mismos argumentos varargs que `.print()` — reemplazo directo.
+- Concatena todos los términos (StringTerm → getString, resto → toString).
+- Escribe cada línea al final de `events.log` en el directorio de ejecución.
+- Uso de `synchronized` para evitar interleaving entre robots concurrentes.
+
+Ficheros modificados:
+- `src/java/warehouse/log_event.java` — nueva clase, acción interna Jason.
+- `src/agt/scheduler.asl` — 4 llamadas `.print("EVENT | ...")` → `warehouse.log_event(...)`. Se mantiene `.print(...)` de diagnóstico.
+- `src/agt/robot_light.asl`, `robot_medium.asl`, `robot_heavy.asl` — 2 llamadas cada uno.
+
+Formato de línea en `events.log`:
+```
+EVENT | time=T | agent=scheduler | type=deadline_started | data=urgent
+EVENT | time=T | agent=scheduler | type=deadline_ended   | data=urgent
+EVENT | time=T | agent=robot_id  | type=container_delivered | data=container_id
+```
+
 ## Sustitución del algoritmo de pathfinding: BFS → Movimiento coordinado con waypoints
 
 ### Problema

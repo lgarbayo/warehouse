@@ -11,6 +11,7 @@ public enum CellType {
     STORAGE,        // Área de almacenamiento genérica (no usada actualmente)
     SHELF,          // Estantería — obstáculo para BFS; destino lógico de drop_at
     BLOCKED,        // Celda inaccesible permanentemente
+    OUTBOUND,       // Zona de salida — lado opuesto a la entrada; destino de drop_in_outbound
     ROBOT           // Reservado; los robots se pintan sobre el grid pero no modifican
                         // el tipo de celda: su posición se gestiona en el mapa 'robots'
 }

@@ -92,14 +92,15 @@ public class Shelf {
     }
     
     /**
-     * Elimina un contenedor de la estantería (ciclo outbound).
+     * Retira un contenedor de la estantería (para el ciclo de salida).
      */
     public boolean remove(Container container) {
-        if (!storedContainers.contains(container.getId())) return false;
-        storedContainers.remove(container.getId());
-        currentWeight -= container.getWeight();
-        currentVolume -= container.getArea();
-        return true;
+        if (storedContainers.remove(container.getId())) {
+            currentWeight -= container.getWeight();
+            currentVolume -= container.getArea();
+            return true;
+        }
+        return false;
     }
 
     /**

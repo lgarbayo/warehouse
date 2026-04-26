@@ -8,6 +8,14 @@
  *   1. Estado del mundo (ps_*): snapshot de robots, estanterías y pendientes.
  *   2. Esquema de acción assign/3 con precondiciones y efectos explícitos.
  *   3. Forward search greedy best-first guiado por heurística admisible h.
+ *
+ * RESPONSABILIDADES (2ª iteración):
+ *   1. Gestionar deadlines de salida (exit cycle)
+ *   2. Activar ciclos de salida urgente / no urgente
+ *   3. Rastrear fallos permanentes de contenedores
+ *   4. Coordinar con supervisor
+ *
+ * Los robots seleccionan autónomamente sus contenedores y estanterías.
  ******************************************************************************/
 
 { include("common.asl") }
@@ -436,33 +444,26 @@ urgency_of(fragile,  non_urgent).
  * 8. MANEJO DE FALLOS REPORTADOS POR ROBOTS
  * ============================================================================ */
 
-+task_failed(CId)[source(Robot)] : container_broken(CId) <-
-    .print("💥 [SCHEDULER] ", CId, " fue aplastado. Limpiando creencias...");
-    -assigned(Robot, CId, _);
++task_failed(CId)[source(Robot)] : container_permanently_failed(CId) <-
+    -task_failed(CId)[source(Robot)].
+
++task_failed(CId)[source(Robot)] : container_requeue_count(CId, N) & N >= 2 <-
+    .print("❌ [SCHEDULER] ", CId, " inaccesible definitivamente tras 3 intentos. Descartando.");
+    +container_permanently_failed(CId);
     -task_failed(CId)[source(Robot)];
-    -planner_pending(CId, _, _, _, _);
-    .abolish(container_info(CId, _, _, _, _, _, _));
-    .abolish(container_category(CId, _));
-    .abolish(container_type(CId, _));
-    .abolish(container_weight_category(CId, _));
-    .abolish(container_size_category(CId, _)).
+    -container_requeue_count(CId, _);
+    discard_container(CId);
+    .send(supervisor, tell, container_error(CId, unreachable)).
+
++task_failed(CId)[source(Robot)] : container_requeue_count(CId, N) <-
+    N1 = N + 1;
+    -container_requeue_count(CId, _);
+    +container_requeue_count(CId, N1);
+    -task_failed(CId)[source(Robot)].
 
 +task_failed(CId)[source(Robot)] : true <-
-    .print("⚠️ ", Robot, " reportó fallo con ", CId, ". Reasignando en 10s...");
-    -assigned(Robot, CId, _);
-    -task_failed(CId)[source(Robot)];
-    .wait(10000);
-    .abolish(container_info(CId, _, _, _, _, _, _));
-    get_container_info(CId).
-
--!task_failed(CId) : true <-
-    .print("💥 [SCHEDULER] ", CId, " ya no existe. Limpiando creencias...");
-    -planner_pending(CId, _, _, _, _);
-    .abolish(container_info(CId, _, _, _, _, _, _));
-    .abolish(container_category(CId, _));
-    .abolish(container_type(CId, _));
-    .abolish(container_weight_category(CId, _));
-    .abolish(container_size_category(CId, _)).
+    +container_requeue_count(CId, 1);
+    -task_failed(CId)[source(Robot)].
 
 /* ============================================================================
  * 9. CONTENEDOR EN ZONA DE EXPANSIÓN
@@ -485,18 +486,22 @@ urgency_of(fragile,  non_urgent).
     -container_error(CId, ErrorType)[source(Robot)].
 
 /* ============================================================================
- * 7. CICLO DE SALIDA - Recepción del aviso de saturación del supervisor
+ * CONTENEDOR ENTREGADO A ZONA DE SALIDA
  * ============================================================================ */
 
-// El supervisor detectó que no hay espacio para más contenedores de Type.
-// Se registra T0 como instante local de recepción (no el del supervisor),
-// se activa el bloqueo vía exit_cycle(Type, T0) y se guarda el estado del ciclo.
++container_exited(CId) : true <-
+    .print("✅ [SCHEDULER] ", CId, " entregado a zona de salida").
+
+/* ============================================================================
+ * CICLO DE SALIDA - Recepción del aviso de saturación del supervisor
+ * ============================================================================ */
+
 +storage_full(Type, _)[source(supervisor)] : not exit_cycle(Type, _) <-
     .time(H, M, S);
     T0 = H * 3600 + M * 60 + S;
     +exit_cycle(Type, T0);
     .abolish(storage_full(Type, _));
-    .print("[SCHEDULER] ⛔ Ciclo de salida activado para tipo '", Type, "'. T0=", T0, "s. Bloqueando nuevas llegadas.").
+    .print("[SCHEDULER] ⛔ Ciclo de salida activado para tipo '", Type, "'. T0=", T0, "s.").
 
 // Idempotente: ya hay un ciclo activo para este tipo.
 +storage_full(Type, _)[source(supervisor)] : exit_cycle(Type, T0existing) <-
@@ -504,7 +509,7 @@ urgency_of(fragile,  non_urgent).
     .print("[SCHEDULER] Ciclo de salida para '", Type, "' ya activo (T0=", T0existing, "s). Ignorando.").
 
 /* ============================================================================
- * 8. CICLO DE SALIDA - Gestión de deadlines
+ * CICLO DE SALIDA - Gestión de deadlines
  * ============================================================================ */
 
 // Disparado automáticamente al añadirse exit_cycle(Type, T0) a la BB.
@@ -517,28 +522,30 @@ urgency_of(fragile,  non_urgent).
     +active_deadline(short, urgent, T0);
     .time(H1, M1, S1);
     Tstart1 = H1 * 3600 + M1 * 60 + S1;
-    .print("EVENT | time=", Tstart1, " | agent=scheduler | type=deadline_started | data=urgent");
-    .send(transport, tell, start_transport(urgent, T0));
+    warehouse.log_event("EVENT | time=", Tstart1, " | agent=scheduler | type=deadline_started | data=urgent");
+    .print("[SCHEDULER] EVENT deadline_started urgent T=", Tstart1);
     DurShort = DT * 1000;
     .wait(DurShort);
     -active_deadline(short, urgent, T0);
     .time(H2, M2, S2);
     Tend1 = H2 * 3600 + M2 * 60 + S2;
-    .print("EVENT | time=", Tend1, " | agent=scheduler | type=deadline_ended | data=urgent");
+    warehouse.log_event("EVENT | time=", Tend1, " | agent=scheduler | type=deadline_ended | data=urgent");
+    .print("[SCHEDULER] EVENT deadline_ended urgent T=", Tend1);
 
     // ---- Deadline largo: [T0+ΔT, T0+3·ΔT) — salen contenedores no urgentes ----
     T1 = T0 + DT;
     +active_deadline(long, non_urgent, T1);
     .time(H3, M3, S3);
     Tstart2 = H3 * 3600 + M3 * 60 + S3;
-    .print("EVENT | time=", Tstart2, " | agent=scheduler | type=deadline_started | data=non_urgent");
-    .send(transport, tell, start_transport(non_urgent, T1));
+    warehouse.log_event("EVENT | time=", Tstart2, " | agent=scheduler | type=deadline_started | data=non_urgent");
+    .print("[SCHEDULER] EVENT deadline_started non_urgent T=", Tstart2);
     DurLong = DT * 2 * 1000;
     .wait(DurLong);
     -active_deadline(long, non_urgent, T1);
     .time(H4, M4, S4);
     Tend2 = H4 * 3600 + M4 * 60 + S4;
-    .print("EVENT | time=", Tend2, " | agent=scheduler | type=deadline_ended | data=non_urgent").
+    warehouse.log_event("EVENT | time=", Tend2, " | agent=scheduler | type=deadline_ended | data=non_urgent");
+    .print("[SCHEDULER] EVENT deadline_ended non_urgent T=", Tend2).
 
 /* ============================================================================
  * 11. CICLO OUTBOUND — saturación de estanterías

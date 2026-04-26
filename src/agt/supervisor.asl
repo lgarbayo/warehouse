@@ -185,14 +185,15 @@ shelf_type("shelf_9", non_urgent).
  * MONITORIZACIÓN - Contenedores recibidos
  * ============================================================================ */
 
-// new_container es global: el supervisor lo percibe directamente del entorno
-+new_container(CId) : true <-
+// container_at_entrance es global: el supervisor lo percibe directamente del entorno
++container_at_entrance(CId, Type, Weight, W, H) : true <-
     +container_received(CId);
+    +container_received_type(CId, Type);
     .count(container_received(_), N);
     -total_received(_);
     +total_received(N);
     !update_rates;
-    .print("[SUPERVISOR] Nuevo contenedor recibido: ", CId, " | Total recibidos: ", N).
+    .print("[SUPERVISOR] Nuevo contenedor: ", CId, " (", Type, ", ", Weight, "kg) | Total: ", N).
 
 /* ============================================================================
  * MONITORIZACIÓN - Contenedores almacenados
@@ -236,8 +237,7 @@ shelf_type("shelf_9", non_urgent).
 // Cualquier otro tipo de error: sin acción de saturación.
 +!maybe_notify_storage_full(_, _) : true <- true.
 
-+!query_container_type_and_notify(CId) : true <-
-    .send(scheduler, askOne, container_info(CId, _, _, _, Type, _, _), container_info(_, _, _, _, Type, _, _));
++!query_container_type_and_notify(CId) : container_received_type(CId, Type) <-
     if (not storage_saturated(Type)) {
         .time(H, M, S);
         T0 = H * 3600 + M * 60 + S;
@@ -246,8 +246,6 @@ shelf_type("shelf_9", non_urgent).
         .send(scheduler, tell, storage_full(Type, T0))
     }.
 
-// Si el scheduler ya no tiene container_info (edge case: contenedor aplastado entre
-// el envío de no_shelf_space y el procesamiento del supervisor).
 -!query_container_type_and_notify(CId) : true <-
     .print("[SUPERVISOR] No se pudo determinar el tipo de ", CId, " para notificación de saturación.").
 

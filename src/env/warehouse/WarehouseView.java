@@ -268,6 +268,9 @@ public class WarehouseView extends JFrame {
                         case BLOCKED:
                             g.setColor(new Color(255, 100, 100));
                             break;
+                        case OUTBOUND:
+                            g.setColor(new Color(200, 230, 255));
+                            break;
                         default:
                             g.setColor(Color.WHITE);
                     }
