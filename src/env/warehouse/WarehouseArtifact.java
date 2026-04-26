@@ -35,6 +35,9 @@ public class WarehouseArtifact extends Environment {
     private int totalContainersProcessed = 0;
     private long startTime;
 
+    // Contenedores reclamados atómicamente por robots (containerId → robotId)
+    private ConcurrentHashMap<String, String> claimedContainers = new ConcurrentHashMap<>();
+
     // Gestión del thread generador de contenedores
     private ExecutorService containerGeneratorExecutor;
     private volatile boolean running = true;
@@ -109,6 +112,13 @@ public class WarehouseArtifact extends Environment {
         for (int x = 3; x < 7; x++) {
             for (int y = 0; y < 2; y++) {
                 grid[x][y] = CellType.CLASSIFICATION;
+            }
+        }
+
+        // Zona de salida (outbound) — lado opuesto a la entrada
+        for (int x = 17; x < GRID_WIDTH; x++) {
+            for (int y = 0; y < 2; y++) {
+                grid[x][y] = CellType.OUTBOUND;
             }
         }
     }
@@ -217,8 +227,11 @@ public class WarehouseArtifact extends Environment {
                                 container.getId(), container.getWeight(), container.getType()));
                     }
 
-                    // Notificar a los agentes
-                    addPercept(ASSyntax.parseLiteral("new_container(\"" + container.getId() + "\")"));
+                    // Notificar a los agentes con propiedades completas del contenedor
+                    addPercept(ASSyntax.parseLiteral(
+                        "container_at_entrance(\"" + container.getId() + "\",\"" +
+                        container.getType() + "\"," + container.getWeight() + "," +
+                        container.getWidth() + "," + container.getHeight() + ")"));
 
                     if (view != null) {
                         view.update();
@@ -349,6 +362,18 @@ public class WarehouseArtifact extends Environment {
                     return executeMoveToExpansion(agName);
                 case "drop_in_expansion":
                     return executeDropInExpansion(agName, action);
+                case "claim_container":
+                    return executeClaimContainer(agName, action);
+                case "unclaim_container":
+                    return executeUnclaimContainer(agName, action);
+                case "pickup_from_shelf":
+                    return executePickupFromShelf(agName, action);
+                case "move_to_outbound":
+                    return executeMoveToOutbound(agName);
+                case "drop_in_outbound":
+                    return executeDropInOutbound(agName, action);
+                case "discard_container":
+                    return executeDiscardContainer(agName, action);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
@@ -668,12 +693,10 @@ public class WarehouseArtifact extends Environment {
             robot.setBusy(false);
             container.setAssignedShelf(shelfId);
 
-            // Si la estantería ya no admite más carga, retirar su disponibilidad
-            // del scheduler para que no intente asignarla a futuros contenedores.
+            // Estantería llena: retirar shelf_available de todos los agentes
             if (shelf.isFull()) {
                 try {
-                    removePerceptsByUnif("scheduler",
-                            ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+                    removePerceptsByUnif(ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
                 } catch (jason.asSyntax.parser.ParseException e) {
                     e.printStackTrace();
                 }
@@ -709,30 +732,25 @@ public class WarehouseArtifact extends Environment {
 
 
     /**
-     * Emite la percepción shelf_available(ShelfId) al scheduler.
-     * El scheduler la usa como creencia para razonar qué estantería asignar,
-     * sin delegar esa decisión al entorno.
+     * Emite shelf_available(ShelfId) a todos los agentes.
+     * Robots la usan para seleccionar estanterías autónomamente.
      */
     private void emitShelfAvailable(String shelfId) {
         try {
-            addPercept("scheduler", ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+            addPercept(ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }
     }
 
     /**
-     * Emite/actualiza shelf_occupancy(ShelfId, Occ) al scheduler.
-     * Dato puro: el entorno solo reporta el porcentaje actual; el agente
-     * decide qué hacer con él (elegir la menos cargada).
+     * Emite/actualiza shelf_occupancy(ShelfId, Occ) a todos los agentes.
      */
     private void emitShelfOccupancy(String shelfId, Shelf shelf) {
         try {
-            removePerceptsByUnif("scheduler",
-                    ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\",_)"));
+            removePerceptsByUnif(ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\",_)"));
             int occ = (int) Math.round(shelf.getOccupancyPercentage());
-            addPercept("scheduler",
-                    ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\"," + occ + ")"));
+            addPercept(ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\"," + occ + ")"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }
@@ -865,6 +883,214 @@ public class WarehouseArtifact extends Environment {
                 view.logMessage("📦 " + agName + " → expansión: " + containerId + " (" + rx + "," + ry + ")");
                 view.update();
             }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: claim_container(ContainerId)
+     * Reclama atómicamente un contenedor. Falla si ya fue reclamado.
+     * En éxito, retira container_at_entrance de todos los agentes.
+     */
+    private boolean executeClaimContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Container container = containers.get(containerId);
+            if (container == null || container.isBroken()) return false;
+
+            String prev = claimedContainers.putIfAbsent(containerId, agName);
+            if (prev != null) return false;  // ya reclamado
+
+            removePerceptsByUnif(ASSyntax.parseLiteral(
+                "container_at_entrance(\"" + containerId + "\",_,_,_,_)"));
+
+            if (view != null) view.logMessage("🔒 " + agName + " reclamó " + containerId);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: unclaim_container(ContainerId)
+     * Libera el reclamo y re-emite container_at_entrance para otros robots.
+     */
+    private boolean executeUnclaimContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            claimedContainers.remove(containerId);
+
+            // If the robot is physically carrying this container (e.g. after path_blocked),
+            // force-drop it so the robot can accept new tasks.
+            Robot robot = robots.get(agName);
+            if (robot != null && robot.isCarrying()) {
+                Container carried = robot.getCarriedContainer();
+                if (carried != null && containerId.equals(carried.getId())) {
+                    robot.drop();
+                    carried.setPicked(false);
+                }
+            }
+
+            Container container = containers.get(containerId);
+            if (container == null || container.isBroken()) return true;
+
+            addPercept(ASSyntax.parseLiteral(
+                "container_at_entrance(\"" + containerId + "\",\"" + container.getType() + "\"," +
+                container.getWeight() + "," + container.getWidth() + "," + container.getHeight() + ")"));
+
+            if (view != null) view.logMessage("🔓 " + agName + " liberó " + containerId);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: pickup_from_shelf(ContainerId, ShelfId)
+     * Recoge un contenedor almacenado en una estantería (ciclo de salida).
+     */
+    private boolean executePickupFromShelf(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            String shelfId = action.getTerm(1).toString().replace("\"", "");
+
+            Robot robot = robots.get(agName);
+            Container container = containers.get(containerId);
+            Shelf shelf = shelves.get(shelfId);
+
+            if (robot == null || container == null || shelf == null) return false;
+            if (robot.isCarrying()) { addError(agName, "already_carrying", "Robot already carrying"); return false; }
+            if (!shelfId.equals(container.getAssignedShelf())) {
+                addError(agName, "not_in_shelf", "Container not assigned to " + shelfId);
+                return false;
+            }
+            if (robot.distanceTo(shelf.getX(), shelf.getY()) > 3) {
+                addError(agName, "too_far", "Shelf too far for exit pickup");
+                return false;
+            }
+            if (!robot.canCarry(container)) {
+                addError(agName, "container_too_heavy", "Container too heavy for exit pickup");
+                return false;
+            }
+
+            if (!shelf.remove(container)) {
+                addError(agName, "not_in_shelf", "Container not found in shelf storage");
+                return false;
+            }
+
+            // Restaurar disponibilidad de la estantería si estaba llena
+            emitShelfAvailable(shelf.getId());
+            emitShelfOccupancy(shelf.getId(), shelf);
+
+            container.setAssignedShelf(null);
+            robot.pickup(container);
+
+            addPercept(agName, ASSyntax.parseLiteral("picked(\"" + containerId + "\")"));
+            if (view != null) {
+                view.logMessage("📤 " + agName + " recogió " + containerId + " de " + shelfId + " (salida)");
+                view.update();
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: move_to_outbound
+     * Emite nav_target a la celda libre más cercana de la zona OUTBOUND.
+     */
+    private boolean executeMoveToOutbound(String agName) {
+        try {
+            Robot robot = robots.get(agName);
+            if (robot == null) return false;
+
+            List<int[]> cells = new ArrayList<>();
+            for (int x = 0; x < GRID_WIDTH; x++) {
+                for (int y = 0; y < GRID_HEIGHT; y++) {
+                    if (grid[x][y] == CellType.OUTBOUND && !hayContenedorEn(x, y)) {
+                        cells.add(new int[]{x, y});
+                    }
+                }
+            }
+            if (cells.isEmpty()) return false;
+
+            cells.sort((a, b) -> {
+                int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
+                int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
+                return Integer.compare(da, db);
+            });
+
+            emitNavTarget(agName, cells.get(0)[0], cells.get(0)[1]);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: drop_in_outbound(ContainerId)
+     * Deposita el contenedor en la zona de salida. Robot debe estar en celda OUTBOUND.
+     */
+    private boolean executeDropInOutbound(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Robot robot = robots.get(agName);
+            Container container = containers.get(containerId);
+
+            if (robot == null || container == null) return false;
+            if (!robot.isCarrying()) { addError(agName, "not_carrying", "Not carrying anything"); return false; }
+
+            int rx = robot.getX(), ry = robot.getY();
+            if (grid[rx][ry] != CellType.OUTBOUND) {
+                addError(agName, "not_at_outbound", "Robot not in outbound zone");
+                return false;
+            }
+
+            robot.drop();
+            robot.setBusy(false);
+            container.setPicked(false);
+            container.setPosition(rx, ry);
+
+            totalContainersProcessed++;
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("picked(_)"));
+
+            if (view != null) {
+                view.logMessage("🚚 " + agName + " entregó " + containerId + " a zona de salida");
+                view.update();
+            }
+
+            addPercept("scheduler", ASSyntax.parseLiteral("container_exited(\"" + containerId + "\")"));
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: discard_container(ContainerId)
+     * Elimina permanentemente un contenedor del sistema (inaccesible definitivo).
+     */
+    private boolean executeDiscardContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            containers.remove(containerId);
+            claimedContainers.remove(containerId);
+            try {
+                removePerceptsByUnif(ASSyntax.parseLiteral(
+                    "container_at_entrance(\"" + containerId + "\",_,_,_,_)"));
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            if (view != null) view.logMessage("🗑️ " + containerId + " descartado definitivamente");
             return true;
         } catch (Exception e) {
             e.printStackTrace();
