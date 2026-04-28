@@ -257,7 +257,7 @@ public class WarehouseView extends JFrame {
                             g.setColor(new Color(255, 255, 200));
                             break;
                         case OUTBOUND:
-                            g.setColor(new Color(255, 180, 180));
+                            g.setColor(new Color(200, 230, 255));
                             break;
                         case STORAGE:
                             g.setColor(new Color(220, 220, 255));
@@ -267,9 +267,6 @@ public class WarehouseView extends JFrame {
                             break;
                         case BLOCKED:
                             g.setColor(new Color(255, 100, 100));
-                            break;
-                        case OUTBOUND:
-                            g.setColor(new Color(200, 230, 255));
                             break;
                         default:
                             g.setColor(Color.WHITE);

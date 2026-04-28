@@ -19,9 +19,10 @@ If `pickup_from_shelf` succeeds but the subsequent navigate to the outbound zone
 `executeUnclaimContainer` in `WarehouseArtifact.java` now calls `robot.drop()` + `container.setPicked(false)` when the robot physically holds the container being unclaimed. This frees the robot for future pickups, but the container's grid coordinates remain at the robot's current position (wherever it got stuck), not at the entrance. The re-emitted `container_at_entrance` percept is logically correct but the physical position is inconsistent — if another robot navigates to the entrance to pick it up, the Java-side `pickup()` may fail because the container is not actually at entrance coordinates.
 **Fix direction**: after `robot.drop()`, reset the container's position to its original entrance cell before re-adding the percept.
 
-### 4. askOne suspension window in check_exit_cycle
-`!check_exit_cycle` uses `.send(scheduler, askOne, active_deadline, ...)` which suspends the current intention while waiting for the scheduler reply. During this suspension window a reactive `+container_at_entrance` plan can fire and transition the robot to `state(working)`. The `state(idle)` guard added to `!select_for_exit` prevents acting on the exit cycle result in that case, but the askOne round-trip still happens and the scheduler's reply arrives and is discarded — wasted communication per cycle.
-**Fix direction**: scheduler should proactively broadcast `active_deadline(CId, ShelfId, Deadline)` beliefs to all robots; robots maintain a local `active_deadline` belief and check it without a round-trip query, eliminating the suspension window entirely.
+### ~~4. askOne suspension window in check_exit_cycle~~ ✅ Resuelto en iteración 3
+~~`!check_exit_cycle` uses `.send(scheduler, askOne, active_deadline, ...)` which suspends the current intention~~
+
+**Fix aplicado**: `run_exit_cycle` hace broadcast `tell/untell active_deadline` a todos los robots al inicio/fin de cada deadline. `!check_exit_cycle` consulta la creencia local sin round-trip. Ventana de suspensión eliminada.
 
 ### 5. nav_abort_signal — fragile failure propagation in navigate
 The navigation timeout path in `!navigate` relies on `?nav_abort_signal` — a belief query that is expected to fail — as a mechanism to propagate navigation failure out of a nested intention. This is a fragile hack: if a belief named `nav_abort_signal` is accidentally added elsewhere, the abort silently stops triggering. The mechanism also makes the control flow hard to follow.

@@ -11,7 +11,7 @@
  * TEMPORIZACIÓN
  * ============================================================================ */
 
-delta_t(30).
+delta_t(8).
 
 /* ============================================================================
  * CLASIFICACIÓN DE TIPOS DE CONTENEDOR
@@ -25,6 +25,16 @@ non_urgent_container_type("fragile").
  * CATEGORÍAS DE ESTANTERÍAS
  * Compartidas por robots y scheduler para selección autónoma de estanterías.
  * ============================================================================ */
+
+shelf_urgency("shelf_1", urgent).
+shelf_urgency("shelf_5", urgent).
+shelf_urgency("shelf_8", urgent).
+shelf_urgency("shelf_2", non_urgent).
+shelf_urgency("shelf_3", non_urgent).
+shelf_urgency("shelf_4", non_urgent).
+shelf_urgency("shelf_6", non_urgent).
+shelf_urgency("shelf_7", non_urgent).
+shelf_urgency("shelf_9", non_urgent).
 
 shelf_category("shelf_1", light).
 shelf_category("shelf_2", light).

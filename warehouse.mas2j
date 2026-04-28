@@ -23,5 +23,8 @@ MAS warehouse {
         // Agente supervisor de errores y monitorización
         supervisor;
 
+        // Agente de transporte — simula recogida de contenedores del OUTBOUND
+        transport;
+
     aslSourcePath: "src/agt";
 }

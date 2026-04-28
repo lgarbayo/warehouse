@@ -291,12 +291,11 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
  * CICLO DE SALIDA - Selección y entrega física a zona outbound
  * ============================================================================ */
 
-+!check_exit_cycle : true <-
-    .send(scheduler, askOne, active_deadline(_, Category, _), active_deadline(_, Category, _));
++!check_exit_cycle : active_deadline(_, Category, _) <-
     .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
     !select_for_exit(Candidates, Category).
 
--!check_exit_cycle : true <- true.
++!check_exit_cycle : true <- true.
 
 +!select_for_exit([pair(CId, ShelfId)|_], urgent) : claimed_type(CId, "urgent") & state(idle) <-
     +exit_claimed(CId);

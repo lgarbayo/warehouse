@@ -1,5 +1,89 @@
 # Changes
 
+## Iteración 3: Ciclo de salida por tipo, deadlines y agente Transport
+
+### Objetivos cumplidos
+
+1. Ciclo de salida activado por tipo de contenedor con instante inicial T0.
+2. Deadline corto (urgentes, T0+ΔT) y deadline largo (no urgentes, T0+3ΔT) no solapados.
+3. Solo un deadline activo en cada instante.
+4. Robots deciden autónomamente qué contenedor transportar sin asignaciones explícitas.
+5. Agente Transport creado para simular recogida de contenedores del OUTBOUND.
+6. Fix bug #4 (iteración 2): `askOne` eliminado del ciclo de salida.
+
+---
+
+### 1. `common.asl`: creencias `shelf_urgency`
+
+Se añaden 9 creencias estáticas `shelf_urgency(ShelfId, urgent|non_urgent)` para los nueve shelves. Necesarias para que los robots filtren contenedores outbound por fase de deadline sin consultar al scheduler.
+
+---
+
+### 2. Scheduler: broadcast de `active_deadline` y llamada a Transport (`scheduler.asl`)
+
+**`!run_exit_cycle`** ampliado con tres cambios:
+
+- Al inicio de cada deadline: `for (.member(R, AllRobots)) { .send(R, tell, active_deadline(...)); }` — broadcast directo a todos los robots. Elimina la necesidad de que cada robot haga `askOne` (fix bug #4).
+- Al final de cada deadline: `for (.member(R, AllRobots)) { .send(R, untell, active_deadline(...)); }` — retira la creencia localmente en cada robot al terminar la fase.
+- Al inicio de cada deadline: `!dispatch_outbound(urgent|non_urgent)` — garantiza que todos los robots (incluyendo robot_heavy2) reciben `outbound_available` con el deadline ya activo, evitando la condición de carrera donde heavy2 descartaba los mensajes por falta de `active_deadline`.
+- Al final de cada deadline: `.send(transport, tell, transport_request(Type, Phase))` — notifica al agente Transport.
+
+---
+
+### 3. Robots `robot_light`, `robot_medium`, `robot_heavy`: fix `!check_exit_cycle`
+
+**Antes** (bug #4):
+```agentspeak
++!check_exit_cycle : true <-
+    .send(scheduler, askOne, active_deadline(_, Category, _), active_deadline(_, Category, _));
+    ...
+```
+
+**Después**:
+```agentspeak
++!check_exit_cycle : active_deadline(_, Category, _) <-
+    .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
+    !select_for_exit(Candidates, Category).
+
++!check_exit_cycle : true <- true.
+```
+
+El robot consulta su propia base de creencias (creencia `active_deadline` recibida por broadcast) sin suspender la intención.
+
+---
+
+### 4. `robot_heavy2.asl`: ciclo de salida deadline-aware
+
+robot_heavy2 usaba `outbound_available` sin filtrar por fase de deadline. Cambios:
+
+- Añadidas creencias locales `shelf_urgency/2` y `non_urgent_container_type/1` (no incluye `common.asl`).
+- `+outbound_available` reestructurado en tres planes: (a) idle + capaz + deadline activo coincide con urgencia de shelf → procesar, (b) capaz pero deadline incorrecto o robot ocupado → conservar creencia, (c) no capaz → descartar.
+- Plan reactivo `+active_deadline(_, Category, _) : state(idle) <- !check_outbound_for_category(Category)` — al recibir un nuevo deadline, heavy2 procesa inmediatamente la cola de `outbound_available` pendientes.
+- `check_queue` también filtra por `active_deadline + shelf_urgency`.
+- **Fix bug**: `pickup_from_shelf(ShelfId, CId)` → `pickup_from_shelf(CId, ShelfId)` (argumentos invertidos).
+- **Fix bug**: `release_task` sin argumento → `release_task(CId)` en failure handler.
+- Log `container_delivered` añadido a `!execute_outbound_task`.
+
+---
+
+### 5. Agente `transport.asl` (nuevo)
+
+Simula la llegada de camiones al finalizar cada deadline. Recibe `transport_request(ContainerType, Phase)` del scheduler y emite el evento obligatorio:
+
+```
+EVENT | time=T | agent=transport | type=transport_dispatched | data=ContainerType
+```
+
+Añadido a `warehouse.mas2j`.
+
+---
+
+### 6. Java: fix enum `OUTBOUND` duplicado (`CellType.java`, `WarehouseView.java`)
+
+`CellType.java` tenía dos entradas `OUTBOUND` (bug de merge). `WarehouseView.java` tenía el `case OUTBOUND:` duplicado en el switch de pintado. Se eliminó la entrada duplicada en ambos ficheros; se conserva el color azul claro `(200, 230, 255)` para la zona de salida (x=17-19, y=0-1).
+
+---
+
 ## Nota de diseño: distancia Manhattan como heurística implícita de navegación
 
 El plan `!do_step` elige en cada paso el eje con mayor distancia restante al destino:

@@ -19,6 +19,13 @@ state(idle).
 position(4,3).       // Posición inicial (diferente a robot_heavy en (3,3))
 carrying(none).
 
+shelf_urgency("shelf_1", urgent).  shelf_urgency("shelf_5", urgent).  shelf_urgency("shelf_8", urgent).
+shelf_urgency("shelf_2", non_urgent). shelf_urgency("shelf_3", non_urgent). shelf_urgency("shelf_4", non_urgent).
+shelf_urgency("shelf_6", non_urgent). shelf_urgency("shelf_7", non_urgent). shelf_urgency("shelf_9", non_urgent).
+
+non_urgent_container_type("standard").
+non_urgent_container_type("fragile").
+
 /* ============================================================================
  * PLANES PRINCIPALES
  * ============================================================================ */
@@ -134,8 +141,11 @@ carrying(none).
  * CICLO OUTBOUND — extraer contenedor de estantería y llevar a zona de salida
  * ============================================================================ */
 
-+outbound_available(CId, ShelfId, W, H, Weight) : state(idle) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
-                                                  & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
+// Idle + capable + deadline fase correcta → procesar
++outbound_available(CId, ShelfId, W, H, Weight) :
+    state(idle) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
+    & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH)
+    & active_deadline(_, Category, _) & shelf_urgency(ShelfId, Category) <-
     .print("📤 [HEAVY2] Tomando outbound: ", CId, " de ", ShelfId);
     -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)];
     accept_task(CId);
@@ -143,12 +153,33 @@ carrying(none).
     -+carrying(CId);
     !execute_outbound_task(CId, ShelfId).
 
-+outbound_available(CId, ShelfId, W, H, Weight) : not state(idle) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
-                                                  & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
-    .print("⚠️ [HEAVY2] Ocupado, guardando outbound: ", CId).
+// Capaz pero ocupado, o deadline incorrecto → conservar para después
++outbound_available(CId, ShelfId, W, H, Weight) :
+    max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
+    & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
+    .print("⚠️ [HEAVY2] Outbound pendiente (ocupado o deadline incorrecto): ", CId).
 
+// No capaz → descartar
 +outbound_available(CId, ShelfId, W, H, Weight) : true <-
     -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)].
+
+// Cuando llega un nuevo deadline, procesar cola de outbound pendiente
++active_deadline(_, Category, _) : state(idle) <-
+    !check_outbound_for_category(Category).
+
++!check_outbound_for_category(Category) :
+    outbound_available(CId, ShelfId, W, H, Weight)
+    & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
+    & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH)
+    & shelf_urgency(ShelfId, Category) <-
+    .print("📤 [HEAVY2] Procesando outbound desde cola: ", CId, " de ", ShelfId);
+    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_outbound_task(CId, ShelfId).
+
++!check_outbound_for_category(_) : true <- true.
 
 +!execute_outbound_task(CId, ShelfId) : true <-
     .print("📤 [HEAVY2] Fase 1: Navegando a estantería ", ShelfId);
@@ -158,7 +189,7 @@ carrying(none).
 
     .print("📦 [HEAVY2] Fase 2: Recogiendo de estantería ", ShelfId);
     -+state(picking);
-    pickup_from_shelf(ShelfId, CId);
+    pickup_from_shelf(CId, ShelfId);
     .wait(1000);
 
     .print("🚚 [HEAVY2] Fase 3: Navegando a zona outbound");
@@ -172,23 +203,26 @@ carrying(none).
     drop_in_outbound(CId);
     .wait(1000);
 
+    .my_name(Me);
+    .time(Hd, Md, Sd); Td = Hd * 3600 + Md * 60 + Sd;
+    warehouse.log_event("EVENT | time=", Td, " | agent=", Me, " | type=container_delivered | data=", CId);
     .print("✨ [HEAVY2] Outbound completado: ", CId);
     -+carrying(none);
     release_task(CId);
-    .send(scheduler, tell, container_shipped(CId, ShelfId));
     !check_queue.
 
 -!execute_outbound_task(CId, ShelfId) : true <-
     .print("⚠️ [HEAVY2] Fallo en tarea outbound: ", CId);
     -+carrying(none);
-    release_task;
+    release_task(CId);
     .send(scheduler, tell, outbound_failed(CId, ShelfId));
     !check_queue.
 
 +shipped(CId) : true <- true.
 
 +!check_queue : outbound_available(CId, ShelfId, W, H, Weight) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
-              & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
+              & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH)
+              & active_deadline(_, Category, _) & shelf_urgency(ShelfId, Category) <-
     .print("✅ [HEAVY2] Procesando outbound disponible: ", CId, " desde ", ShelfId);
     -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)];
     accept_task(CId);

@@ -517,9 +517,12 @@ urgency_of(fragile,  non_urgent).
     !run_exit_cycle(Type, T0).
 
 +!run_exit_cycle(Type, T0) : delta_t(DT) <-
+    .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
 
     // ---- Deadline corto: [T0, T0+ΔT) — salen contenedores urgentes ----
     +active_deadline(short, urgent, T0);
+    for (.member(R, AllRobots)) { .send(R, tell, active_deadline(short, urgent, T0)); };
+    !dispatch_outbound(urgent);
     .time(H1, M1, S1);
     Tstart1 = H1 * 3600 + M1 * 60 + S1;
     warehouse.log_event("EVENT | time=", Tstart1, " | agent=scheduler | type=deadline_started | data=urgent");
@@ -527,14 +530,18 @@ urgency_of(fragile,  non_urgent).
     DurShort = DT * 1000;
     .wait(DurShort);
     -active_deadline(short, urgent, T0);
+    for (.member(R, AllRobots)) { .send(R, untell, active_deadline(short, urgent, T0)); };
     .time(H2, M2, S2);
     Tend1 = H2 * 3600 + M2 * 60 + S2;
     warehouse.log_event("EVENT | time=", Tend1, " | agent=scheduler | type=deadline_ended | data=urgent");
     .print("[SCHEDULER] EVENT deadline_ended urgent T=", Tend1);
+    .send(transport, tell, transport_request(urgent, short));
 
     // ---- Deadline largo: [T0+ΔT, T0+3·ΔT) — salen contenedores no urgentes ----
     T1 = T0 + DT;
     +active_deadline(long, non_urgent, T1);
+    for (.member(R, AllRobots)) { .send(R, tell, active_deadline(long, non_urgent, T1)); };
+    !dispatch_outbound(non_urgent);
     .time(H3, M3, S3);
     Tstart2 = H3 * 3600 + M3 * 60 + S3;
     warehouse.log_event("EVENT | time=", Tstart2, " | agent=scheduler | type=deadline_started | data=non_urgent");
@@ -542,10 +549,12 @@ urgency_of(fragile,  non_urgent).
     DurLong = DT * 2 * 1000;
     .wait(DurLong);
     -active_deadline(long, non_urgent, T1);
+    for (.member(R, AllRobots)) { .send(R, untell, active_deadline(long, non_urgent, T1)); };
     .time(H4, M4, S4);
     Tend2 = H4 * 3600 + M4 * 60 + S4;
     warehouse.log_event("EVENT | time=", Tend2, " | agent=scheduler | type=deadline_ended | data=non_urgent");
-    .print("[SCHEDULER] EVENT deadline_ended non_urgent T=", Tend2).
+    .print("[SCHEDULER] EVENT deadline_ended non_urgent T=", Tend2);
+    .send(transport, tell, transport_request(non_urgent, long)).
 
 /* ============================================================================
  * 11. CICLO OUTBOUND — saturación de estanterías

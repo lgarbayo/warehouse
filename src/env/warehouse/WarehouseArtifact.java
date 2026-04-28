@@ -195,7 +195,7 @@ public class WarehouseArtifact extends Environment {
 
         // Fila de estanterías grandes
         for (int x = 10; x < 16; x += 4) {
-            Shelf shelf = new Shelf("shelf_" + shelfId++, x, 10, 4, 3, 200, 20);
+            Shelf shelf = new Shelf("shelf_" + shelfId++, x, 10, 4, 3, 350, 6);
             shelves.put(shelf.getId(), shelf);
             for (int dx = 0; dx < 4; dx++) {
                 for (int dy = 0; dy < 3; dy++) {
