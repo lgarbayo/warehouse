@@ -50,6 +50,11 @@ robot_status(robot_medium, idle).
 robot_status(robot_heavy, idle).
 robot_status(robot_heavy2, idle).
 
+/* Mutex de zonas críticas */
+zone_free(inbound).
+zone_free(expansion).
+zone_free(outbound).
+
 /* Intervalo del reporte periódico (ms) */
 report_interval(30000).
 
@@ -186,7 +191,7 @@ shelf_type("shelf_9", non_urgent).
  * ============================================================================ */
 
 // container_at_entrance es global: el supervisor lo percibe directamente del entorno
-+container_at_entrance(CId, Type, Weight, W, H) : true <-
++container_at_entrance(CId, Type, Weight, W, H) : not container_received(CId) <-
     +container_received(CId);
     +container_received_type(CId, Type);
     .count(container_received(_), N);
@@ -195,18 +200,23 @@ shelf_type("shelf_9", non_urgent).
     !update_rates;
     .print("[SUPERVISOR] Nuevo contenedor: ", CId, " (", Type, ", ", Weight, "kg) | Total: ", N).
 
++container_at_entrance(CId, Type, Weight, W, H) : true <- true.
+
 /* ============================================================================
  * MONITORIZACIÓN - Contenedores almacenados
  * Los robots notifican al supervisor tras almacenar con éxito
  * ============================================================================ */
 
-+container_stored(CId, ShelfId)[source(Robot)] : true <-
++container_stored(CId, ShelfId)[source(Robot)] : not container_stored_fact(CId, _) <-
     +container_stored_fact(CId, ShelfId);
     .count(container_stored_fact(_,_), N);
     -total_stored(_);
     +total_stored(N);
     !update_rates;
     .print("[SUPERVISOR] Contenedor almacenado: ", CId, " en ", ShelfId, " por ", Robot, " | Total almacenados: ", N).
+
++container_stored(CId, ShelfId)[source(Robot)] : true <-
+    .print("[SUPERVISOR] Re-almacenado: ", CId, " en ", ShelfId, " por ", Robot, " (ya contado)").
 
 /* ============================================================================
  * MONITORIZACIÓN - Errores
@@ -275,4 +285,28 @@ shelf_type("shelf_9", non_urgent).
     -no_space_notified(Type).
 
 +shelf_available(_) : true <- true.
+
+/* ============================================================================
+ * MUTEX DE ZONA - Acceso exclusivo a zonas críticas
+ * ============================================================================ */
+
++request_zone(Zone)[source(Robot)] : zone_free(Zone) <-
+    -zone_free(Zone);
+    +zone_held(Zone, Robot);
+    .send(Robot, tell, zone_granted(Zone)).
+
++request_zone(Zone)[source(Robot)] : zone_held(Zone, _) & not zone_queued(Zone, Robot) <-
+    +zone_queued(Zone, Robot).
+
++request_zone(Zone)[source(Robot)] : zone_held(Zone, _) <- true.
+
++release_zone(Zone)[source(Robot)] : zone_queued(Zone, Next) <-
+    -zone_held(Zone, Robot);
+    -zone_queued(Zone, Next);
+    +zone_held(Zone, Next);
+    .send(Next, tell, zone_granted(Zone)).
+
++release_zone(Zone)[source(Robot)] : true <-
+    -zone_held(Zone, _);
+    +zone_free(Zone).
 

@@ -135,28 +135,28 @@ public class WarehouseArtifact extends Environment {
      */
     private void initializeRobots() {
         Robot light = new Robot("robot_light", "light", 10, 1, 1, 3);
-        light.setPosition(1, 3);
+        light.setPosition(1, 5);
         robots.put("robot_light", light);
 
         Robot medium = new Robot("robot_medium", "medium", 30, 1, 2, 2);
-        medium.setPosition(2, 3);
+        medium.setPosition(1, 7);
         robots.put("robot_medium", medium);
 
         Robot heavy = new Robot("robot_heavy", "heavy", 100, 2, 3, 1);
-        heavy.setPosition(3, 3);
+        heavy.setPosition(1, 12);
         robots.put("robot_heavy", heavy);
 
         Robot heavy2 = new Robot("robot_heavy2", "heavy", 100, 2, 3, 1);
-        heavy2.setPosition(4, 3);
+        heavy2.setPosition(1, 9);
         robots.put("robot_heavy2", heavy2);
 
         // Emitir posición inicial de cada robot para que sus planes de navegación
         // tengan robot_pos disponible desde el primer ciclo.
         try {
-            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,3)"));
-            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(2,3)"));
-            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(3,3)"));
-            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(4,3)"));
+            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,5)"));
+            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(1,7)"));
+            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(1,12)"));
+            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(1,9)"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }
@@ -435,6 +435,7 @@ public class WarehouseArtifact extends Environment {
             Container container = containers.get(containerId);
             if (container == null) {
                 System.err.println("[" + agName + "] Container not found: " + containerId);
+                addError(agName, "container_not_found", containerId);
                 return false;
             }
             List<int[]> adyacentes = container.getAdyacentes(grid, GRID_WIDTH, GRID_HEIGHT);
@@ -488,10 +489,13 @@ public class WarehouseArtifact extends Environment {
                 }
                 for (String crushedId : aplastados) {
                     containers.remove(crushedId);
+                    claimedContainers.remove(crushedId);
                     System.err.println("[WARNING] " + agName + " aplastó " + crushedId
                             + " en (" + targetX + "," + targetY + ")");
                     if (view != null) view.logMessage("💥 " + agName + " aplastó " + crushedId);
                     try {
+                        removePerceptsByUnif(ASSyntax.parseLiteral(
+                            "container_at_entrance(\"" + crushedId + "\",_,_,_,_)"));
                         addPercept(ASSyntax.parseLiteral("container_broken(\"" + crushedId + "\")"));
                     } catch (jason.asSyntax.parser.ParseException e) {
                         e.printStackTrace();

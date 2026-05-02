@@ -19,7 +19,7 @@
  * ============================================================================ */
 
 state(idle).
-position(1,2).
+position(1,5).
 carrying(none).
 nav_limit(300).
 
@@ -58,8 +58,9 @@ nav_limit(300).
 // Robot ocupado o contenedor fuera de capacidad: conservar percept para después
 +container_at_entrance(CId, Type, Weight, W, H) : true <- true.
 
--container_at_entrance(CId, Type, Weight, W, H) : nav_failed(CId) <-
-    -nav_failed(CId).
+-container_at_entrance(CId, Type, Weight, W, H) : nav_failed(CId) <- true.
+
++nav_failed(CId) <- .wait(20000); -nav_failed(CId).
 
 // Intentar reclamar usando if para no propagar fallo si otro robot llegó antes
 +!try_claim(CId, Type, Weight, W, H) : state(idle) <-
@@ -110,12 +111,14 @@ nav_limit(300).
     .print("🚀 [LIGHT] Iniciando tarea: ", CId, " → ", ShelfId);
 
     .print("📍 [LIGHT] Fase 1: Localizando contenedor ", CId);
+    !acquire_zone(inbound);
     !get_to_container(CId, 3);
     .wait(500);
 
     .print("📦 [LIGHT] Fase 2: Recogiendo ", CId);
     -+state(picking);
     pickup(CId);
+    !release_zone(inbound);
     .wait(500);
     .time(H_pk,M_pk,S_pk); T_pk=H_pk*3600+M_pk*60+S_pk;
     warehouse.log_event("EVENT | time=",T_pk," | agent=robot_light | type=pickup | data=",CId);
@@ -144,8 +147,41 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
 +!navigate(TX, TY) : robot_pos(TX, TY) <- true.
 
-+!navigate(TX, TY) : TX >= 10 & robot_pos(X, Y) & not (Y == TY & corridor_row(TY)) <-
++!navigate(TX, TY) : TX < 9 & TX \== 9 & robot_pos(X, Y) & X >= 10 <-
+    !navigate(9, Y);
     !navigate(9, TY);
+    !navigate(TX, TY).
+
++!navigate(TX, TY) : TX >= 17 & TY < 2 & robot_pos(X, Y) & Y > 3 <-
+    !navigate(19, 3);
+    !navigate(TX, TY).
+
++!navigate(TX, TY) : TX >= 17 & TY < 2 & TX \== 19 & robot_pos(X, Y) & X >= 10 & X < 19 <-
+    !navigate(19, Y);
+    !navigate(19, TY);
+    !navigate(TX, TY).
+
++!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X < 9 <-
+    !navigate(9, Y);
+    !navigate(9, TY);
+    !navigate(TX, TY).
+
++!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X >= 10 & Y \== TY & X <= 14 <-
+    !navigate(9, Y);
+    !navigate(9, TY);
+    !navigate(TX, TY).
+
++!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 19 & robot_pos(X, Y) & X >= 10 & Y \== TY & X > 14 <-
+    !navigate(19, Y);
+    !navigate(19, TY);
+    !navigate(TX, TY).
+
++!navigate(TX, TY) : TX \== 9 & robot_pos(X, Y) & X == 9 & Y \== TY <-
+    !navigate(9, TY);
+    !navigate(TX, TY).
+
++!navigate(TX, TY) : TX \== 19 & robot_pos(X, Y) & X == 19 & Y \== TY <-
+    !navigate(19, TY);
     !navigate(TX, TY).
 
 +!navigate(TX, TY) : robot_pos(X, Y) & nav_limit(N) & N > 0 <-
@@ -157,19 +193,25 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .my_name(Me);
     .print("⚠️ [LIGHT] Nav timeout hacia (", TX, ",", TY, ")");
     .send(supervisor, tell, robot_error(Me, nav_timeout, "navigation_timed_out"));
-    ?nav_abort_signal.
+    .fail.
 
 +!step_with_retry(X, Y, TX, TY, BC) <- !do_step(X, Y, TX, TY).
 
--!step_with_retry(X, Y, TX, TY, BC) : BC >= 2 & BC < 6 <-
+-!step_with_retry(X, Y, TX, TY, BC) : BC >= 4 & BC < 6 <-
+    .random(R); .wait(1500 + R * 1500);
+    BC1 = BC + 1;
+    ?robot_pos(CX, CY);
+    !step_with_retry(CX, CY, TX, TY, BC1).
+
+-!step_with_retry(X, Y, TX, TY, BC) : BC >= 2 & BC < 4 <-
     !path_backoff(X, Y, TX, TY);
-    .wait(800);
+    .random(R); .wait(300 + R * 1200);
     BC1 = BC + 1;
     ?robot_pos(CX, CY);
     !step_with_retry(CX, CY, TX, TY, BC1).
 
 -!step_with_retry(X, Y, TX, TY, BC) : BC < 6 <-
-    .wait(800);
+    .random(R); .wait(300 + R * 1200);
     BC1 = BC + 1;
     ?robot_pos(CX, CY);
     !step_with_retry(CX, CY, TX, TY, BC1).
@@ -177,8 +219,9 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 -!step_with_retry(_, _, _, _, _) <-
     .my_name(Me);
     .send(supervisor, tell, robot_error(Me, path_blocked, "permanently_blocked"));
-    ?nav_abort_signal.
+    .fail.
 
++!do_step(X, Y, TX, TY) : X == TX & Y == TY <- +step_done.
 +!do_step(X, Y, TX, TY) : TX > X & TY >= Y & TX - X >= TY - Y <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
 +!do_step(X, Y, TX, TY) : TX > X & TY <  Y & TX - X >= Y - TY <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
 +!do_step(X, Y, TX, TY) : TX < X & TY >= Y & X - TX >= TY - Y <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
@@ -197,15 +240,15 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 -!try_y_then_x(X, Y, TX, TY) : TX < X <- NX = X - 1; move_step(NX, Y); +step_done.
 -!try_y_then_x(X, Y, TX, TY) <- true.
 
-+!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X + 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
-+!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X + 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
-+!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y + 1; move_step(X, NY).
-+!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y + 1; move_step(X, NY).
++!path_backoff(X, Y, TX, TY) : TX \== X & Y < 14 <- NY = Y + 1; move_step(X, NY).
++!path_backoff(X, Y, TX, TY) : TX \== X & Y > 0 <- NY = Y - 1; move_step(X, NY).
++!path_backoff(X, Y, TX, TY) : TY \== Y & X < 19 <- NX = X + 1; move_step(NX, Y).
++!path_backoff(X, Y, TX, TY) : TY \== Y & X > 0 <- NX = X - 1; move_step(NX, Y).
 +!path_backoff(_, _, _, _) <- true.
--!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X - 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
--!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X - 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
--!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y - 1; move_step(X, NY).
--!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y - 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TX \== X & Y > 0 <- NY = Y - 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TX \== X & Y < 14 <- NY = Y + 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TY \== Y & X > 0 <- NX = X - 1; move_step(NX, Y).
+-!path_backoff(X, Y, TX, TY) : TY \== Y & X < 19 <- NX = X + 1; move_step(NX, Y).
 -!path_backoff(_, _, _, _) <- true.
 
 /* ============================================================================
@@ -213,18 +256,38 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
  * ============================================================================ */
 
 // Estantería llena: llevar a zona de expansión y liberar para reasignación
+-!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) & expansion_count(CId, N) & N >= 2 <-
+    .print("⚠️ [LIGHT] Sin espacio tras 3 intentos, abandonando ", CId);
+    .abolish(error(shelf_full, _));
+    .time(H_ex,M_ex,S_ex); T_ex=H_ex*3600+M_ex*60+S_ex;
+    warehouse.log_event("EVENT | time=",T_ex," | agent=robot_light | type=expansion_drop_final | data=",CId,",",ShelfId);
+    .abolish(expansion_count(CId, _));
+    .abolish(expansion_failed_shelf(CId, _));
+    .abolish(claimed_type(CId, _));
+    -+carrying(none);
+    discard_container(CId);
+    release_task;
+    .send(supervisor, tell, container_error(CId, no_shelf_space));
+    !safe_return;
+    !check_queue.
+
 -!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) <-
     .print("⚠️ [LIGHT] Estantería llena, llevando ", CId, " a zona de expansión");
     .abolish(error(shelf_full, _));
     +expansion_failed_shelf(CId, ShelfId);
-    move_to_expansion;
-    ?nav_target(TX, TY);
-    !navigate(TX, TY);
-    drop_in_expansion(CId);
+    if (expansion_count(CId, N)) {
+        N1 = N + 1;
+        .abolish(expansion_count(CId, _));
+        +expansion_count(CId, N1)
+    } else {
+        +expansion_count(CId, 1)
+    };
+    !safe_expand_drop(CId);
     -+carrying(none);
     .time(H_ex,M_ex,S_ex); T_ex=H_ex*3600+M_ex*60+S_ex;
     warehouse.log_event("EVENT | time=",T_ex," | agent=robot_light | type=expansion_drop | data=",CId,",",ShelfId);
     release_task(CId);
+    !safe_return;
     unclaim_container(CId);
     !check_queue.
 
@@ -261,6 +324,15 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     ?nav_target(TX, TY);
     !navigate(TX, TY).
 
+-!get_to_container(CId, N) : error(container_not_found, _) <-
+    .abolish(error(container_not_found, _));
+    .print("⚠️ [LIGHT] Contenedor ", CId, " no existe. Descartando.");
+    -+carrying(none);
+    discard_container(CId);
+    release_task;
+    .send(scheduler, tell, task_failed(CId));
+    .fail.
+
 -!get_to_container(CId, N) : N > 1 <-
     .print("⚠️ [LIGHT] Reintentando nav a ", CId, " (", N, " intentos restantes)");
     .wait(2000);
@@ -280,6 +352,8 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
 +!check_queue : true <-
     .abolish(error(_, _));
+    !release_zone(inbound);
+    !release_zone(expansion);
     !safe_return;
     -+state(idle).
 
@@ -291,9 +365,25 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
  * CICLO DE SALIDA - Selección y entrega física a zona outbound
  * ============================================================================ */
 
++active_deadline(_, Cat, _) : not state(idle) <-
+    +pending_exit_flag(Cat).
+
++active_deadline(_, Cat, _) : true <- true.
+
++!check_exit_cycle : pending_exit_flag(Cat) <-
+    .abolish(pending_exit_flag(_));
+    .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
+    !select_for_exit(Candidates, Cat).
+
 +!check_exit_cycle : active_deadline(_, Category, _) <-
     .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
     !select_for_exit(Candidates, Category).
+
++!check_exit_cycle : not active_deadline(_, _, _) & shelf_category(SId, light) & shelf_occupancy(SId, Occ) & Occ >= 85 &
+                     stored(CId, SId) & claimed_type(CId, _) <-
+    .findall(pair(C, S), (stored(C, S) & shelf_category(S, light) & not exit_claimed(C) & claimed_type(C, _)), Candidates);
+    !select_for_exit(Candidates, non_urgent);
+    !select_for_exit(Candidates, urgent).
 
 +!check_exit_cycle : true <- true.
 
@@ -333,8 +423,10 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
     pickup_from_shelf(CId, ShelfId);
     .wait(500);
+    +exit_picked(CId);
     -+state(carrying);
 
+    -nav_limit(_); +nav_limit(300);
     move_to_outbound;
     ?nav_target(TX2, TY2);
     !navigate(TX2, TY2);
@@ -348,6 +440,30 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     -stored(CId, ShelfId);
     .abolish(claimed_type(CId, _));
     .abolish(expansion_failed_shelf(CId, _));
+    .abolish(expansion_count(CId, _));
+    -exit_picked(CId);
+    -+carrying(none);
+    !check_queue.
+
++!return_to_shelf(CId, ShelfId) <-
+    -nav_limit(_); +nav_limit(200);
+    move_to_shelf(ShelfId);
+    ?nav_target(TX, TY);
+    !navigate(TX, TY);
+    drop_at(ShelfId).
+
+-!return_to_shelf(CId, _) <-
+    !safe_expand_drop(CId);
+    .abolish(stored(CId, _));
+    .abolish(claimed_type(CId, _)).
+
+-!return_to_shelf(_, _) : true <- true.
+
+-!execute_exit(CId, ShelfId) : exit_picked(CId) <-
+    .print("⚠️ [LIGHT] Fallo en execute_exit tras pickup, devolviendo ", CId, " a ", ShelfId);
+    -exit_claimed(CId);
+    -exit_picked(CId);
+    !return_to_shelf(CId, ShelfId);
     -+carrying(none);
     !check_queue.
 

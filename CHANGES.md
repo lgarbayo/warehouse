@@ -1,5 +1,21 @@
 # Changes
 
+## Fix: Robot Navigation Deadlocks
+
+### 1. Sistema de autopistas verticales (x=9 y x=19)
+Se solucionó el problema de los robots atascándose o sufriendo `nav_timeout` al intentar ir a la zona de salida (Outbound) o moverse entre estanterías. El problema principal era que la zona de salida se movió a `x=17..19` pero las reglas de navegación (`!navigate`) seguían asumiendo que estaba en `x < 3`. Como resultado, los robots usaban navegación "greedy" (diagonal directa) y chocaban contra los bloques horizontales de las estanterías, atascándose indefinidamente.
+
+Para solucionarlo, se reescribió por completo la lógica de enrutamiento con waypoints en los 4 agentes (`robot_light`, `robot_medium`, `robot_heavy`, `robot_heavy2`):
+- **Highway 9 y 19**: Se usan las columnas `x=9` (izquierda de las estanterías) y `x=19` (derecha de las estanterías) como pasillos verticales principales.
+- Al salir de las estanterías hacia la entrada o clasificación (`TX < 9`), se usa la ruta por `x=9`.
+- Al salir hacia Outbound (`TX >= 17, TY < 2`), se usa la ruta por `x=19`, evitando por completo chocar con las estanterías.
+- Para cambios de fila (`Y \== TY`) cuando el robot ya está dentro de las estanterías (`X >= 10`), el robot busca la autopista más cercana (`x=9` si está en la mitad izquierda, `x=19` si está en la mitad derecha) para cambiar de fila de forma segura antes de adentrarse en el pasillo correcto. Se solucionó también un fallo de recursión infinita en esta regla.
+
+### 2. `path_backoff` ortogonal
+Se solucionó el problema de los robots quedándose atascados (el "sándwich" en la columna `x=1` como `1,10`). Antes, cuando un robot encontraba un obstáculo en el eje Y, el `path_backoff` intentaba moverse en el mismo eje Y (hacia adelante o atrás), lo que causaba colisiones continuas. Ahora, cuando se bloquea en el eje Y, el backoff intenta un movimiento ortogonal (lateral) en el eje X, y viceversa. Esto permite a los robots esquivarse fluidamente en los pasillos.
+
+### 2. Bucle infinito en `!navigate` para estanterías (`TX >= 10`)
+Se corrigió un bucle de recursión infinita en la regla de navegación `+!navigate(TX, TY) : TX >= 10`. Si un robot era asignado a una celda adyacente a una estantería que no era un corredor principal (`corridor_row`), el robot evaluaba infinitamente la regla que intentaba enviarlo a la columna `x=9` y de vuelta, causando que se quedara completamente inmóvil. La condición se simplificó para comprobar si el robot ya cruzó la columna `9` (`X < 9`), evitando retrocesos innecesarios y bucles infinitos.
 ## Iteración 3: Ciclo de salida por tipo, deadlines y agente Transport
 
 ### Objetivos cumplidos

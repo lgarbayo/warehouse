@@ -11,7 +11,7 @@
  * TEMPORIZACIÓN
  * ============================================================================ */
 
-delta_t(8).
+delta_t(60).
 
 /* ============================================================================
  * CLASIFICACIÓN DE TIPOS DE CONTENEDOR
@@ -46,6 +46,11 @@ shelf_category("shelf_7", medium).
 shelf_category("shelf_8", heavy).
 shelf_category("shelf_9", heavy).
 
+shelf_max_weight("shelf_1", 50).  shelf_max_weight("shelf_2", 50).
+shelf_max_weight("shelf_3", 50).  shelf_max_weight("shelf_4", 50).
+shelf_max_weight("shelf_5", 100). shelf_max_weight("shelf_6", 100). shelf_max_weight("shelf_7", 100).
+shelf_max_weight("shelf_8", 350). shelf_max_weight("shelf_9", 350).
+
 /* ============================================================================
  * SELECCIÓN AUTÓNOMA DE ESTANTERÍA
  * Planes compartidos por los tres robots. Cada robot los incluye vía common.asl.
@@ -67,9 +72,11 @@ shelf_category("shelf_9", heavy).
     shelf_category(ExS, heavy) & shelf_available(ExS) <-
     !pick_least_occupied_shelf(CId, heavy).
 
-// Fallback: cualquier estantería disponible < 85%
+// Fallback: cualquier estantería disponible < 85% que aguante el peso
 +!pick_shelf(CId, Weight, W, H) : shelf_available(_) <-
-    .findall(pair(Occ, S), (shelf_available(S) & shelf_occupancy(S, Occ) & Occ < 85 & not expansion_failed_shelf(CId, S)), Pairs);
+    .findall(pair(Occ, S), (shelf_available(S) & shelf_occupancy(S, Occ) & Occ < 85
+                             & not expansion_failed_shelf(CId, S)
+                             & shelf_max_weight(S, MaxW) & Weight <= MaxW), Pairs);
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +shelf_selected(CId, ShelfId).
 
@@ -99,6 +106,60 @@ shelf_category("shelf_9", heavy).
     .print("⚠️ Sin estantería para ", CId, ". Reintento 1/3...");
     .wait(5000);
     !pick_shelf(CId, Weight, W, H).
+
+/* ============================================================================
+ * EXPANSION DROP CON REINTENTO
+ * ============================================================================ */
+
++!safe_expand_drop(CId) <-
+    !acquire_zone(expansion);
+    -nav_limit(_); +nav_limit(200);
+    move_to_expansion;
+    ?nav_target(TX, TY);
+    !navigate(TX, TY);
+    drop_in_expansion(CId);
+    !release_zone(expansion);
+    .abolish(expand_drop_retries(CId, _)).
+
+-!safe_expand_drop(CId) : expand_drop_retries(CId, N) & N >= 2 <-
+    .my_name(Me);
+    .print("❌ [", Me, "] Expansión bloqueada para ", CId, ". Descartando.");
+    .abolish(expand_drop_retries(CId, _));
+    !release_zone(expansion);
+    discard_container(CId).
+
+-!safe_expand_drop(CId) : expand_drop_retries(CId, N) <-
+    N1 = N + 1;
+    -expand_drop_retries(CId, _);
+    +expand_drop_retries(CId, N1);
+    !release_zone(expansion);
+    .wait(2000);
+    !safe_expand_drop(CId).
+
+-!safe_expand_drop(CId) <-
+    +expand_drop_retries(CId, 1);
+    !release_zone(expansion);
+    .wait(2000);
+    !safe_expand_drop(CId).
+
+/* ============================================================================
+ * MUTEX DE ZONA
+ * ============================================================================ */
+
++!acquire_zone(Zone) : holding_zone(Zone) <- true.
+
++!acquire_zone(Zone) <-
+    -zone_granted(Zone);
+    .send(supervisor, tell, request_zone(Zone));
+    .wait(zone_granted(Zone));
+    -zone_granted(Zone);
+    +holding_zone(Zone).
+
++!release_zone(Zone) : holding_zone(Zone) <-
+    -holding_zone(Zone);
+    .send(supervisor, tell, release_zone(Zone)).
+
++!release_zone(Zone) : true <- true.
 
 // Selecciona la estantería menos ocupada de una categoría dada (< 85%)
 +!pick_least_occupied_shelf(CId, Cat) <-
