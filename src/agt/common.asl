@@ -166,3 +166,34 @@ shelf_max_weight("shelf_8", 350). shelf_max_weight("shelf_9", 350).
     .findall(pair(Occ, S), (shelf_category(S, Cat) & shelf_available(S) & shelf_occupancy(S, Occ) & Occ < 85 & not expansion_failed_shelf(CId, S)), Pairs);
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +shelf_selected(CId, ShelfId).
+
+/* ============================================================================
+ * ENTREGA EN OUTBOUND
+ * Si el robot ya está en una celda outbound (x=17-19, y=0-1), suelta
+ * inmediatamente. Evita oscilación cuando el nav_target exacto está ocupado.
+ * ============================================================================ */
+
+// At x=17-18 heading to outbound but blocked by y=2-3 shelf cells (S4 at x=16-17):
+// step to x=19 first (free column), then descend into zone.
++!navigate(TX, TY) : TX >= 17 & TY < 2 & robot_pos(X, Y) & X >= 17 & X < 19 & Y >= 2 <-
+    !navigate(19, Y);
+    !navigate(TX, TY).
+
+// At x=19, y>=2, heading to right outbound: descend x=19 column into zone.
+// TX\==19 guard prevents recursion when inner !navigate(19,1) re-evaluates this plan.
++!navigate(TX, TY) : TX >= 17 & TY < 2 & TX \== 19 & robot_pos(X, Y) & X == 19 & Y >= 2 <-
+    !navigate(19, 1);
+    !navigate(TX, TY).
+
++!drop_at_outbound(CId) <-
+    !acquire_zone(outbound);
+    move_to_outbound;
+    ?nav_target(TX, TY);
+    !navigate(TX, TY);
+    drop_in_outbound(CId);
+    !release_zone(outbound).
+
+-!drop_at_outbound(CId) <-
+    !release_zone(outbound);
+    .wait(1500);
+    !drop_at_outbound(CId).

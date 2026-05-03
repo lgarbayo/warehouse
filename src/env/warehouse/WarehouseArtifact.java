@@ -1038,6 +1038,11 @@ public class WarehouseArtifact extends Environment {
             if (cells.isEmpty()) return false;
 
             cells.sort((a, b) -> {
+                // Prefer y=0 over y=1: robot approaches from y=2, so picking y=1 creates a
+                // TX-X == Y-TY tie that forces x-first stepping and loops back to y=2.
+                // With y=0, Y-TY=2 > TX-X so try_y_then_x fires, stepping to y=1 (outbound)
+                // which triggers navigate early-exit and immediate drop.
+                if (a[1] != b[1]) return Integer.compare(a[1], b[1]);
                 int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
                 int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
                 return Integer.compare(da, db);

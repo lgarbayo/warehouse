@@ -153,6 +153,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     !navigate(TX, TY).
 
 +!navigate(TX, TY) : TX >= 17 & TY < 2 & robot_pos(X, Y) & Y > 3 <-
+    !navigate(19, 4);
     !navigate(19, 3);
     !navigate(TX, TY).
 
@@ -164,6 +165,12 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 +!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X < 9 <-
     !navigate(9, Y);
     !navigate(9, TY);
+    !navigate(TX, TY).
+
+// X<=14 going to right side (TX>=15): use x=19
++!navigate(TX, TY) : TX >= 15 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X >= 10 & Y \== TY & X <= 14 <-
+    !navigate(19, Y);
+    !navigate(19, TY);
     !navigate(TX, TY).
 
 +!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X >= 10 & Y \== TY & X <= 14 <-
@@ -180,7 +187,8 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     !navigate(9, TY);
     !navigate(TX, TY).
 
-+!navigate(TX, TY) : TX \== 19 & robot_pos(X, Y) & X == 19 & Y \== TY <-
+// TY >= 2 guard: don't force route via (19,TY) when targeting outbound (TY<2)
++!navigate(TX, TY) : TX \== 19 & robot_pos(X, Y) & X == 19 & Y \== TY & TY >= 2 <-
     !navigate(19, TY);
     !navigate(TX, TY).
 
@@ -359,6 +367,8 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
 -!check_queue : true <-
     .abolish(error(_, _));
+    !release_zone(inbound);
+    !release_zone(expansion);
     -+state(idle).
 
 /* ============================================================================
@@ -427,11 +437,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     -+state(carrying);
 
     -nav_limit(_); +nav_limit(300);
-    move_to_outbound;
-    ?nav_target(TX2, TY2);
-    !navigate(TX2, TY2);
-
-    drop_in_outbound(CId);
+    !drop_at_outbound(CId);
     .wait(500);
 
     .my_name(Me);
