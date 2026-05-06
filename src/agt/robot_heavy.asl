@@ -139,7 +139,7 @@ nav_limit(300).
     !release_zone(inbound);
     .wait(800);
     .time(H_pk,M_pk,S_pk); T_pk=H_pk*3600+M_pk*60+S_pk;
-    warehouse.log_event("EVENT | time=",T_pk," | agent=robot_heavy | type=pickup | data=",CId);
+    .print("EVENT | time=",T_pk," | agent=robot_heavy | type=pickup | data=",CId);
 
     .print("🚚 [HEAVY] Fase 3: Transportando a estantería ", ShelfId);
     -+state(carrying);
@@ -293,7 +293,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .print("⚠️ [HEAVY] Sin espacio tras 3 intentos, abandonando ", CId);
     .abolish(error(shelf_full, _));
     .time(H_ex,M_ex,S_ex); T_ex=H_ex*3600+M_ex*60+S_ex;
-    warehouse.log_event("EVENT | time=",T_ex," | agent=robot_heavy | type=expansion_drop_final | data=",CId,",",ShelfId);
+    .print("EVENT | time=",T_ex," | agent=robot_heavy | type=expansion_drop_final | data=",CId,",",ShelfId);
     .abolish(expansion_count(CId, _));
     .abolish(expansion_failed_shelf(CId, _));
     .abolish(claimed_type(CId, _));
@@ -318,7 +318,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     !safe_expand_drop(CId);
     -+carrying(none);
     .time(H_ex,M_ex,S_ex); T_ex=H_ex*3600+M_ex*60+S_ex;
-    warehouse.log_event("EVENT | time=",T_ex," | agent=robot_heavy | type=expansion_drop | data=",CId,",",ShelfId);
+    .print("EVENT | time=",T_ex," | agent=robot_heavy | type=expansion_drop | data=",CId,",",ShelfId);
     release_task(CId);
     !safe_return;
     unclaim_container(CId);
@@ -343,7 +343,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     release_task(CId);
     unclaim_container(CId);
     .time(H_tf,M_tf,S_tf); T_tf=H_tf*3600+M_tf*60+S_tf;
-    warehouse.log_event("EVENT | time=",T_tf," | agent=robot_heavy | type=task_failed | data=",CId,",",ShelfId);
+    .print("EVENT | time=",T_tf," | agent=robot_heavy | type=task_failed | data=",CId,",",ShelfId);
     .send(scheduler, tell, task_failed(CId));
     .wait(5000);
     !safe_return;
@@ -381,7 +381,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     +nav_failed(CId);
     unclaim_container(CId);
     .time(H_nf,M_nf,S_nf); T_nf=H_nf*3600+M_nf*60+S_nf;
-    warehouse.log_event("EVENT | time=",T_nf," | agent=robot_heavy | type=nav_failed | data=",CId);
+    .print("EVENT | time=",T_nf," | agent=robot_heavy | type=nav_failed | data=",CId);
     .send(scheduler, tell, task_failed(CId));
     .fail.
 
@@ -468,7 +468,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
     .my_name(Me);
     .time(Hd, Md, Sd); Td = Hd * 3600 + Md * 60 + Sd;
-    warehouse.log_event("EVENT | time=", Td, " | agent=", Me, " | type=container_delivered | data=", CId);
+    .print("EVENT | time=", Td, " | agent=", Me, " | type=container_delivered | data=", CId);
     -stored(CId, ShelfId);
     .abolish(claimed_type(CId, _));
     .abolish(expansion_failed_shelf(CId, _));
@@ -576,5 +576,5 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 +stored(CId, ShelfId) : true <-
     .print("✓ [HEAVY] ", CId, " almacenado en ", ShelfId);
     .time(H_st,M_st,S_st); T_st=H_st*3600+M_st*60+S_st;
-    warehouse.log_event("EVENT | time=",T_st," | agent=robot_heavy | type=stored | data=",CId,",",ShelfId);
+    .print("EVENT | time=",T_st," | agent=robot_heavy | type=stored | data=",CId,",",ShelfId);
     .send(supervisor, tell, container_stored(CId, ShelfId)).

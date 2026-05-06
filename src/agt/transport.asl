@@ -19,4 +19,4 @@
     .my_name(Me);
     .time(H, M, S); T = H * 3600 + M * 60 + S;
     .print("[TRANSPORT] Camión despachado: tipo=", ContainerType, " fase=", Phase, " T=", T);
-    warehouse.log_event("EVENT | time=", T, " | agent=transport | type=transport_dispatched | data=", ContainerType).
+    .print("EVENT | time=", T, " | agent=transport | type=transport_dispatched | data=", ContainerType).
