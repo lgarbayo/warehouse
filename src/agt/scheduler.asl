@@ -114,12 +114,14 @@ urgency_of(fragile,  non_urgent).
     // ---- Deadline corto: [T0, T0+ΔT) — salen contenedores urgentes ----
     +active_deadline(short, urgent, T0);
     for (.member(R, AllRobots)) { .send(R, tell, active_deadline(short, urgent, T0)); };
+    .send(supervisor, tell, active_deadline(short, urgent, T0));
     .time(H1, M1, S1); Tstart1 = H1 * 3600 + M1 * 60 + S1;
     .print("EVENT | time=", Tstart1, " | agent=scheduler | type=deadline_started | data=urgent");
     DurShort = DT * 1000;
     .wait(DurShort);
     -active_deadline(short, urgent, T0);
     for (.member(R, AllRobots)) { .send(R, untell, active_deadline(short, urgent, T0)); };
+    .send(supervisor, untell, active_deadline(short, urgent, T0));
     .time(H2, M2, S2); Tend1 = H2 * 3600 + M2 * 60 + S2;
     .print("EVENT | time=", Tend1, " | agent=scheduler | type=deadline_ended | data=urgent");
     .send(transport, tell, transport_request(urgent, short));
@@ -128,12 +130,14 @@ urgency_of(fragile,  non_urgent).
     T1 = T0 + DT;
     +active_deadline(long, non_urgent, T1);
     for (.member(R, AllRobots)) { .send(R, tell, active_deadline(long, non_urgent, T1)); };
+    .send(supervisor, tell, active_deadline(long, non_urgent, T1));
     .time(H3, M3, S3); Tstart2 = H3 * 3600 + M3 * 60 + S3;
     .print("EVENT | time=", Tstart2, " | agent=scheduler | type=deadline_started | data=non_urgent");
     DurLong = DT * 2 * 1000;
     .wait(DurLong);
     -active_deadline(long, non_urgent, T1);
     for (.member(R, AllRobots)) { .send(R, untell, active_deadline(long, non_urgent, T1)); };
+    .send(supervisor, untell, active_deadline(long, non_urgent, T1));
     .time(H4, M4, S4); Tend2 = H4 * 3600 + M4 * 60 + S4;
     .print("EVENT | time=", Tend2, " | agent=scheduler | type=deadline_ended | data=non_urgent");
     .send(transport, tell, transport_request(non_urgent, long));

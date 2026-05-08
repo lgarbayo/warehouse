@@ -1722,6 +1722,27 @@ pickup_from_shelf ✓ → navegar a outbound ✗ → return_to_shelf ✗
                                           → otro robot lo reclama ✓
 ```
 
+### Semana 4 — Infraestructura de seguimiento de deadlines
+
+**Objetivo**: adaptar el supervisor para que conozca T0, los deadlines activos, el tiempo actual y el estado completo de los contenedores.
+
+- **`scheduler.asl` — `!run_exit_cycle`**: el scheduler envía `active_deadline` también al supervisor (tell al inicio de cada fase, untell al final), además de a los robots. El supervisor recibe así T0 y la categoría (urgent/non_urgent) de cada deadline.
+
+- **4 robots — `+!execute_exit`**: tras depositar en outbound, cada robot envía `.send(supervisor, tell, container_delivered(CId))`. Permite al supervisor saber qué contenedores han sido efectivamente entregados.
+
+- **`supervisor.asl`**: nueva sección "Seguimiento de ciclo de salida":
+  - `+active_deadline(Phase, Cat, T0)[source(scheduler)]` — log de recepción con tiempo actual.
+  - `+container_delivered(CId)[source(Robot)]` — almacena `container_delivered_fact(CId)`.
+
+El supervisor puede ahora consultar el ciclo de vida completo de cada contenedor:
+
+| Creencia | Significado |
+|---|---|
+| `container_received(CId)` | Contenedor llegó al sistema |
+| `container_stored_fact(CId, ShelfId)` | Contenedor en estantería |
+| `container_delivered_fact(CId)` | Contenedor entregado a outbound |
+| `active_deadline(Phase, Cat, T0)` | Deadline activo con T0 en segundos |
+
 ### Fix: Bug 3 — unclaim resetea posición siempre (`WarehouseArtifact.java`)
 
 **Problema**: `executeUnclaimContainer` solo reseteaba la posición del contenedor a la zona de entrada cuando el robot lo llevaba físicamente. Si el contenedor había sido soltado previamente en otro lugar (p. ej., zona de expansión tras `safe_expand_drop` + `unclaim_container`), el percept `container_at_entrance` se emitía pero el contenedor quedaba en la posición incorrecta. Aunque `move_to_container` navega a la posición real del contenedor (evitando fallos de `pickup`), la zona mutex `inbound` se adquiría indebidamente y la semántica del percept era incorrecta.

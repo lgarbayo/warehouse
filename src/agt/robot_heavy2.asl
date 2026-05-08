@@ -305,6 +305,7 @@ nav_limit(300).
     .my_name(Me);
     .time(Hd, Md, Sd); Td = Hd * 3600 + Md * 60 + Sd;
     .print("EVENT | time=", Td, " | agent=", Me, " | type=container_delivered | data=", CId);
+    .send(supervisor, tell, container_delivered(CId));
     -stored(CId, ShelfId);
     .abolish(claimed_type(CId, _));
     .abolish(expansion_failed_shelf(CId, _));

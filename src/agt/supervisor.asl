@@ -306,6 +306,27 @@ shelf_type("shelf_9", non_urgent).
 +shelf_available(_) : true <- true.
 
 /* ============================================================================
+ * SEGUIMIENTO DE CICLO DE SALIDA
+ * El supervisor recibe active_deadline del scheduler para conocer T0 y los
+ * deadlines activos. Los robots notifican container_delivered tras cada entrega
+ * a outbound. Esto permite al supervisor consultar el estado completo:
+ *   - container_received(CId)              → contenedor llegó al sistema
+ *   - container_stored_fact(CId, ShelfId)  → contenedor en estantería
+ *   - container_delivered_fact(CId)        → contenedor entregado a outbound
+ *   - active_deadline(Phase, Cat, T0)      → deadline activo (T0 en segundos)
+ *   - .time(H, M, S)                       → tiempo actual del sistema
+ * ============================================================================ */
+
++active_deadline(Phase, Cat, T0)[source(scheduler)] : true <-
+    .time(H, M, S); Tnow = H * 3600 + M * 60 + S;
+    .print("[SUPERVISOR] Deadline recibido: fase=", Phase, " urgencia=", Cat, " T0=", T0, "s | ahora=", Tnow, "s").
+
++container_delivered(CId)[source(Robot)] : not container_delivered_fact(CId) <-
+    +container_delivered_fact(CId).
+
++container_delivered(CId)[source(Robot)] : true <- true.
+
+/* ============================================================================
  * MUTEX DE ZONA - Acceso exclusivo a zonas críticas
  * ============================================================================ */
 
