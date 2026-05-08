@@ -1767,6 +1767,33 @@ La detección usa las creencias acumuladas durante el ciclo:
 
 El check `if (Tnow >= Deadline)` hace el criterio explícito aunque en la práctica siempre se cumple al dispararse el trigger (el scheduler retira la creencia justo al expirar el plazo).
 
+### Semana 4 — Detección periódica de incumplimientos (`supervisor.asl`)
+
+**Objetivo**: el supervisor comprueba activamente cada 5 segundos si el deadline ha expirado, en lugar de esperar solo al evento reactivo de fin de fase.
+
+**Diseño**: dos mecanismos en paralelo previenen tanto la detección tardía como el doble reporte:
+
+- **Monitor periódico** (`+!monitor_deadline`): arranca cuando el supervisor recibe `+active_deadline`. Comprueba cada 5s si `Tnow >= Deadline`. En cuanto se cumple, establece `deadline_checked(Cat)`, busca contenedores incumplidos y emite los eventos. El loop para.
+
+- **Backup reactivo** (`-active_deadline`): se dispara cuando el scheduler retira la creencia (fin de fase). Si el monitor ya actuó (`deadline_checked` presente), solo limpia el flag. Si el monitor estaba en `.wait` cuando expiró el plazo, hace la comprobación definitiva.
+
+**Flujo completo**:
+```
++active_deadline recibido
+        ↓
+!monitor_deadline (loop cada 5s)
+        ↓
+   Tnow < Deadline → .wait(5000) → vuelve a comprobar
+        ↓
+   Tnow >= Deadline → +deadline_checked → !report_deadline_missed → para
+
+        ↓ (scheduler hace untell → -active_deadline)
+   • monitor YA detectó → solo limpia deadline_checked
+   • monitor en .wait    → comprobación definitiva aquí
+```
+
+El flag `deadline_checked(Cat)` garantiza que los eventos `deadline_missed` se emiten exactamente una vez por fase, independientemente de qué mecanismo actúe primero.
+
 ### Fix: Bug 3 — unclaim resetea posición siempre (`WarehouseArtifact.java`)
 
 **Problema**: `executeUnclaimContainer` solo reseteaba la posición del contenedor a la zona de entrada cuando el robot lo llevaba físicamente. Si el contenedor había sido soltado previamente en otro lugar (p. ej., zona de expansión tras `safe_expand_drop` + `unclaim_container`), el percept `container_at_entrance` se emitía pero el contenedor quedaba en la posición incorrecta. Aunque `move_to_container` navega a la posición real del contenedor (evitando fallos de `pickup`), la zona mutex `inbound` se adquiría indebidamente y la semántica del percept era incorrecta.

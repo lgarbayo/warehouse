@@ -41,8 +41,7 @@ General objective
 Implement system control and temporal evaluation, so that the supervisor agent detects and records deadline violations without interfering with the execution of the robots.
 
 Specific objectives
-    Define and implement the criterion for deadline violation:
-        a violation is considered to occur when the current time exceeds the active deadline and there are pending containers of the corresponding type that have not been delivered to the outbound zone.
+
     Implement in the supervisor the periodic detection of violations during the outbound cycle.
     Record a deadline error for each container that has not been delivered on time.
     Ensure that the detection and logging of errors:
@@ -58,8 +57,3 @@ By the end of Week 4, the system should:
     allow robots to operate autonomously,
     consistently record temporal violations,
     maintain stability and continuous execution.
-
-Mandatory logging
-
-    When the supervisor detects that a container has not been delivered within the active deadline, an event must be displayed for each missed container:
-    EVENT | time=T | agent=supervisor | type=deadline_missed | data=container_id

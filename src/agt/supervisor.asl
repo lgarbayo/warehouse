@@ -317,17 +317,19 @@ shelf_type("shelf_9", non_urgent).
  *   - .time(H, M, S)                       → tiempo actual del sistema
  * ============================================================================ */
 
+// Arranca el monitor periódico al recibir cada deadline
 +active_deadline(Phase, Cat, T0)[source(scheduler)] : true <-
     .time(H, M, S); Tnow = H * 3600 + M * 60 + S;
-    .print("[SUPERVISOR] Deadline recibido: fase=", Phase, " urgencia=", Cat, " T0=", T0, "s | ahora=", Tnow, "s").
+    .print("[SUPERVISOR] Deadline recibido: fase=", Phase, " urgencia=", Cat, " T0=", T0, "s | ahora=", Tnow, "s");
+    !monitor_deadline(Phase, Cat, T0).
 
-// Deadline urgente expirado — verificar incumplimientos
-// Criterio: Tnow >= T0 + DT  AND  existen contenedores urgent en estantería sin entregar
--active_deadline(_, urgent, T0)[source(scheduler)] : true <-
+// Monitor periódico — deadline urgente (comprueba cada 5s)
++!monitor_deadline(Phase, urgent, T0) :
+        active_deadline(Phase, urgent, T0) & not deadline_checked(urgent) <-
     .time(H, M, S); Tnow = H * 3600 + M * 60 + S;
-    ?delta_t(DT);
-    Deadline = T0 + DT;
+    ?delta_t(DT); Deadline = T0 + DT;
     if (Tnow >= Deadline) {
+        +deadline_checked(urgent);
         .findall(CId,
             (container_stored_fact(CId, _) &
              container_received_type(CId, ContType) &
@@ -335,15 +337,20 @@ shelf_type("shelf_9", non_urgent).
              not container_delivered_fact(CId)),
             Missed);
         !report_deadline_missed(Missed)
+    } else {
+        .wait(5000);
+        !monitor_deadline(Phase, urgent, T0)
     }.
 
-// Deadline no urgente expirado — verificar incumplimientos
-// Criterio: Tnow >= T1 + 2·DT  AND  existen contenedores standard/fragile en estantería sin entregar
--active_deadline(_, non_urgent, T1)[source(scheduler)] : true <-
++!monitor_deadline(_, urgent, _) : true <- true.
+
+// Monitor periódico — deadline no urgente (comprueba cada 5s)
++!monitor_deadline(Phase, non_urgent, T1) :
+        active_deadline(Phase, non_urgent, T1) & not deadline_checked(non_urgent) <-
     .time(H, M, S); Tnow = H * 3600 + M * 60 + S;
-    ?delta_t(DT);
-    Deadline = T1 + DT * 2;
+    ?delta_t(DT); Deadline = T1 + DT * 2;
     if (Tnow >= Deadline) {
+        +deadline_checked(non_urgent);
         .findall(CId,
             (container_stored_fact(CId, _) &
              container_received_type(CId, ContType) &
@@ -351,7 +358,38 @@ shelf_type("shelf_9", non_urgent).
              not container_delivered_fact(CId)),
             Missed);
         !report_deadline_missed(Missed)
+    } else {
+        .wait(5000);
+        !monitor_deadline(Phase, non_urgent, T1)
     }.
+
++!monitor_deadline(_, non_urgent, _) : true <- true.
+
+// Backup: el scheduler retira la creencia antes de que el monitor detecte el incumplimiento
+// (p.ej. el monitor estaba en .wait cuando expiró el plazo)
+-active_deadline(_, urgent, _) : not deadline_checked(urgent) <-
+    .findall(CId,
+        (container_stored_fact(CId, _) &
+         container_received_type(CId, ContType) &
+         urgent_container_type(ContType) &
+         not container_delivered_fact(CId)),
+        Missed);
+    !report_deadline_missed(Missed);
+    -deadline_checked(urgent).
+
+-active_deadline(_, urgent, _) : true <- -deadline_checked(urgent).
+
+-active_deadline(_, non_urgent, _) : not deadline_checked(non_urgent) <-
+    .findall(CId,
+        (container_stored_fact(CId, _) &
+         container_received_type(CId, ContType) &
+         non_urgent_container_type(ContType) &
+         not container_delivered_fact(CId)),
+        Missed);
+    !report_deadline_missed(Missed);
+    -deadline_checked(non_urgent).
+
+-active_deadline(_, non_urgent, _) : true <- -deadline_checked(non_urgent).
 
 +!report_deadline_missed([]) : true <- true.
 +!report_deadline_missed([CId|Rest]) : true <-
