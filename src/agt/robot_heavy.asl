@@ -352,8 +352,12 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .abolish(error(_, _));
     !release_zone(inbound);
     !release_zone(expansion);
-    !navigate(InitX, InitY);
-    -+state(idle).
+    -+state(idle);
+    if (not (container_at_entrance(_, _, Weight, W, H) &
+             (Weight > 30 | W > 1 | H > 2) &
+             Weight <= 100 & W <= 2 & H <= 3)) {
+        !navigate(InitX, InitY)
+    }.
 
 -!check_queue : true <-
     .abolish(error(_, _));
