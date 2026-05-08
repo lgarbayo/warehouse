@@ -1743,6 +1743,30 @@ El supervisor puede ahora consultar el ciclo de vida completo de cada contenedor
 | `container_delivered_fact(CId)` | Contenedor entregado a outbound |
 | `active_deadline(Phase, Cat, T0)` | Deadline activo con T0 en segundos |
 
+### Semana 4 — Criterio de incumplimiento de deadline (`supervisor.asl`)
+
+**Objetivo**: detectar y registrar contenedores que no fueron entregados a outbound antes de que expirara su deadline.
+
+El supervisor reacciona a `-active_deadline` (creencia retirada por el scheduler tras el `.wait` de cada fase) y aplica el criterio explícito:
+
+- **Deadline urgente** (`-active_deadline(_, urgent, T0)`):  
+  `Tnow >= T0 + DT` AND existen contenedores de tipo `urgent` en estantería sin entregar.
+
+- **Deadline no urgente** (`-active_deadline(_, non_urgent, T1)`):  
+  `Tnow >= T1 + 2·DT` AND existen contenedores `standard`/`fragile` en estantería sin entregar.
+
+Por cada contenedor incumplido se emite el evento obligatorio:
+```
+EVENT | time=T | agent=supervisor | type=deadline_missed | data=container_id
+```
+
+La detección usa las creencias acumuladas durante el ciclo:
+- `container_stored_fact(CId, _)` — contenedor estuvo en estantería
+- `container_received_type(CId, Type)` — tipo del contenedor
+- `not container_delivered_fact(CId)` — no fue entregado a outbound
+
+El check `if (Tnow >= Deadline)` hace el criterio explícito aunque en la práctica siempre se cumple al dispararse el trigger (el scheduler retira la creencia justo al expirar el plazo).
+
 ### Fix: Bug 3 — unclaim resetea posición siempre (`WarehouseArtifact.java`)
 
 **Problema**: `executeUnclaimContainer` solo reseteaba la posición del contenedor a la zona de entrada cuando el robot lo llevaba físicamente. Si el contenedor había sido soltado previamente en otro lugar (p. ej., zona de expansión tras `safe_expand_drop` + `unclaim_container`), el percept `container_at_entrance` se emitía pero el contenedor quedaba en la posición incorrecta. Aunque `move_to_container` navega a la posición real del contenedor (evitando fallos de `pickup`), la zona mutex `inbound` se adquiría indebidamente y la semántica del percept era incorrecta.

@@ -41,12 +41,6 @@ General objective
 Implement system control and temporal evaluation, so that the supervisor agent detects and records deadline violations without interfering with the execution of the robots.
 
 Specific objectives
-
-    Adapt the supervisor so that it:
-        knows the initial instant T0,
-        knows the deadlines defined by the scheduler,
-        has access to the current system time,
-        can query the location and status of the containers.
     Define and implement the criterion for deadline violation:
         a violation is considered to occur when the current time exceeds the active deadline and there are pending containers of the corresponding type that have not been delivered to the outbound zone.
     Implement in the supervisor the periodic detection of violations during the outbound cycle.

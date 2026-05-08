@@ -321,6 +321,45 @@ shelf_type("shelf_9", non_urgent).
     .time(H, M, S); Tnow = H * 3600 + M * 60 + S;
     .print("[SUPERVISOR] Deadline recibido: fase=", Phase, " urgencia=", Cat, " T0=", T0, "s | ahora=", Tnow, "s").
 
+// Deadline urgente expirado — verificar incumplimientos
+// Criterio: Tnow >= T0 + DT  AND  existen contenedores urgent en estantería sin entregar
+-active_deadline(_, urgent, T0)[source(scheduler)] : true <-
+    .time(H, M, S); Tnow = H * 3600 + M * 60 + S;
+    ?delta_t(DT);
+    Deadline = T0 + DT;
+    if (Tnow >= Deadline) {
+        .findall(CId,
+            (container_stored_fact(CId, _) &
+             container_received_type(CId, ContType) &
+             urgent_container_type(ContType) &
+             not container_delivered_fact(CId)),
+            Missed);
+        !report_deadline_missed(Missed)
+    }.
+
+// Deadline no urgente expirado — verificar incumplimientos
+// Criterio: Tnow >= T1 + 2·DT  AND  existen contenedores standard/fragile en estantería sin entregar
+-active_deadline(_, non_urgent, T1)[source(scheduler)] : true <-
+    .time(H, M, S); Tnow = H * 3600 + M * 60 + S;
+    ?delta_t(DT);
+    Deadline = T1 + DT * 2;
+    if (Tnow >= Deadline) {
+        .findall(CId,
+            (container_stored_fact(CId, _) &
+             container_received_type(CId, ContType) &
+             non_urgent_container_type(ContType) &
+             not container_delivered_fact(CId)),
+            Missed);
+        !report_deadline_missed(Missed)
+    }.
+
++!report_deadline_missed([]) : true <- true.
++!report_deadline_missed([CId|Rest]) : true <-
+    .time(H, M, S); T = H * 3600 + M * 60 + S;
+    .print("EVENT | time=", T, " | agent=supervisor | type=deadline_missed | data=", CId);
+    !report_deadline_missed(Rest).
+-!report_deadline_missed(_) : true <- true.
+
 +container_delivered(CId)[source(Robot)] : not container_delivered_fact(CId) <-
     +container_delivered_fact(CId).
 
