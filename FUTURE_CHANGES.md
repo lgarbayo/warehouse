@@ -7,60 +7,65 @@ Distributed coordination among robots to organize themselves autonomously and ef
 
 ## Known Bugs — Iteration 2
 
-### 1. Supervisor stats undercount (claim race condition)
-`claim_container` removes the `container_at_entrance` percept atomically. If a robot claims and removes the percept before the supervisor's perception cycle runs, the supervisor never fires `+container_at_entrance` and never increments `total_received`. Result: supervisor final report underreports total containers processed.
-**Fix direction**: supervisor should track arrivals via a dedicated broadcast belief (`container_received(CId)`) sent by the robot that successfully claims, rather than relying on percept observation.
+### 6. Error handler / plan hierarchy tension — desincronización Java-Jason
 
-### 2. execute_exit partial failure — container lost in transit
-If `pickup_from_shelf` succeeds but the subsequent navigate to the outbound zone fails (e.g. nav_timeout), the `-!execute_exit` failure handler only calls `!check_queue`. The container has been physically removed from the shelf (Java state updated) but never delivered to OUTBOUND — it is effectively lost (not on shelf, not at outbound, not at entrance).
-**Fix direction**: the failure handler must either return the container to the shelf (`drop_on_shelf(ShelfId)`) or re-emit a `container_at_entrance` percept so another robot can claim it.
+**Causa raíz**: Java y Jason mantienen estados independientes que pueden desincronizarse. El estado físico (`robot.isCarrying()`, posición) solo cambia con acciones Java explícitas (`pickup`, `drop`, `move_step`). Las creencias Jason (`carrying(CId)`, `state(idle)`) las actualiza el agente manualmente. Los handlers reactivos de error solo tocan creencias Jason, sin acción Java correspondiente:
 
-### 3. unclaim force-drop leaves container at wrong grid position
-`executeUnclaimContainer` in `WarehouseArtifact.java` now calls `robot.drop()` + `container.setPicked(false)` when the robot physically holds the container being unclaimed. This frees the robot for future pickups, but the container's grid coordinates remain at the robot's current position (wherever it got stuck), not at the entrance. The re-emitted `container_at_entrance` percept is logically correct but the physical position is inconsistent — if another robot navigates to the entrance to pick it up, the Java-side `pickup()` may fail because the container is not actually at entrance coordinates.
-**Fix direction**: after `robot.drop()`, reset the container's position to its original entrance cell before re-adding the percept.
+```agentspeak
++error(path_blocked, Data) : true <-
+    .send(supervisor, tell, robot_error(Me, path_blocked, Data));
+    -+state(idle); -+carrying(none).   // solo Jason — robot.isCarrying() sigue true en Java
+```
 
-### ~~4. askOne suspension window in check_exit_cycle~~ ✅ Resuelto en iteración 3
-~~`!check_exit_cycle` uses `.send(scheduler, askOne, active_deadline, ...)` which suspends the current intention~~
+**Síntoma documentado originalmente (Bug 6)**: cuando `path_blocked` ocurre tras un pickup exitoso, el handler reactivo resetea `carrying(none)` en Jason. Después `-!execute_task` también corre y llama `unclaim_container`/`release_task`. Dos rutas de cleanup sobre el mismo estado → riesgo de doble-cleanup o cleanup incompleto.
 
-**Fix aplicado**: `run_exit_cycle` hace broadcast `tell/untell active_deadline` a todos los robots al inicio/fin de cada deadline. `!check_exit_cycle` consulta la creencia local sin round-trip. Ventana de suspensión eliminada.
+**Dependencia implícita con el fix de Bug 2**: la corrección de Bug 2 asume que cuando `-!return_to_shelf` falla, el robot sigue llevando físicamente el contenedor en Java (`robot.isCarrying() = true`), lo que permite que `unclaim_container` haga el drop y el reset de posición. Esto es verdad mientras los handlers reactivos no añadan una acción Java de drop. Si en el futuro alguien "arregla" el handler añadiendo `drop_item` o similar, el fix de Bug 2 dejaría de funcionar correctamente.
 
-### 5. nav_abort_signal — fragile failure propagation in navigate
-The navigation timeout path in `!navigate` relies on `?nav_abort_signal` — a belief query that is expected to fail — as a mechanism to propagate navigation failure out of a nested intention. This is a fragile hack: if a belief named `nav_abort_signal` is accidentally added elsewhere, the abort silently stops triggering. The mechanism also makes the control flow hard to follow.
-**Fix direction**: use a proper internal goal `!abort_navigation(CId)` with a dedicated failure plan, or raise a named exception via `.throw` / Jason's internal action mechanism.
-
-### 6. Error handler / plan hierarchy tension for path_blocked-after-pickup
-When `path_blocked` fires after a successful pickup, the error handler immediately resets `state(idle)` and `carrying(none)` in Jason beliefs. This happens outside the normal plan hierarchy — the `-!execute_task` failure plan then runs and checks `nav_failed(CId)` to decide whether to also call `release_task`/`unclaim_container`. The split handler partially addresses this, but the architectural tension remains: reactive error handlers and declarative failure plans both modify overlapping state, making it easy for future changes to reintroduce double-cleanup or missed-cleanup bugs.
-**Fix direction**: consolidate all post-failure cleanup into a single `!handle_task_failure(CId, Reason)` plan called from both the error handler and the `-!execute_task` plan, with the reason parameter controlling which cleanup steps run.
+**Fix direction**: consolidar todo el cleanup post-fallo en un único plan `!handle_task_failure(CId, Reason)` llamado tanto desde los handlers reactivos como desde `-!execute_task`, con el parámetro `Reason` controlando qué pasos de cleanup ejecutar. El plan debe ser la única autoridad sobre qué acciones Java y qué creencias Jason se limpian, eliminando la dependencia de la desincronización.
 
 ---
 
 > [!NOTE]
-> Nota: cambiar light por L, medium por M, heavy por H, heavy por H2??
->
 > Nota: cambiar zonas hardcodeadas?
-
-> ~~**Problema con el backoff: Backoff vertical de dos pasos — robot puede quedar en posición intermedia**~~ ✅ Resuelto iteración 3
->
-> **Fix aplicado**: `!path_backoff` reemplazado por un único `move_step` perpendicular a la dirección de avance (Y puro). Ya no hay riesgo de posición intermedia. Además, el tiempo de espera en `step_with_retry` es ahora aleatorio (300–1500 ms) para romper la sincronización entre robots y evitar oscilaciones head-on.
-
-> [!WARNING]
-> **REVISAR LO IMPLEMENTADO EN EL OUTBOUND**
-> **Inbound: el scheduler sigue asignando tareas y robots**
->
-> El objetivo de la 2ª semana exige que el scheduler "no asigne tareas ni robots". En el ciclo
-> outbound esto se cumple: el scheduler hace broadcast de `outbound_available` a todos los robots
-> y cada uno decide autónomamente según sus capacidades.
->
-> En el ciclo **inbound** no se cumple: el planificador formal genera `assign(Robot, CId, ShelfId)`
-> y el scheduler responde a cada `request_task` con `ready_task(Robot, CId, ShelfId)` — asignación
-> robot-específica. El robot que pide trabajo recibe exactamente la tarea que el scheduler ha
-> decidido para él, sin autonomía de decisión.
->
-> **Pendiente:** adaptar el inbound para que el scheduler anuncie contenedores pendientes
-> (`task_available(CId, ShelfId, W, H, Weight)`) a todos los robots y cada uno decida si lo toma,
-> igual que en el outbound. El planificador puede seguir existiendo para decidir *a qué estantería*
-> va cada contenedor — lo que debe eliminarse es la asignación del robot concreto.
 
 > [!WARNING]
 >
 > Revisar bugs de movimiento cuando se dejan robots en la zona de clasification
+
+---
+
+Week Goals
+
+General objective
+
+Implement system control and temporal evaluation, so that the supervisor agent detects and records deadline violations without interfering with the execution of the robots.
+
+Specific objectives
+
+    Adapt the supervisor so that it:
+        knows the initial instant T0,
+        knows the deadlines defined by the scheduler,
+        has access to the current system time,
+        can query the location and status of the containers.
+    Define and implement the criterion for deadline violation:
+        a violation is considered to occur when the current time exceeds the active deadline and there are pending containers of the corresponding type that have not been delivered to the outbound zone.
+    Implement in the supervisor the periodic detection of violations during the outbound cycle.
+    Record a deadline error for each container that has not been delivered on time.
+    Ensure that the detection and logging of errors:
+        does not stop system execution,
+        does not cancel ongoing robot tasks,
+        does not modify the environment or the decision-making process of the robot agents.
+
+Expected outcome
+
+By the end of Week 4, the system should:
+
+    correctly execute the outbound cycle with deadlines,
+    allow robots to operate autonomously,
+    consistently record temporal violations,
+    maintain stability and continuous execution.
+
+Mandatory logging
+
+    When the supervisor detects that a container has not been delivered within the active deadline, an event must be displayed for each missed container:
+    EVENT | time=T | agent=supervisor | type=deadline_missed | data=container_id

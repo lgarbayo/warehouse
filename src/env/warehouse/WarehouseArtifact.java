@@ -122,12 +122,6 @@ public class WarehouseArtifact extends Environment {
             }
         }
 
-        // Zona de salida (outbound) — lado opuesto a la entrada (x=17-19, y=0-1)
-        for (int x = 17; x < GRID_WIDTH; x++) {
-            for (int y = 0; y < 2; y++) {
-                grid[x][y] = CellType.OUTBOUND;
-            }
-        }
     }
 
     /**
@@ -135,28 +129,28 @@ public class WarehouseArtifact extends Environment {
      */
     private void initializeRobots() {
         Robot light = new Robot("robot_light", "light", 10, 1, 1, 3);
-        light.setPosition(1, 5);
+        light.setPosition(1, 3);
         robots.put("robot_light", light);
 
         Robot medium = new Robot("robot_medium", "medium", 30, 1, 2, 2);
-        medium.setPosition(1, 7);
+        medium.setPosition(2, 3);
         robots.put("robot_medium", medium);
 
         Robot heavy = new Robot("robot_heavy", "heavy", 100, 2, 3, 1);
-        heavy.setPosition(1, 12);
+        heavy.setPosition(3, 3);
         robots.put("robot_heavy", heavy);
 
         Robot heavy2 = new Robot("robot_heavy2", "heavy", 100, 2, 3, 1);
-        heavy2.setPosition(1, 9);
+        heavy2.setPosition(4, 3);
         robots.put("robot_heavy2", heavy2);
 
         // Emitir posición inicial de cada robot para que sus planes de navegación
         // tengan robot_pos disponible desde el primer ciclo.
         try {
-            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,5)"));
-            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(1,7)"));
-            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(1,12)"));
-            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(1,9)"));
+            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,3)"));
+            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(2,3)"));
+            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(3,3)"));
+            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(4,3)"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }
@@ -244,6 +238,10 @@ public class WarehouseArtifact extends Environment {
                         "container_at_entrance(\"" + container.getId() + "\",\"" +
                         container.getType() + "\"," + container.getWeight() + "," +
                         container.getWidth() + "," + container.getHeight() + ")"));
+
+                    // Notificar al scheduler para activar el planificador formal
+                    addPercept("scheduler", ASSyntax.parseLiteral(
+                        "new_container(\"" + container.getId() + "\")"));
 
                     if (view != null) {
                         view.update();
@@ -918,7 +916,10 @@ public class WarehouseArtifact extends Environment {
             if (container == null || container.isBroken()) return false;
 
             String prev = claimedContainers.putIfAbsent(containerId, agName);
-            if (prev != null) return false;  // ya reclamado
+            if (prev != null) {
+                System.err.println("[CLAIM FAIL] " + agName + " no pudo reclamar " + containerId + " — ya reclamado por: " + prev);
+                return false;
+            }
 
             removePerceptsByUnif(ASSyntax.parseLiteral(
                 "container_at_entrance(\"" + containerId + "\",_,_,_,_)"));
@@ -932,6 +933,21 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
+     * Devuelve una celda libre de la zona ENTRANCE, o (5,0) como fallback.
+     */
+    private int[] findFreeEntranceCell() {
+        List<int[]> cells = new ArrayList<>();
+        for (int x = 0; x < GRID_WIDTH; x++) {
+            for (int y = 0; y < GRID_HEIGHT; y++) {
+                if (grid[x][y] == CellType.ENTRANCE && !hayContenedorEn(x, y)) {
+                    cells.add(new int[]{x, y});
+                }
+            }
+        }
+        return cells.isEmpty() ? new int[]{5, 0} : cells.get(0);
+    }
+
+    /**
      * Acción: unclaim_container(ContainerId)
      * Libera el reclamo y re-emite container_at_entrance para otros robots.
      */
@@ -940,8 +956,7 @@ public class WarehouseArtifact extends Environment {
             String containerId = action.getTerm(0).toString().replace("\"", "");
             claimedContainers.remove(containerId);
 
-            // If the robot is physically carrying this container (e.g. after path_blocked),
-            // force-drop it so the robot can accept new tasks.
+            // If the robot is physically carrying this container, force-drop it first.
             Robot robot = robots.get(agName);
             if (robot != null && robot.isCarrying()) {
                 Container carried = robot.getCarriedContainer();
@@ -953,6 +968,11 @@ public class WarehouseArtifact extends Environment {
 
             Container container = containers.get(containerId);
             if (container == null || container.isBroken()) return true;
+
+            // Always reset to a free entrance cell regardless of where the container
+            // ended up (robot position, expansion zone, etc.).
+            int[] cell = findFreeEntranceCell();
+            container.setPosition(cell[0], cell[1]);
 
             addPercept(ASSyntax.parseLiteral(
                 "container_at_entrance(\"" + containerId + "\",\"" + container.getType() + "\"," +

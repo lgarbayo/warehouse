@@ -19,7 +19,7 @@
  * ============================================================================ */
 
 state(idle).
-position(1,7).
+position(2,3).
 carrying(none).
 nav_limit(300).
 
@@ -45,69 +45,40 @@ nav_limit(300).
 
 /* ============================================================================
  * RECLAMACIÓN AUTÓNOMA DE CONTENEDORES
- * Robot medio: contenedores que no son del rango exclusivo del ligero
- * (Weight > 10 OR H > 1), hasta 30kg y 1x2.
  * ============================================================================ */
 
-+container_at_entrance(CId, Type, Weight, W, H) : nav_failed(CId) <- true.
-
+// Robot medio: Weight>10 OR H>1, hasta 30kg y 1x2
 +container_at_entrance(CId, Type, Weight, W, H) :
-    state(idle) & Weight <= 30 & W <= 1 & H <= 2 & Weight > 10 <-
+    state(idle) & not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) &
+    Weight > 10 & Weight <= 30 & W <= 1 & H <= 2 <-
     !try_claim(CId, Type, Weight, W, H).
 
 +container_at_entrance(CId, Type, Weight, W, H) :
-    state(idle) & Weight <= 30 & W <= 1 & H <= 2 & H > 1 <-
+    state(idle) & not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) &
+    H > 1 & Weight <= 30 & W <= 1 & H <= 2 <-
     !try_claim(CId, Type, Weight, W, H).
 
-+container_at_entrance(CId, Type, Weight, W, H) : true <- true.
++container_at_entrance(_, _, _, _, _) : true <- true.
 
--container_at_entrance(CId, Type, Weight, W, H) : nav_failed(CId) <- true.
+-container_at_entrance(CId, _, _, _, _) : nav_failed(CId) <- -nav_failed(CId).
 
 +nav_failed(CId) <- .wait(20000); -nav_failed(CId).
 
-+!try_claim(CId, Type, Weight, W, H) : state(idle) <-
-    claim_container(CId);
-    +claimed_type(CId, Type);
-    accept_task(CId);
-    -+state(working);
-    -+carrying(CId);
-    !select_shelf_and_execute(CId, Weight, W, H).
-
--!try_claim(CId, Type, Weight, W, H) : true <- true.
-
 +!check_pending_containers :
     container_at_entrance(CId, Type, Weight, W, H) &
-    Weight <= 30 & W <= 1 & H <= 2 & Weight > 10 &
-    not nav_failed(CId) <-
+    Weight > 10 & Weight <= 30 & W <= 1 & H <= 2 &
+    not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) <-
     !try_claim(CId, Type, Weight, W, H).
 
 +!check_pending_containers :
     container_at_entrance(CId, Type, Weight, W, H) &
-    Weight <= 30 & W <= 1 & H <= 2 & H > 1 &
-    not nav_failed(CId) <-
+    H > 1 & Weight <= 30 & W <= 1 & H <= 2 &
+    not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) <-
     !try_claim(CId, Type, Weight, W, H).
 
 +!check_pending_containers : true <- true.
 -!check_pending_containers : true <- true.
 
-/* ============================================================================
- * SELECCIÓN DE ESTANTERÍA Y EJECUCIÓN
- * ============================================================================ */
-
-+!select_shelf_and_execute(CId, Weight, W, H) : true <-
-    !pick_shelf(CId, Weight, W, H);
-    ?shelf_selected(CId, ShelfId);
-    .abolish(shelf_selected(CId, _));
-    .abolish(shelf_retries_count(CId, _));
-    !execute_task(CId, ShelfId).
-
--!select_shelf_and_execute(CId, Weight, W, H) : true <-
-    .print("⚠️ [MEDIUM] Falló selección de estantería para ", CId);
-    .abolish(claimed_type(CId, _));
-    unclaim_container(CId);
-    release_task(CId);
-    -+carrying(none);
-    !check_queue.
 
 /* ============================================================================
  * EJECUCIÓN DE TAREA
@@ -279,11 +250,12 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .print("EVENT | time=",T_ex," | agent=robot_medium | type=expansion_drop_final | data=",CId,",",ShelfId);
     .abolish(expansion_count(CId, _));
     .abolish(expansion_failed_shelf(CId, _));
-    .abolish(claimed_type(CId, _));
+    +shelf_wait(CId);
     -+carrying(none);
-    discard_container(CId);
-    release_task;
+    unclaim_container(CId);
+    release_task(CId);
     .send(supervisor, tell, container_error(CId, no_shelf_space));
+    .send(scheduler, tell, task_failed(CId));
     !safe_return;
     !check_queue.
 
@@ -302,9 +274,10 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     -+carrying(none);
     .time(H_ex,M_ex,S_ex); T_ex=H_ex*3600+M_ex*60+S_ex;
     .print("EVENT | time=",T_ex," | agent=robot_medium | type=expansion_drop | data=",CId,",",ShelfId);
+    unclaim_container(CId);
     release_task(CId);
     !safe_return;
-    unclaim_container(CId);
+    .send(scheduler, tell, container_in_expansion(CId));
     !check_queue.
 
 -!execute_task(CId, ShelfId) : not carrying(CId) & nav_failed(CId) <-
@@ -313,8 +286,8 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     !check_queue.
 
 -!execute_task(CId, ShelfId) : not carrying(CId) <-
-    release_task(CId);
     unclaim_container(CId);
+    release_task(CId);
     .send(scheduler, tell, task_failed(CId));
     .wait(2000);
     !safe_return;
@@ -323,8 +296,8 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 -!execute_task(CId, ShelfId) : true <-
     .print("⚠️ [MEDIUM] Fallo en execute_task para ", CId);
     -+carrying(none);
-    release_task(CId);
     unclaim_container(CId);
+    release_task(CId);
     .time(H_tf,M_tf,S_tf); T_tf=H_tf*3600+M_tf*60+S_tf;
     .print("EVENT | time=",T_tf," | agent=robot_medium | type=task_failed | data=",CId,",",ShelfId);
     .send(scheduler, tell, task_failed(CId));
@@ -332,9 +305,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     !safe_return;
     !check_queue.
 
-+!safe_return : position(InitX, InitY) <- 
-    -nav_limit(_); +nav_limit(300);
-    !navigate(InitX, InitY).
++!safe_return : position(InitX, InitY) <- !navigate(InitX, InitY).
 -!safe_return : true <- true.
 
 +!get_to_container(CId, N) : N > 0 <-
@@ -346,8 +317,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .abolish(error(container_not_found, _));
     .print("⚠️ [MEDIUM] Contenedor ", CId, " no existe. Descartando.");
     -+carrying(none);
-    discard_container(CId);
-    release_task;
+    release_task(CId);
     .send(scheduler, tell, task_failed(CId));
     .fail.
 
@@ -362,21 +332,22 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     -+carrying(none);
     release_task(CId);
     +nav_failed(CId);
-    unclaim_container(CId);
     .time(H_nf,M_nf,S_nf); T_nf=H_nf*3600+M_nf*60+S_nf;
     .print("EVENT | time=",T_nf," | agent=robot_medium | type=nav_failed | data=",CId);
     .send(scheduler, tell, task_failed(CId));
     .fail.
 
-+!check_queue : true <-
++!check_queue : position(InitX, InitY) <-
     .abolish(error(_, _));
     !release_zone(inbound);
     !release_zone(expansion);
-    !safe_return;
+    !navigate(InitX, InitY);
     -+state(idle).
 
 -!check_queue : true <-
     .abolish(error(_, _));
+    !release_zone(inbound);
+    !release_zone(expansion);
     -+state(idle).
 
 /* ============================================================================
@@ -396,12 +367,6 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 +!check_exit_cycle : active_deadline(_, Category, _) <-
     .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
     !select_for_exit(Candidates, Category).
-
-+!check_exit_cycle : not active_deadline(_, _, _) & shelf_category(SId, medium) & shelf_occupancy(SId, Occ) & Occ >= 85 &
-                     stored(CId, SId) & claimed_type(CId, _) <-
-    .findall(pair(C, S), (stored(C, S) & shelf_category(S, medium) & not exit_claimed(C) & claimed_type(C, _)), Candidates);
-    !select_for_exit(Candidates, non_urgent);
-    !select_for_exit(Candidates, urgent).
 
 +!check_exit_cycle : true <- true.
 
@@ -466,7 +431,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     drop_at(ShelfId).
 
 -!return_to_shelf(CId, _) <-
-    !safe_expand_drop(CId);
+    unclaim_container(CId);
     .abolish(stored(CId, _));
     .abolish(claimed_type(CId, _)).
 
@@ -493,6 +458,14 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 +state(working) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_state_change(Me, working)).
+
++state(idle) : task(CId, ShelfId) <-
+    .print("✅ [MEDIUM] Tarea pendiente al quedar idle: ", CId, " → ", ShelfId);
+    -task(CId, ShelfId)[source(scheduler)];
+    accept_task(CId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_task(CId, ShelfId).
 
 +state(idle) : true <-
     .my_name(Me);
@@ -558,4 +531,5 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .print("✓ [MEDIUM] ", CId, " almacenado en ", ShelfId);
     .time(H_st,M_st,S_st); T_st=H_st*3600+M_st*60+S_st;
     .print("EVENT | time=",T_st," | agent=robot_medium | type=stored | data=",CId,",",ShelfId);
+    .send(scheduler, tell, container_stored(CId, ShelfId));
     .send(supervisor, tell, container_stored(CId, ShelfId)).

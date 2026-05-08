@@ -190,7 +190,20 @@ shelf_type("shelf_9", non_urgent).
  * MONITORIZACIÓN - Contenedores recibidos
  * ============================================================================ */
 
-// container_at_entrance es global: el supervisor lo percibe directamente del entorno
+// Ruta principal: el robot notifica tras reclamar exitosamente (evita race condition
+// donde claim_container retira container_at_entrance antes de que el supervisor perciba).
++container_claimed(CId, Type, Weight)[source(Robot)] : not container_received(CId) <-
+    +container_received(CId);
+    +container_received_type(CId, Type);
+    .count(container_received(_), N);
+    -total_received(_);
+    +total_received(N);
+    !update_rates;
+    .print("[SUPERVISOR] Nuevo contenedor: ", CId, " (", Type, ", ", Weight, "kg) | Total: ", N).
+
++container_claimed(CId, Type, Weight)[source(Robot)] : true <- true.
+
+// Ruta de fallback: si el percept llega antes del mensaje del robot.
 +container_at_entrance(CId, Type, Weight, W, H) : not container_received(CId) <-
     +container_received(CId);
     +container_received_type(CId, Type);
@@ -224,14 +237,17 @@ shelf_type("shelf_9", non_urgent).
  * ============================================================================ */
 
 +container_error(CId, ErrorType)[source(Robot)] : true <-
-    +error_occurred(CId, ErrorType);
-    .count(error_occurred(_,_), CE);
-    .count(navigation_error_occurred(_,_,_), NE);
-    N = CE + NE;
-    -total_errors(_);
-    +total_errors(N);
-    !update_rates;
-    .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot, " | Total errores: ", N);
+    .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot);
+    if (not error_occurred(CId, ErrorType)) {
+        +error_occurred(CId, ErrorType);
+        .count(error_occurred(_,_), CE);
+        .count(navigation_error_occurred(_,_,_), NE);
+        N = CE + NE;
+        -total_errors(_);
+        +total_errors(N);
+        !update_rates;
+        .print("[SUPERVISOR] Total errores: ", N);
+    };
     !maybe_notify_storage_full(CId, ErrorType).
 
 /* ============================================================================
@@ -271,18 +287,21 @@ shelf_type("shelf_9", non_urgent).
     .findall(S, (shelf_type(S, Type) & shelf_available(S)), Available);
     if (Available == []) {
         +no_space_notified(Type);
-        .time(H, M, S);
-        .print("EVENT | time=", H, ":", M, ":", S, " | agent=supervisor | type=no_space_detected | data=", Type);
+        .time(H, M, S); T = H * 3600 + M * 60 + S;
+        .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=", Type);
         .send(scheduler, tell, no_shelf_space(Type));
     }.
 
 // Ignorar retirada de percepciones de estanterías ya notificadas
 -shelf_available(_) : true <- true.
 
-// Cuando se libera espacio (robot retiró contenedor de estantería), resetear
-// no_space_notified para que el ciclo de saturación pueda dispararse de nuevo.
+// Cuando se libera espacio, resetear ambos flags para que los ciclos puedan
+// dispararse de nuevo en una futura saturación.
 +shelf_available(ShelfId) : shelf_type(ShelfId, Type) & no_space_notified(Type) <-
     -no_space_notified(Type).
+
++shelf_available(ShelfId) : shelf_type(ShelfId, Type) & storage_saturated(Type) <-
+    -storage_saturated(Type).
 
 +shelf_available(_) : true <- true.
 
