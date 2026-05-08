@@ -39,6 +39,9 @@ errors_by_type(container_broken, 0).
 errors_by_type(shelf_full, 0).
 errors_by_type(no_shelf_space, 0).
 
+/* Errores de deadline */
+errors_by_type(deadline_missed, 0).
+
 /* Errores de estado inconsistente (executeDropAt / executePickup) */
 errors_by_type(not_carrying, 0).
 errors_by_type(invalid_pickup, 0).
@@ -395,6 +398,15 @@ shelf_type("shelf_9", non_urgent).
 +!report_deadline_missed([CId|Rest]) : true <-
     .time(H, M, S); T = H * 3600 + M * 60 + S;
     .print("EVENT | time=", T, " | agent=supervisor | type=deadline_missed | data=", CId);
+    if (not error_occurred(CId, deadline_missed)) {
+        +error_occurred(CId, deadline_missed);
+        .count(error_occurred(_, _), CE);
+        .count(navigation_error_occurred(_, _, _), NE);
+        N = CE + NE;
+        -total_errors(_);
+        +total_errors(N);
+        !update_rates
+    };
     !report_deadline_missed(Rest).
 -!report_deadline_missed(_) : true <- true.
 

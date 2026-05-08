@@ -1794,6 +1794,21 @@ El check `if (Tnow >= Deadline)` hace el criterio explícito aunque en la práct
 
 El flag `deadline_checked(Cat)` garantiza que los eventos `deadline_missed` se emiten exactamente una vez por fase, independientemente de qué mecanismo actúe primero.
 
+### Semana 4 — Registro de errores de deadline en estadísticas (`supervisor.asl`)
+
+**Objetivo**: cada contenedor que incumple su deadline queda registrado en el sistema de estadísticas del supervisor, igual que cualquier otro error de contenedor.
+
+- **Creencia inicial**: añadido `errors_by_type(deadline_missed, 0)`. El reporte periódico (`!print_errors_by_type`) ya itera `errors_by_type`, por lo que `deadline_missed` aparece automáticamente en el resumen de estadísticas.
+
+- **`+!report_deadline_missed`**: por cada contenedor incumplido, si no existe ya `error_occurred(CId, deadline_missed)`, se añade la creencia, se recalculan `total_errors` y las tasas derivadas (`!update_rates`). El guard `not error_occurred` previene doble conteo si el mismo contenedor aparece en ambas fases del ciclo.
+
+El reporte periódico mostrará:
+```
+Errores por tipo:
+  deadline_missed: N
+  no_shelf_space: M
+```
+
 ### Fix: Bug 3 — unclaim resetea posición siempre (`WarehouseArtifact.java`)
 
 **Problema**: `executeUnclaimContainer` solo reseteaba la posición del contenedor a la zona de entrada cuando el robot lo llevaba físicamente. Si el contenedor había sido soltado previamente en otro lugar (p. ej., zona de expansión tras `safe_expand_drop` + `unclaim_container`), el percept `container_at_entrance` se emitía pero el contenedor quedaba en la posición incorrecta. Aunque `move_to_container` navega a la posición real del contenedor (evitando fallos de `pickup`), la zona mutex `inbound` se adquiría indebidamente y la semántica del percept era incorrecta.

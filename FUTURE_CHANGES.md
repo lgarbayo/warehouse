@@ -42,8 +42,6 @@ Implement system control and temporal evaluation, so that the supervisor agent d
 
 Specific objectives
 
-    Implement in the supervisor the periodic detection of violations during the outbound cycle.
-    Record a deadline error for each container that has not been delivered on time.
     Ensure that the detection and logging of errors:
         does not stop system execution,
         does not cancel ongoing robot tasks,
