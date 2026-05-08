@@ -1809,6 +1809,18 @@ Errores por tipo:
   no_shelf_space: M
 ```
 
+### Semana 4 — No interferencia: detección de deadlines aislada del sistema (`supervisor.asl`)
+
+La detección y registro de incumplimientos de deadline cumple las tres propiedades de no interferencia por construcción:
+
+| Propiedad | Garantía |
+|---|---|
+| **No detiene la ejecución** | El monitor corre como intención separada con `.wait(5000)`. Se añadieron handlers de fallo `-!monitor_deadline(_, _, _) : true <- true` para ambas variantes (urgent/non_urgent): si el cuerpo del monitor falla internamente (p.ej. `?delta_t(DT)` no encuentra la creencia, o `.findall` lanza excepción), Jason propagaría el fallo hacia `+active_deadline` que lo lanzó con `!monitor_deadline(...)`, pudiendo afectar la intención del supervisor. El handler absorbe el fallo silenciosamente. Idem `-!report_deadline_missed : true <- true`. |
+| **No cancela tareas de robots** | El supervisor no envía ningún mensaje a los robots desde el código de deadline. No invoca `unclaim_container`, `release_task` ni ninguna acción que afecte al ciclo de trabajo de los robots. |
+| **No modifica el entorno ni decisiones** | No se llama ninguna acción Java. Las creencias `error_occurred(CId, deadline_missed)` y `deadline_checked(Cat)` son internas al supervisor. Los robots no perciben ni reciben nada de esta lógica. |
+
+Las propiedades son estructurales — no requieren validación en tiempo de ejecución porque no existe ningún mecanismo de interferencia en el código.
+
 ### Fix: Bug 3 — unclaim resetea posición siempre (`WarehouseArtifact.java`)
 
 **Problema**: `executeUnclaimContainer` solo reseteaba la posición del contenedor a la zona de entrada cuando el robot lo llevaba físicamente. Si el contenedor había sido soltado previamente en otro lugar (p. ej., zona de expansión tras `safe_expand_drop` + `unclaim_container`), el percept `container_at_entrance` se emitía pero el contenedor quedaba en la posición incorrecta. Aunque `move_to_container` navega a la posición real del contenedor (evitando fallos de `pickup`), la zona mutex `inbound` se adquiría indebidamente y la semántica del percept era incorrecta.

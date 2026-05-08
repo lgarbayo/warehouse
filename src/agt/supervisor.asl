@@ -346,6 +346,7 @@ shelf_type("shelf_9", non_urgent).
     }.
 
 +!monitor_deadline(_, urgent, _) : true <- true.
+-!monitor_deadline(_, urgent, _) : true <- true.
 
 // Monitor periódico — deadline no urgente (comprueba cada 5s)
 +!monitor_deadline(Phase, non_urgent, T1) :
@@ -367,6 +368,7 @@ shelf_type("shelf_9", non_urgent).
     }.
 
 +!monitor_deadline(_, non_urgent, _) : true <- true.
+-!monitor_deadline(_, non_urgent, _) : true <- true.
 
 // Backup: el scheduler retira la creencia antes de que el monitor detecte el incumplimiento
 // (p.ej. el monitor estaba en .wait cuando expiró el plazo)
