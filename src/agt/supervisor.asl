@@ -300,17 +300,52 @@ shelf_type("shelf_9", non_urgent).
  * no_space_notified(Type) evita emitir el evento más de una vez por tipo.
  * ============================================================================ */
 
--shelf_available(ShelfId) : shelf_type(ShelfId, Type) & not no_space_notified(Type) <-
-    .findall(S, (shelf_type(S, Type) & shelf_available(S)), Available);
+// Secondary path: el entorno retira shelf_available cuando una estantería se llena.
+// Si no queda ninguna estantería del mismo tipo de urgencia, notificar al scheduler
+// con el string de tipo correcto (no el átomo de urgencia que devuelve shelf_type).
+// Separado en dos planes para mapear urgent→"urgent" y non_urgent→tipos almacenados.
+-shelf_available(ShelfId) : shelf_type(ShelfId, urgent) & not no_space_notified(urgent) <-
+    .findall(S, (shelf_type(S, urgent) & shelf_available(S)), Available);
     if (Available == []) {
-        +no_space_notified(Type);
+        +no_space_notified(urgent);
         .time(H, M, S); T = H * 3600 + M * 60 + S;
-        .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=", Type);
-        .send(scheduler, tell, no_shelf_space(Type));
+        .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=urgent");
+        .send(scheduler, tell, storage_full("urgent", T))
+    }.
+
+// Para non_urgent: buscar exactamente qué tipos de container están almacenados en
+// estanterías non_urgent para notificar solo los necesarios. Fallback a ambos tipos
+// si no hay containers stored aún (arranque del sistema o edge case).
+-shelf_available(ShelfId) : shelf_type(ShelfId, non_urgent) & not no_space_notified(non_urgent) <-
+    .findall(S, (shelf_type(S, non_urgent) & shelf_available(S)), Available);
+    if (Available == []) {
+        +no_space_notified(non_urgent);
+        .time(H, M, S); T = H * 3600 + M * 60 + S;
+        .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=non_urgent");
+        .findall(CType,
+            (container_stored_fact(_, SId) & shelf_type(SId, non_urgent) &
+             container_received_type(CId2, CType) & container_stored_fact(CId2, SId) &
+             non_urgent_container_type(CType)),
+            Types);
+        if (Types == []) {
+            // Fallback: sin información de tipos almacenados, notificar todos los non_urgent
+            .send(scheduler, tell, storage_full("standard", T));
+            .send(scheduler, tell, storage_full("fragile", T))
+        } else {
+            !notify_unique_types(Types, T, [])
+        }
     }.
 
 // Ignorar retirada de percepciones de estanterías ya notificadas
 -shelf_available(_) : true <- true.
+
+// Notifica cada tipo de la lista exactamente una vez (deduplicación sin .list.to.set)
++!notify_unique_types([], _, _) : true <- true.
++!notify_unique_types([Type|Rest], T0, Seen) : .member(Type, Seen) <-
+    !notify_unique_types(Rest, T0, Seen).
++!notify_unique_types([Type|Rest], T0, Seen) : true <-
+    .send(scheduler, tell, storage_full(Type, T0));
+    !notify_unique_types(Rest, T0, [Type|Seen]).
 
 // Cuando se libera espacio, resetear ambos flags para que los ciclos puedan
 // dispararse de nuevo en una futura saturación.

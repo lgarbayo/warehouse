@@ -1547,3 +1547,24 @@ Los robots pesados empiezan a evacuar shelf_9 inmediatamente cuando standard sat
 **Problema**: `move_to_outbound` seleccionaba celdas outbound libres de containers (`!hayContenedorEn`) pero no comprobaba si había un robot parado en esa celda. Un robot idle en outbound tras entregar su container bloqueaba la celda físicamente. Otro robot navegaba hacia esa celda como target, fallaba `drop_in_outbound`, y el handler genérico reseteaba `state(idle)` + `carrying(none)` en Jason mientras Java seguía viendo al robot portando el container → Bug 6 desync.
 
 **Solución**: añadir `!hayRobotCerca(x, y)` a la condición de selección de celda. El método ya existía en el código. Una línea cambiada.
+
+### Limitación identificada: desbordamiento de zona de entrada durante ciclos largos (`WarehouseArtifact.java`)
+
+Cuando el ciclo de salida bloquea un tipo de container durante 2·ΔT (240s) y la generación de containers es continua, la zona de entrada (6 celdas, x=5-7, y=0-1) puede recibir más containers de los que puede alojar físicamente. El fallback de Java (`container.setPosition(5,0)`) apila todos los excedentes en la misma celda — `hayContenedorEn` solo detecta uno por celda, por lo que los demás quedan invisibles para los robots o se solapan físicamente.
+
+No se corrige porque el problema está en el diseño del generador del entorno Java, fuera del alcance de la lógica de agentes. Los robots, supervisor y scheduler funcionan correctamente — el tipo está bloqueado, los robots no intentan guardar containers bloqueados. La pérdida ocurre en la capa de percepción del entorno. Documentado como limitación de diseño del enunciado.
+
+### Fix: secondary path de detección de saturación corregido (`supervisor.asl`)
+
+**Problema**: el plan `-shelf_available(ShelfId)` usaba `shelf_type(ShelfId, Type)` que devuelve átomos de urgencia (`urgent`/`non_urgent`), pero el scheduler espera strings de tipo de contenedor (`"standard"`, `"fragile"`, `"urgent"`). El secondary path enviaba `no_shelf_space(urgent)` (átomo) que no unificaba con ningún handler útil — la detección de saturación por percept del entorno llevaba rota desde su introducción en `ce07742`.
+
+**Solución**: separado en dos planes con lógica diferenciada:
+- **urgent**: mapea directamente a `storage_full("urgent", T)`
+- **non_urgent**: busca con `.findall` qué tipos de container están realmente almacenados en estanterías non_urgent (`container_stored_fact` + `container_received_type`) y notifica solo esos. Fallback a ambos tipos (`"standard"` y `"fragile"`) si la lista está vacía.
+- **Deduplicación**: plan auxiliar `!notify_unique_types` con acumulador `Seen` evita notificar el mismo tipo dos veces cuando hay mezcla de standard y fragile en las mismas estanterías.
+
+### Limitación identificada: generador de containers apila excedentes en (5,0) (`WarehouseArtifact.java`)
+
+Cuando la zona de entrada (x=5-7, y=0-1, 6 celdas) está completamente ocupada, el generador coloca el nuevo container en (5,0) como fallback (`351fe3a`, originalmente en (0,0)). `hayContenedorEn` solo detecta un container por celda, por lo que los containers apilados quedan invisibles para los robots.
+
+La solución obvia (pausar el generador hasta que haya celda libre) cambiaría la tasa de generación definida en el enunciado, enmascarando la presión real del sistema. Se decide no corregir: el desbordamiento solo ocurre en escenarios extremos y con el ciclo reducido a 2·ΔT la ventana de riesgo es menor. Limitación de diseño del entorno Java aceptada.
