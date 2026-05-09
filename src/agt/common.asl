@@ -119,25 +119,25 @@ shelf_max_weight("shelf_9", 350).
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +shelf_selected(CId, ShelfId).
 
-// Sin espacio: reintento con contador
+// Sin espacio tras 3 reintentos: notificar y propagar fallo.
+// El cleanup (unclaim, release, check_queue) lo hace -!select_shelf_and_execute
+// para evitar doble-cleanup — antes ambos handlers llamaban unclaim+release.
 -!pick_shelf(CId, Weight, W, H) : shelf_retries_count(CId, N) & N >= 3 <-
     .my_name(Me);
     .print("❌ [", Me, "] Sin estantería disponible para ", CId, ". Liberando.");
     .abolish(shelf_retries_count(CId, _));
-    .abolish(claimed_type(CId, _));
     .abolish(expansion_failed_shelf(CId, _));
     +shelf_wait(CId);
-    unclaim_container(CId);
-    release_task(CId);
-    -+carrying(none);
     .send(supervisor, tell, container_error(CId, no_shelf_space));
-    !check_queue.
+    .fail.
 
 // Cooldown de 20s tras agotar reintentos: evita que dos robots pesados se alternen
 // reclamando el mismo contenedor sin estantería disponible, generando un bucle
 // de errores que impide que el exit cycle tenga tiempo de liberar espacio.
+// La expiración se gestiona SOLO por el timer de 20s — no se limpia cuando otro
+// robot reclama el contenedor, porque ese robot puede también fallar y re-emitir
+// container_at_entrance, y queremos que el cooldown siga activo.
 +shelf_wait(CId) <- .wait(20000); -shelf_wait(CId).
--container_at_entrance(CId, _, _, _, _) : shelf_wait(CId) <- -shelf_wait(CId).
 
 -!pick_shelf(CId, Weight, W, H) : shelf_retries_count(CId, N) <-
     N1 = N + 1;
@@ -179,9 +179,10 @@ shelf_max_weight("shelf_9", 350).
     .my_name(Me);
     .print("⚠️ [", Me, "] Falló selección de estantería para ", CId);
     .abolish(claimed_type(CId, _));
+    .abolish(expansion_failed_shelf(CId, _));
+    -+carrying(none);
     unclaim_container(CId);
     release_task(CId);
-    -+carrying(none);
     !check_queue.
 
 /* ============================================================================
@@ -260,15 +261,27 @@ shelf_max_weight("shelf_9", 350).
  * pueden haber contenedores re-encolados bloqueando el paso.
  * ============================================================================ */
 
-// Yendo a outbound (TX<3, TY<2): tres pasos fijos que garantizan
-// que el robot nunca cruza la franja y=0-1 en x=3-7 (expansión/entrada).
-//   Paso 1: subir a y=2 en la columna actual      → (X, 2)
-//   Paso 2: deslizarse a la columna destino a y=2  → (TX, 2)
-//   Paso 3: bajar al destino                       → (TX, TY)
+// Yendo a outbound (TX<3, TY<2) desde la zona de estanterías (X>=9):
+// 4 pasos que evitan las celdas SHELF en y=2-3 (columnas x=10,12,14,16):
+//   Paso 1: ir horizontalmente al corredor x=9 en la fila actual → (9, Y)
+//   Paso 2: subir por el corredor libre x=9 hasta y=2             → (9, 2)
+//   Paso 3: deslizarse hacia la columna destino a y=2             → (TX, 2)
+//   Paso 4: bajar al destino                                      → (TX, TY)
+// Ir a (9,Y) primero es un movimiento puramente horizontal que nunca choca con
+// estanterías, garantizando la entrada limpia al corredor antes de ascender.
++!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & X >= 9 <-
+    !navigate(9, Y);
+    !navigate(9, 2);
+    !navigate(TX, 2);
+    !navigate(TX, TY).
+
+// Yendo a outbound (TX<3, TY<2) desde x<9 aproximándose desde arriba (Y>=2):
+// subir a y=2, deslizar, bajar. La guarda Y>=2 es crítica: evita que esta regla
+// dispare cuando el robot ya está en y=0-1 (p.ej. reintentando drop_in_outbound
+// desde dentro del outbound). En ese caso step_with_retry navega directamente
+// sin subir a y=2, eliminando el bucle arriba-abajo visible en la entrega.
 // La guarda (X\==TX | Y\==2) evita recursión cuando el robot ya está en (TX,2).
-// Expansión (x=3-4) queda excluida: navega directo para evitar que varios robots
-// se bloqueen mutuamente en el corredor y=2 yendo a expansión simultáneamente.
-+!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & (X \== TX | Y \== 2) <-
++!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & X < 9 & Y >= 2 & (X \== TX | Y \== 2) <-
     !navigate(X, 2);
     !navigate(TX, 2);
     !navigate(TX, TY).

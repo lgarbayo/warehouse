@@ -1452,3 +1452,64 @@ if (container_at_entrance(_, Type, Weight, W, H) &
 - **Java**: `addError(agName, "robot_not_found", agName)` en `executeMoveStep` y `executePickup` cuando `robots.get(agName)` devuelve null.
 
 El reporte periódico ahora diferencia errores de contenedor (p.ej. `no_shelf_space`) de errores de robot (p.ej. `path_blocked (robot): N`).
+
+### Fix: posiciones base de robots desplazadas a y=4 (`WarehouseArtifact.java`, 4 robots)
+
+**Problema**: las bases de los 4 robots estaban en y=3 (1,3), (2,3), (3,3), (4,3). El corredor y=3 es la ruta principal de regreso a base. Con robots idle aparcados en ese corredor, los demás robots navegando de vuelta al home lo encontraban bloqueado, lo que causaba que `step_with_retry` agotase sus intentos, `check_queue` fallase y el robot quedase parado lejos de su base.
+
+**Solución**: desplazar todas las bases a y=4: (1,4), (2,4), (3,4), (4,4). y=4 es un corredor libre entre las estanterías pequeñas (y=2-3) y las medianas (y=6-7), sin conflicto con ninguna ruta de navegación.
+
+### Fix: navegación a outbound bloqueada por celdas SHELF en columnas de estanterías (`common.asl`)
+
+**Problema**: la regla de 3 pasos para X≥9 usaba `!navigate(9,2)` como primer paso desde cualquier posición. Cuando el robot estaba en, por ejemplo, (10,9) —adyacente a shelf_8— `step_with_retry` priorizaba la dirección Y (más larga), intentaba subir por X=10. Las celdas (10,2) y (10,3) son SHELF → bloqueado → path_backoff enviaba el robot hacia abajo → bucle vertical arriba-abajo sin llegar nunca a outbound.
+
+**Solución**: regla de 4 pasos que garantiza entrada limpia al corredor x=9 antes de ascender:
+
+```agentspeak
++!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & X >= 9 <-
+    !navigate(9, Y);   // paso horizontal puro al corredor x=9 (sin estanterías)
+    !navigate(9, 2);   // sube por x=9 (siempre libre)
+    !navigate(TX, 2);  // desliza a la columna destino por y=2
+    !navigate(TX, TY). // baja al outbound
+```
+
+### Fix: `move_to_outbound` llena y=0 primero para no bloquear el acceso (`WarehouseArtifact.java`)
+
+**Problema inicial**: con la navegación de 4 pasos el robot llegaba siempre por y=2, por lo que y=1 era el primer paso natural. Se invirtió el comparador para preferir y=1 (`Integer.compare(b[1], a[1])`), evitando el paso extra hacia y=0.
+
+**Problema derivado**: al llenarse y=1 primero, las celdas de y=0 quedaban inaccesibles físicamente — los containers en y=1 bloqueaban el único camino desde y=2 hacia y=0. El outbound efectivo pasaba de 6 a 3 celdas útiles.
+
+**Solución**: revertir a preferir y=0 primero (`Integer.compare(a[1], b[1])`). El fondo se llena antes y y=1 queda libre como pasillo de acceso. El bucle arriba-abajo en reintento ya no ocurre gracias al guard `Y>=2` añadido en la regla de navegación para X<9 (ver entrada siguiente).
+
+### Fix: guard `Y>=2` en regla navigate para X<9 hacia outbound (`common.asl`)
+
+**Problema**: al reintentar `drop_at_outbound` desde una posición ya en outbound (y=0 o y=1), la regla de 3 pasos para X<9 disparaba igualmente porque solo comprobaba `TX<3 & TY<2 & X<9`. El robot subía innecesariamente a y=2 antes de volver a bajar — bucle arriba-abajo visible en logs como movimientos repetidos en la misma columna.
+
+**Solución**: añadir guard `Y>=2` a la regla para que solo dispare cuando el robot se aproxima desde arriba del corredor, no cuando ya está dentro del outbound:
+
+```agentspeak
++!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & X < 9 & Y >= 2 & (X \== TX | Y \== 2) <-
+    !navigate(X, 2);
+    !navigate(TX, 2);
+    !navigate(TX, TY).
+```
+
+Cuando el robot está en y=0 o y=1 (Y<2), la regla no dispara y `step_with_retry` lleva directamente al destino sin subir.
+
+### Fix: `shelf_wait` se borraba prematuramente al reclamar otro robot (`common.asl`)
+
+**Problema**: existía la regla:
+
+```agentspeak
+-container_at_entrance(CId,_,_,_,_) : shelf_wait(CId) <- -shelf_wait(CId).
+```
+
+Esta regla disparaba cuando **cualquier** robot reclamaba el container (retractando `container_at_entrance`), borrando el cooldown del robot que lo había soltado. El robot sin cooldown volvía a reclamar el mismo container inmediatamente, sin estantería disponible, entrando en un ciclo infinito de fallo-reclamación-fallo.
+
+**Solución**: eliminar esa regla completamente. El cooldown expira únicamente por tiempo (`.wait(20000)`), independientemente de qué robot reclame el container.
+
+### Fix: doble-cleanup en `pick_shelf` / `select_shelf_and_execute` (`common.asl`)
+
+**Problema**: cuando `!pick_shelf` agotaba 3 reintentos, su handler de fallo hacía el cleanup completo (unclaim, release, check_queue) pero no llamaba `.fail`. Esto hacía que `?shelf_selected` fallase en `!select_shelf_and_execute`, que también ejecutaba su propio handler de fallo con el mismo cleanup. Resultado: `unclaim_container` y `release_task` llamados dos veces, el mensaje "Container re-queued" aparecía duplicado.
+
+**Solución**: el handler N≥3 de `pick_shelf` solo notifica al supervisor, activa `shelf_wait` y llama `.fail`. Todo el cleanup (unclaim, release, check_queue) queda consolidado únicamente en `-!select_shelf_and_execute`.

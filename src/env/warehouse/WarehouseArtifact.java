@@ -129,28 +129,28 @@ public class WarehouseArtifact extends Environment {
      */
     private void initializeRobots() {
         Robot light = new Robot("robot_light", "light", 10, 1, 1, 3);
-        light.setPosition(1, 3);
+        light.setPosition(1, 4);
         robots.put("robot_light", light);
 
         Robot medium = new Robot("robot_medium", "medium", 30, 1, 2, 2);
-        medium.setPosition(2, 3);
+        medium.setPosition(2, 4);
         robots.put("robot_medium", medium);
 
         Robot heavy = new Robot("robot_heavy", "heavy", 100, 2, 3, 1);
-        heavy.setPosition(3, 3);
+        heavy.setPosition(3, 4);
         robots.put("robot_heavy", heavy);
 
         Robot heavy2 = new Robot("robot_heavy2", "heavy", 100, 2, 3, 1);
-        heavy2.setPosition(4, 3);
+        heavy2.setPosition(4, 4);
         robots.put("robot_heavy2", heavy2);
 
         // Emitir posición inicial de cada robot para que sus planes de navegación
         // tengan robot_pos disponible desde el primer ciclo.
         try {
-            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,3)"));
-            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(2,3)"));
-            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(3,3)"));
-            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(4,3)"));
+            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,4)"));
+            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(2,4)"));
+            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(3,4)"));
+            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(4,4)"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }
@@ -1081,10 +1081,9 @@ public class WarehouseArtifact extends Environment {
             if (cells.isEmpty()) return false;
 
             cells.sort((a, b) -> {
-                // Preferir y=0 sobre y=1: el robot se aproxima desde y=2, así que elegir y=1
-                // crea un empate TX-X == Y-TY que fuerza el paso en x primero y vuelve a y=2.
-                // Con y=0, Y-TY=2 > TX-X, por lo que try_y_then_x dispara primero, bajando
-                // a y=1 (outbound) y ejecutando el drop inmediatamente.
+                // Preferir y=0 sobre y=1: se llena el fondo primero para que y=1 quede
+                // libre como pasillo de acceso. El guard Y>=2 en navigate evita el bucle
+                // arriba-abajo al reintentar desde y=1.
                 if (a[1] != b[1]) return Integer.compare(a[1], b[1]);
                 int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
                 int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
