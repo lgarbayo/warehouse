@@ -1568,3 +1568,9 @@ No se corrige porque el problema está en el diseño del generador del entorno J
 Cuando la zona de entrada (x=5-7, y=0-1, 6 celdas) está completamente ocupada, el generador coloca el nuevo container en (5,0) como fallback (`351fe3a`, originalmente en (0,0)). `hayContenedorEn` solo detecta un container por celda, por lo que los containers apilados quedan invisibles para los robots.
 
 La solución obvia (pausar el generador hasta que haya celda libre) cambiaría la tasa de generación definida en el enunciado, enmascarando la presión real del sistema. Se decide no corregir: el desbordamiento solo ocurre en escenarios extremos y con el ciclo reducido a 2·ΔT la ventana de riesgo es menor. Limitación de diseño del entorno Java aceptada.
+
+### Limitación identificada: Bug 6 — desincronización Java-Jason en tránsito normal (`common.asl`, 4 robots)
+
+El caso de `execute_task` durante tránsito normal a estantería tiene dos rutas de cleanup solapadas: cuando `path_blocked` llega tras pickup, el handler genérico resetea `carrying(none)` en Jason sin drop Java; luego `-!execute_task : not carrying(CId)` detecta la inconsistencia y llama `unclaim_container`, que en Java encuentra al robot portando el container (`wasCarrying=true`) y lo deposita en entrada correctamente. El resultado final es correcto — ningún container se pierde, ningún robot queda atascado — pero la doble ruta es un smell de diseño.
+
+No se corrige: añadir contexto para `execute_task` tránsito (análogo a `exit_picked` o `holding_zone`) requeriría modificar la jerarquía de planes con riesgo de regresiones, sin beneficio observable ya que el comportamiento resultante es correcto. La manifestación visible de Bug 6 (robots con "Busy: NO, Carrying: container_X" atascados en outbound) fue resuelta por el fix de `hayRobotCerca` en `move_to_outbound`.
