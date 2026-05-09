@@ -16,7 +16,6 @@
     .print("[TRANSPORT] Agente de transporte iniciado.").
 
 +transport_request(ContainerType, Phase)[source(_)] <-
-    .my_name(Me);
     .time(H, M, S); T = H * 3600 + M * 60 + S;
-    .print("[TRANSPORT] Camión despachado: tipo=", ContainerType, " fase=", Phase, " T=", T);
-    .print("EVENT | time=", T, " | agent=transport | type=transport_dispatched | data=", ContainerType).
+    .print("EVENT | time=", T, " | agent=transport | type=transport_dispatched | data=", ContainerType);
+    collect_outbound_containers.

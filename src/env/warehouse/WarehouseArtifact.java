@@ -384,6 +384,8 @@ public class WarehouseArtifact extends Environment {
                     return executeDropInOutbound(agName, action);
                 case "discard_container":
                     return executeDiscardContainer(agName, action);
+                case "collect_outbound_containers":
+                    return executeCollectOutboundContainers(agName);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
@@ -1131,6 +1133,36 @@ public class WarehouseArtifact extends Environment {
             }
 
             addPercept("scheduler", ASSyntax.parseLiteral("container_exited(\"" + containerId + "\")"));
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: collect_outbound_containers
+     * El agente transport recoge todos los contenedores de la zona OUTBOUND,
+     * eliminándolos físicamente del grid y del mapa de contenedores.
+     */
+    private boolean executeCollectOutboundContainers(String agName) {
+        try {
+            List<String> collected = new ArrayList<>();
+            for (Map.Entry<String, Container> entry : new ArrayList<>(containers.entrySet())) {
+                Container c = entry.getValue();
+                if (!c.isPicked() && grid[c.getX()][c.getY()] == CellType.OUTBOUND) {
+                    collected.add(entry.getKey());
+                }
+            }
+            for (String cId : collected) {
+                containers.remove(cId);
+                claimedContainers.remove(cId);
+                removePerceptsByUnif(ASSyntax.parseLiteral("container_at_entrance(\"" + cId + "\",_,_,_,_)"));
+            }
+            if (!collected.isEmpty() && view != null) {
+                view.logMessage("🚛 [TRANSPORT] Camión recogió " + collected.size() + " contenedor(es) del outbound");
+                view.update();
+            }
             return true;
         } catch (Exception e) {
             e.printStackTrace();
