@@ -1513,3 +1513,37 @@ Esta regla disparaba cuando **cualquier** robot reclamaba el container (retracta
 **Problema**: cuando `!pick_shelf` agotaba 3 reintentos, su handler de fallo hacía el cleanup completo (unclaim, release, check_queue) pero no llamaba `.fail`. Esto hacía que `?shelf_selected` fallase en `!select_shelf_and_execute`, que también ejecutaba su propio handler de fallo con el mismo cleanup. Resultado: `unclaim_container` y `release_task` llamados dos veces, el mensaje "Container re-queued" aparecía duplicado.
 
 **Solución**: el handler N≥3 de `pick_shelf` solo notifica al supervisor, activa `shelf_wait` y llama `.fail`. Todo el cleanup (unclaim, release, check_queue) queda consolidado únicamente en `-!select_shelf_and_execute`.
+
+### Fix: `pick_shelf` reducido a 1 reintento con 3s de espera (`common.asl`)
+
+**Problema**: los 3 reintentos con 5s de espera (~15s total) retrasaban la detección de saturación y bloqueaban la celda de entrada durante ese tiempo. Sin reintentos (fallo inmediato), múltiples robots fallaban simultáneamente antes de que `blocked_type` se propagase, congestionando la zona inbound con containers re-encolados y causando Bug 6 cuando un robot portando un container no podía salir de la zona.
+
+**Solución**: 1 reintento con 3s de espera. Durante esos 3s el robot retiene el container (no lo devuelve a la entrada), evitando la congestión. `blocked_type` llega en <1s, así que el reintento ya lo ve activo. El ciclo de salida empieza como máximo 3s después del primer fallo. `shelf_wait` reducido de 20s a 5s — margen suficiente para que `blocked_type` se propague antes de que `container_at_entrance` re-dispare el claim.
+
+### Fix: `exit_cycle` solo elimina el ciclo completado, re-dispara pendientes (`scheduler.asl`)
+
+**Problema**: `.abolish(exit_cycle(_, _))` borraba TODOS los ciclos de salida al terminar el primero. Si dos tipos saturaban simultáneamente, el segundo ciclo se perdía aunque `blocked_type` seguía activo para ese tipo.
+
+**Solución**: `-exit_cycle(Type, T0)` elimina solo el ciclo completado. Al terminar, `.findall` recoge los ciclos pendientes de otros tipos y los re-dispara con `-exit_cycle(PT, PT0); +exit_cycle(PT, PT0)` para que `+exit_cycle` vuelva a activarse.
+
+### Fix: `shelf_available` desbloquea correctamente el tipo saturado (`scheduler.asl`)
+
+**Problema**: el plan `+shelf_available(ShelfId) : blocked_type(Type) & shelf_for(Type, _, ShelfId)` nunca disparaba. `shelf_for` usa átomos (`urgent`/`non_urgent`) pero `blocked_type` usa strings de tipo de contenedor (`"standard"`, `"fragile"`). La unificación `blocked_type(Type) & shelf_for(Type, _, ShelfId)` fallaba silenciosamente — el desbloqueo automático al liberar espacio nunca funcionaba.
+
+**Solución**: separar en dos planes usando `urgent_container_type`/`non_urgent_container_type` de `common.asl` para el mapeo correcto entre átomos de urgencia y strings de tipo. Añadido `untell blocked_type` a todos los robots al desbloquear (el scheduler había enviado `tell` a todos al inicio del ciclo).
+
+### Fix: `run_exit_cycle` ejecuta solo la fase relevante al tipo saturado (`scheduler.asl`)
+
+**Problema**: el ciclo siempre ejecutaba ambas fases (urgente ΔT + non_urgent 2·ΔT) independientemente del tipo que saturó. Cuando saturaba `standard` (estanterías non_urgent), la fase urgente evacuaba estanterías urgent (zona diferente), sin liberar espacio para standard. Los robots heavy quedaban idle durante ΔT=120s sin nada que evacuar.
+
+**Solución**: dos planes `!run_exit_cycle` separados por contexto:
+- `urgent_container_type(Type)` → solo fase urgente (ΔT)
+- `non_urgent_container_type(Type)` → solo fase non_urgent (2·ΔT) directamente
+
+Los robots pesados empiezan a evacuar shelf_9 inmediatamente cuando standard satura, sin esperar 120s.
+
+### Fix: `move_to_outbound` excluye celdas ocupadas por robots (`WarehouseArtifact.java`)
+
+**Problema**: `move_to_outbound` seleccionaba celdas outbound libres de containers (`!hayContenedorEn`) pero no comprobaba si había un robot parado en esa celda. Un robot idle en outbound tras entregar su container bloqueaba la celda físicamente. Otro robot navegaba hacia esa celda como target, fallaba `drop_in_outbound`, y el handler genérico reseteaba `state(idle)` + `carrying(none)` en Jason mientras Java seguía viendo al robot portando el container → Bug 6 desync.
+
+**Solución**: añadir `!hayRobotCerca(x, y)` a la condición de selección de celda. El método ya existía en el código. Una línea cambiada.

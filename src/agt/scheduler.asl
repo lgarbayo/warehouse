@@ -107,18 +107,18 @@ shelf_for(non_urgent, heavy,  "shelf_9").
 +exit_cycle(Type, T0) : active_exit_cycle <-
     .print("[SCHEDULER] Ciclo de salida ya activo. Tipo '", Type, "' permanecerá bloqueado hasta que finalice.").
 
-+!run_exit_cycle(Type, T0) : delta_t(DT) <-
+// Ciclo para tipos urgentes: solo fase urgente (ΔT).
+// No tiene sentido evacuar non_urgentes si lo que saturó fue un tipo urgente.
++!run_exit_cycle(Type, T0) : delta_t(DT) & urgent_container_type(Type) <-
     .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
     for (.member(R, AllRobots)) { .send(R, tell, blocked_type(Type)); };
 
-    // ---- Deadline corto: [T0, T0+ΔT) — salen contenedores urgentes ----
     +active_deadline(short, urgent, T0);
     for (.member(R, AllRobots)) { .send(R, tell, active_deadline(short, urgent, T0)); };
     .send(supervisor, tell, active_deadline(short, urgent, T0));
     .time(H1, M1, S1); Tstart1 = H1 * 3600 + M1 * 60 + S1;
     .print("EVENT | time=", Tstart1, " | agent=scheduler | type=deadline_started | data=urgent");
-    DurShort = DT * 1000;  // ΔT en segundos → ms para .wait
-    .wait(DurShort);
+    .wait(DT * 1000);
     -active_deadline(short, urgent, T0);
     for (.member(R, AllRobots)) { .send(R, untell, active_deadline(short, urgent, T0)); };
     .send(supervisor, untell, active_deadline(short, urgent, T0));
@@ -126,35 +126,64 @@ shelf_for(non_urgent, heavy,  "shelf_9").
     .print("EVENT | time=", Tend1, " | agent=scheduler | type=deadline_ended | data=urgent");
     .send(transport, tell, transport_request(urgent, short));
 
-    // ---- Deadline largo: [T0+ΔT, T0+3·ΔT) — salen contenedores no urgentes ----
-    // T1 = T0+ΔT: la fase no urgente arranca justo cuando termina la urgente.
-    // La ventana es 2·ΔT porque los robots no urgentes son más y las estanterías más lejanas.
-    T1 = T0 + DT;
-    +active_deadline(long, non_urgent, T1);
-    for (.member(R, AllRobots)) { .send(R, tell, active_deadline(long, non_urgent, T1)); };
-    .send(supervisor, tell, active_deadline(long, non_urgent, T1));
+    for (.member(R, AllRobots)) { .send(R, untell, blocked_type(Type)); };
+    -exit_cycle(Type, T0);
+    -blocked_type(Type);
+    -active_exit_cycle;
+    .findall(pair(PT, PT0), exit_cycle(PT, PT0), Pending);
+    for (.member(pair(PT, PT0), Pending)) {
+        -exit_cycle(PT, PT0);
+        +exit_cycle(PT, PT0)
+    }.
+
+// Ciclo para tipos no urgentes (standard, fragile): solo fase non_urgent (2·ΔT).
+// Se activa directamente sin la fase urgente — evacuar urgentes no libera espacio
+// en estanterías non_urgent y desperdiciaría ΔT con robots pesados idle.
++!run_exit_cycle(Type, T0) : delta_t(DT) & non_urgent_container_type(Type) <-
+    .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
+    for (.member(R, AllRobots)) { .send(R, tell, blocked_type(Type)); };
+
+    +active_deadline(long, non_urgent, T0);
+    for (.member(R, AllRobots)) { .send(R, tell, active_deadline(long, non_urgent, T0)); };
+    .send(supervisor, tell, active_deadline(long, non_urgent, T0));
     .time(H3, M3, S3); Tstart2 = H3 * 3600 + M3 * 60 + S3;
     .print("EVENT | time=", Tstart2, " | agent=scheduler | type=deadline_started | data=non_urgent");
-    DurLong = DT * 2 * 1000;  // 2·ΔT en ms
-    .wait(DurLong);
-    -active_deadline(long, non_urgent, T1);
-    for (.member(R, AllRobots)) { .send(R, untell, active_deadline(long, non_urgent, T1)); };
-    .send(supervisor, untell, active_deadline(long, non_urgent, T1));
+    .wait(DT * 2 * 1000);
+    -active_deadline(long, non_urgent, T0);
+    for (.member(R, AllRobots)) { .send(R, untell, active_deadline(long, non_urgent, T0)); };
+    .send(supervisor, untell, active_deadline(long, non_urgent, T0));
     .time(H4, M4, S4); Tend2 = H4 * 3600 + M4 * 60 + S4;
     .print("EVENT | time=", Tend2, " | agent=scheduler | type=deadline_ended | data=non_urgent");
     .send(transport, tell, transport_request(non_urgent, long));
 
-    // Limpieza: desbloquear tipos y liberar flag de ciclo activo
     for (.member(R, AllRobots)) { .send(R, untell, blocked_type(Type)); };
-    .abolish(exit_cycle(_, _));
-    .abolish(blocked_type(_));
-    -active_exit_cycle.
+    -exit_cycle(Type, T0);
+    -blocked_type(Type);
+    -active_exit_cycle;
+    .findall(pair(PT, PT0), exit_cycle(PT, PT0), Pending);
+    for (.member(pair(PT, PT0), Pending)) {
+        -exit_cycle(PT, PT0);
+        +exit_cycle(PT, PT0)
+    }.
 
 /* ============================================================================
  * DESBLOQUEO AL RECUPERAR ESPACIO
  * ============================================================================ */
 
-+shelf_available(ShelfId) : blocked_type(Type) & shelf_for(Type, _, ShelfId) <-
+// shelf_for usa átomos (urgent/non_urgent) pero blocked_type usa strings de tipo
+// de contenedor ("standard","fragile","urgent"). Se separa en dos planes usando
+// urgent_container_type/non_urgent_container_type (de common.asl) para el mapeo.
+// También se notifica a los robots con untell porque blocked_type fue enviado
+// a todos vía tell al inicio del ciclo.
++shelf_available(ShelfId) : blocked_type(Type) & urgent_container_type(Type) & shelf_for(urgent, _, ShelfId) <-
+    .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
+    for (.member(R, AllRobots)) { .send(R, untell, blocked_type(Type)); };
+    -blocked_type(Type);
+    .print("[SCHEDULER] Tipo ", Type, " desbloqueado — espacio disponible en ", ShelfId).
+
++shelf_available(ShelfId) : blocked_type(Type) & non_urgent_container_type(Type) & shelf_for(non_urgent, _, ShelfId) <-
+    .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
+    for (.member(R, AllRobots)) { .send(R, untell, blocked_type(Type)); };
     -blocked_type(Type);
     .print("[SCHEDULER] Tipo ", Type, " desbloqueado — espacio disponible en ", ShelfId).
 

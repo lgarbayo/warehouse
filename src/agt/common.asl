@@ -119,39 +119,29 @@ shelf_max_weight("shelf_9", 350).
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +shelf_selected(CId, ShelfId).
 
-// Sin espacio tras 3 reintentos: notificar y propagar fallo.
-// El cleanup (unclaim, release, check_queue) lo hace -!select_shelf_and_execute
-// para evitar doble-cleanup — antes ambos handlers llamaban unclaim+release.
--!pick_shelf(CId, Weight, W, H) : shelf_retries_count(CId, N) & N >= 3 <-
+// Sin espacio tras 1 reintento: notificar y propagar fallo.
+// El cleanup (unclaim, release, check_queue) lo hace -!select_shelf_and_execute.
+// El robot retiene el container durante el reintento (3s) → la celda de entrada
+// no se libera, evitando congestión en la zona inbound cuando varios robots fallan
+// a la vez. blocked_type llega en <1s, así que el reintento ya lo ve activo.
+-!pick_shelf(CId, Weight, W, H) : shelf_retried(CId) <-
     .my_name(Me);
     .print("❌ [", Me, "] Sin estantería disponible para ", CId, ". Liberando.");
-    .abolish(shelf_retries_count(CId, _));
+    -shelf_retried(CId);
     .abolish(expansion_failed_shelf(CId, _));
     +shelf_wait(CId);
     .send(supervisor, tell, container_error(CId, no_shelf_space));
     .fail.
 
-// Cooldown de 20s tras agotar reintentos: evita que dos robots pesados se alternen
-// reclamando el mismo contenedor sin estantería disponible, generando un bucle
-// de errores que impide que el exit cycle tenga tiempo de liberar espacio.
-// La expiración se gestiona SOLO por el timer de 20s — no se limpia cuando otro
-// robot reclama el contenedor, porque ese robot puede también fallar y re-emitir
-// container_at_entrance, y queremos que el cooldown siga activo.
-+shelf_wait(CId) <- .wait(20000); -shelf_wait(CId).
-
--!pick_shelf(CId, Weight, W, H) : shelf_retries_count(CId, N) <-
-    N1 = N + 1;
-    -shelf_retries_count(CId, _);
-    +shelf_retries_count(CId, N1);
-    .print("⚠️ Sin estantería para ", CId, ". Reintento ", N1, "/3...");
-    .wait(5000);
-    !pick_shelf(CId, Weight, W, H).
-
 -!pick_shelf(CId, Weight, W, H) : true <-
-    +shelf_retries_count(CId, 1);
-    .print("⚠️ Sin estantería para ", CId, ". Reintento 1/3...");
-    .wait(5000);
+    +shelf_retried(CId);
+    .print("⚠️ Sin estantería para ", CId, ". Reintento en 3s...");
+    .wait(3000);
     !pick_shelf(CId, Weight, W, H).
+
+// Cooldown de 5s: margen para que blocked_type se propague desde supervisor →
+// scheduler → robots antes de que container_at_entrance re-dispare el claim.
++shelf_wait(CId) <- .wait(5000); -shelf_wait(CId).
 
 /* ============================================================================
  * RECLAMACIÓN Y SELECCIÓN DE ESTANTERÍA (compartido por todos los robots)
@@ -172,7 +162,7 @@ shelf_max_weight("shelf_9", 350).
     !pick_shelf(CId, Weight, W, H);
     ?shelf_selected(CId, ShelfId);
     .abolish(shelf_selected(CId, _));
-    .abolish(shelf_retries_count(CId, _));
+    .abolish(shelf_retried(CId));
     !execute_task(CId, ShelfId).
 
 -!select_shelf_and_execute(CId, Weight, W, H) : true <-

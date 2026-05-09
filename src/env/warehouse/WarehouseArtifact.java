@@ -1073,7 +1073,7 @@ public class WarehouseArtifact extends Environment {
             List<int[]> cells = new ArrayList<>();
             for (int x = 0; x < GRID_WIDTH; x++) {
                 for (int y = 0; y < GRID_HEIGHT; y++) {
-                    if (grid[x][y] == CellType.OUTBOUND && !hayContenedorEn(x, y)) {
+                    if (grid[x][y] == CellType.OUTBOUND && !hayContenedorEn(x, y) && !hayRobotCerca(x, y)) {
                         cells.add(new int[]{x, y});
                     }
                 }
