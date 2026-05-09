@@ -341,11 +341,14 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .abolish(error(_, _));
     !release_zone(inbound);
     !release_zone(expansion);
-    -+state(idle);
-    if (not (container_at_entrance(_, _, Weight, W, H) &
-             (Weight > 10 | H > 1) &
-             Weight <= 30 & W <= 1 & H <= 2)) {
-        !navigate(InitX, InitY)
+    if (container_at_entrance(_, _, Weight, W, H) &
+            (Weight > 10 | H > 1) &
+            Weight <= 30 & W <= 1 & H <= 2) {
+        -+state(idle)
+    } else {
+        -+state(returning);
+        !navigate(InitX, InitY);
+        -+state(idle)
     }.
 
 -!check_queue : true <-
@@ -374,7 +377,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
 +!check_exit_cycle : true <- true.
 
-+!select_for_exit([pair(CId, ShelfId)|_], urgent) : claimed_type(CId, "urgent") & state(idle) <-
++!select_for_exit([pair(CId, ShelfId)|_], urgent) : shelf_urgency(ShelfId, urgent) & state(idle) <-
     +exit_claimed(CId);
     .my_name(Me);
     .print("[", Me, "] Ciclo de salida (urgente): seleccionado ", CId, " en ", ShelfId);
@@ -385,11 +388,10 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 -!select_for_exit([_|Rest], urgent) : true <-
     !select_for_exit(Rest, urgent).
 
-+!select_for_exit([pair(CId, ShelfId)|_], non_urgent) :
-    claimed_type(CId, ContType) & non_urgent_container_type(ContType) & state(idle) <-
++!select_for_exit([pair(CId, ShelfId)|_], non_urgent) : shelf_urgency(ShelfId, non_urgent) & state(idle) <-
     +exit_claimed(CId);
     .my_name(Me);
-    .print("[", Me, "] Ciclo de salida (no urgente): seleccionado ", CId, " (", ContType, ") en ", ShelfId);
+    .print("[", Me, "] Ciclo de salida (no urgente): seleccionado ", CId, " en ", ShelfId);
     -+state(working);
     -+carrying(CId);
     !execute_exit(CId, ShelfId).
@@ -463,6 +465,10 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 +state(working) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_state_change(Me, working)).
+
++state(returning) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, idle)).
 
 +state(idle) : task(CId, ShelfId) <-
     .print("✅ [MEDIUM] Tarea pendiente al quedar idle: ", CId, " → ", ShelfId);

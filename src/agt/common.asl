@@ -11,7 +11,7 @@
  * TEMPORIZACIÓN
  * ============================================================================ */
 
-delta_t(60).
+delta_t(120).
 
 /* ============================================================================
  * CLASIFICACIÓN DE TIPOS DE CONTENEDOR
@@ -249,6 +249,13 @@ shelf_max_weight("shelf_9", 350).
  * Si el robot ya está en una celda outbound (x=17-19, y=0-1), suelta
  * inmediatamente. Evita oscilación cuando el nav_target exacto está ocupado.
  * ============================================================================ */
+
+// Going to left outbound/expansion/classification (TX < 5, TY < 2):
+// approach at y=2 first to avoid crossing entrance (x=5-7) and classification (x=3-4) zones at y=0-1.
+// Guard X > TX ensures no recursion when robot is already in the target column.
++!navigate(TX, TY) : TX < 5 & TY < 2 & robot_pos(X, Y) & Y > 1 & X > TX <-
+    !navigate(TX, 2);
+    !navigate(TX, TY).
 
 // At x=17-18 heading to outbound but blocked by y=2-3 shelf cells (S4 at x=16-17):
 // step to x=19 first (free column), then descend into zone.

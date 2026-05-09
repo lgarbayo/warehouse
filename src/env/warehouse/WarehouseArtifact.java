@@ -956,23 +956,29 @@ public class WarehouseArtifact extends Environment {
             String containerId = action.getTerm(0).toString().replace("\"", "");
             claimedContainers.remove(containerId);
 
-            // If the robot is physically carrying this container, force-drop it first.
+            // If the robot is physically carrying this container, force-drop it and
+            // reset position to a free entrance cell (Bug 3 fix: avoids dropping at an
+            // arbitrary warehouse position unreachable by other robots).
+            // If the container was already intentionally placed elsewhere (e.g. expansion
+            // zone via drop_in_expansion), leave its position unchanged.
             Robot robot = robots.get(agName);
+            boolean wasCarrying = false;
             if (robot != null && robot.isCarrying()) {
                 Container carried = robot.getCarriedContainer();
                 if (carried != null && containerId.equals(carried.getId())) {
                     robot.drop();
                     carried.setPicked(false);
+                    wasCarrying = true;
                 }
             }
 
             Container container = containers.get(containerId);
             if (container == null || container.isBroken()) return true;
 
-            // Always reset to a free entrance cell regardless of where the container
-            // ended up (robot position, expansion zone, etc.).
-            int[] cell = findFreeEntranceCell();
-            container.setPosition(cell[0], cell[1]);
+            if (wasCarrying) {
+                int[] cell = findFreeEntranceCell();
+                container.setPosition(cell[0], cell[1]);
+            }
 
             addPercept(ASSyntax.parseLiteral(
                 "container_at_entrance(\"" + containerId + "\",\"" + container.getType() + "\"," +

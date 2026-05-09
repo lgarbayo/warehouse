@@ -1002,11 +1002,11 @@ EVENT | time=T | agent=scheduler | type=deadline_ended   | data=non_urgent
 
 ### Mejora: robots no vuelven a la base si hay contenedor pendiente
 
-**Comportamiento anterior:** al terminar una tarea, `!check_queue` siempre navegaba de vuelta a la base y solo entonces `!work_cycle` comprobaba si había contenedores que reclamar. El viaje de vuelta era innecesario si había trabajo disponible.
+**Comportamiento anterior:** al terminar una tarea, `!check_queue` siempre navegaba de vuelta a la base y solo entonces `!work_cycle` comprobaba si había contenedores que reclamar.
 
 **Primera implementación (scheduler-based, commit `ba48854`):** `!check_queue` enviaba `request_task` al scheduler y esperaba 2s. Obsoleta desde el refactor a pull protocol.
 
-**Implementación actual (pull protocol):** `!check_queue` setea `state(idle)` antes de navegar y consulta la belief base. Si hay un contenedor que este robot puede manejar (por capacidad), omite el viaje a base — `!work_cycle` lo reclamará en la siguiente iteración. Solo navega a base si no hay nada pendiente:
+**Implementación actual (pull protocol):** `!check_queue` comprueba la belief base antes de decidir si navegar. Si hay un contenedor compatible esperando, setea `state(idle)` inmediatamente sin navegar — `!work_cycle` lo reclamará en la siguiente iteración. Si no hay nada, usa un estado intermedio `state(returning)` para navegar a base sin riesgo de race condition:
 
 ```agentspeak
 // robot_heavy / robot_heavy2
@@ -1014,19 +1014,22 @@ EVENT | time=T | agent=scheduler | type=deadline_ended   | data=non_urgent
     .abolish(error(_, _));
     !release_zone(inbound);
     !release_zone(expansion);
-    -+state(idle);
-    if (not (container_at_entrance(_, _, Weight, W, H) &
-             (Weight > 30 | W > 1 | H > 2) &
-             Weight <= 100 & W <= 2 & H <= 3)) {
-        !navigate(InitX, InitY)
+    if (container_at_entrance(_, _, Weight, W, H) &
+            (Weight > 30 | W > 1 | H > 2) &
+            Weight <= 100 & W <= 2 & H <= 3) {
+        -+state(idle)
+    } else {
+        -+state(returning);
+        !navigate(InitX, InitY);
+        -+state(idle)
     }.
 ```
 
-Cada robot usa los guards de capacidad propios (medium: `Weight>10 | H>1`; light: `not(Weight>10) & not(W>1) & not(H>1)`).
+**Por qué `state(returning)` en lugar de `state(idle)` durante la navegación a base**: si se setea `state(idle)` antes de completar la navegación, el trigger reactivo `+container_at_entrance : state(idle)` puede disparar mientras `!navigate` está en curso, creando dos intenciones enviando `move_step` en paralelo — oscilación. `state(returning)` bloquea los triggers reactivos durante la navegación a base. Es funcionalmente idéntico al comportamiento original cuando no hay contenedor disponible; la diferencia real es solo cuando hay contenedor esperando (rama `if`).
 
-No se llama a `!try_claim` desde `!check_queue` para evitar una cadena de llamadas anidadas profunda (un frame por contenedor). `!work_cycle` es el único punto de entrada para reclamar.
+Cada robot usa los guards de capacidad propios (medium: `Weight>10 | H>1`; light: `not(Weight>10) & not(W>1) & not(H>1)`). No se llama a `!try_claim` desde `!check_queue` para evitar cadena de llamadas anidadas.
 
-Aplicado en los cuatro robots: `robot_light`, `robot_medium`, `robot_heavy`, `robot_heavy2`.
+**Verificado en runtime**: robot_medium encadenó 6 tareas consecutivas sin volver a base (container_1→2→4→6→5→8); robot_light encadenó 3 (container_7→9→10).
 
 ### Corrección: oscilación del backoff horizontal (robot bloqueado por otro robot)
 
@@ -1301,34 +1304,68 @@ La detección y registro de incumplimientos de deadline cumple las tres propieda
 
 Las propiedades son estructurales — no requieren validación en tiempo de ejecución porque no existe ningún mecanismo de interferencia en el código.
 
-### Fix: Bug 3 — unclaim resetea posición siempre (`WarehouseArtifact.java`)
+### Fix: Bug 3 — unclaim resetea posición solo cuando el robot llevaba el contenedor (`WarehouseArtifact.java`)
 
-**Problema**: `executeUnclaimContainer` solo reseteaba la posición del contenedor a la zona de entrada cuando el robot lo llevaba físicamente. Si el contenedor había sido soltado previamente en otro lugar (p. ej., zona de expansión tras `safe_expand_drop` + `unclaim_container`), el percept `container_at_entrance` se emitía pero el contenedor quedaba en la posición incorrecta. Aunque `move_to_container` navega a la posición real del contenedor (evitando fallos de `pickup`), la zona mutex `inbound` se adquiría indebidamente y la semántica del percept era incorrecta.
+**Problema original**: `executeUnclaimContainer` no reseteaba la posición cuando el robot llevaba físicamente el contenedor al llamarse (p. ej., `path_blocked` en mitad de la navegación). El contenedor caía en la posición actual del robot (arbitraria dentro del almacén) y otro robot no podía recogerlo porque `pickup` verifica distancia.
 
-**Solución**: `findFreeEntranceCell()` se llama **siempre** justo antes de emitir el percept, independientemente de si el robot llevaba el contenedor:
+**Solución**: `executeUnclaimContainer` resetea a una celda libre de entrada **únicamente si el robot llevaba el contenedor** (`wasCarrying`). Si el contenedor ya fue depositado intencionalmente en otro lugar (p. ej., zona de expansión vía `drop_in_expansion`), su posición se respeta — ese caso tiene su propia semántica correcta.
 
 ```java
-// Drop si el robot lo lleva físicamente
-Robot robot = robots.get(agName);
+boolean wasCarrying = false;
 if (robot != null && robot.isCarrying()) {
     Container carried = robot.getCarriedContainer();
     if (carried != null && containerId.equals(carried.getId())) {
         robot.drop();
         carried.setPicked(false);
+        wasCarrying = true;
     }
 }
 
 Container container = containers.get(containerId);
 if (container == null || container.isBroken()) return true;
 
-// Siempre: resetear a entrada antes de emitir el percept
-int[] cell = findFreeEntranceCell();
-container.setPosition(cell[0], cell[1]);
-
+if (wasCarrying) {
+    int[] cell = findFreeEntranceCell();
+    container.setPosition(cell[0], cell[1]);
+}
 addPercept(...container_at_entrance...);
 ```
 
 **Casos cubiertos**:
-- Robot llevando el contenedor (path_blocked, execute_exit): drop + reset ✓
-- Contenedor en expansión (safe_expand_drop + unclaim): solo reset ✓
-- Contenedor ya en entrada (pick_shelf failure sin pickup): reset idempotente ✓
+- Robot llevando el contenedor (path_blocked, execute_exit failure): drop + reset a entrada ✓
+- Contenedor en expansión (safe_expand_drop + unclaim): posición de expansión respetada ✓
+- Contenedor ya en entrada (pick_shelf failure sin pickup): posición respetada ✓
+
+### Fix: `select_for_exit` usa `shelf_urgency` en lugar de `claimed_type` (4 robots)
+
+**Problema**: `+!select_for_exit` filtraba contenedores candidatos usando `claimed_type(CId, "urgent")`, una creencia per-robot que solo existe en el robot que originalmente almacenó el contenedor. Si ese robot estaba ocupado, ningún otro robot podía sacar el contenedor durante el ciclo de salida, aunque estuviese idle.
+
+**Solución**: sustituir `claimed_type(CId, "urgent")` por `shelf_urgency(ShelfId, urgent)` (y `claimed_type(...) & non_urgent_container_type(...)` por `shelf_urgency(ShelfId, non_urgent)`). `shelf_urgency` es una creencia estática en `common.asl` disponible para todos los robots. Ahora cualquier robot idle puede mover cualquier contenedor de la categoría correcta independientemente de quién lo almacenó:
+
+```agentspeak
+// Antes:
++!select_for_exit([pair(CId, ShelfId)|_], urgent) : claimed_type(CId, "urgent") & state(idle) <- ...
+
+// Después:
++!select_for_exit([pair(CId, ShelfId)|_], urgent) : shelf_urgency(ShelfId, urgent) & state(idle) <- ...
+```
+
+### Fix: `delta_t` aumentado de 60 a 120 segundos (`common.asl`)
+
+**Motivo**: con `delta_t(60)`, robots pesados (velocidad 1) que recogen un contenedor de una estantería lejana no tienen tiempo suficiente para llegar a outbound antes de que expire el deadline, especialmente con congestión de navegación. Un robot heavy desde shelf_9 (x≈18, y≈10) hasta outbound (x=0-2, y=0-1) necesita ~100 pasos con posibles backoffs → ~90-100 segundos reales.
+
+**Justificación**: `delta_t(120)` da margen suficiente para el robot más lento en el peor caso de distancia. El enunciado especifica que ΔT es configurable y debe justificarse en la memoria.
+
+### Fix: navegación a outbound lado izquierdo bloqueada por zona de entrada (`common.asl`)
+
+**Problema**: el layout del grid tiene el outbound en x=0-2, la zona de clasificación/expansión en x=3-4, y la zona de entrada en x=5-7, todas en y=0-1. Cuando un robot navegaba hacia outbound (TX<3, TY<2) desde las estanterías (derecha del grid), la ruta greedy cruzaba la fila y=0-1 de izquierda a derecha, pasando por la zona de entrada (x=5-7) donde podían estar contenedores re-encolados. Esto bloqueaba la navegación y podía aplastar contenedores.
+
+**Solución**: nueva regla de navegación en `common.asl` que, cuando el destino es TX<5 y TY<2, hace que el robot descienda primero a y=2 (fila libre) y luego se desplace horizontalmente hasta la columna destino antes de bajar a TY:
+
+```agentspeak
++!navigate(TX, TY) : TX < 5 & TY < 2 & robot_pos(X, Y) & Y > 1 & X > TX <-
+    !navigate(TX, 2);
+    !navigate(TX, TY).
+```
+
+El guard `X > TX` previene recursión cuando el robot ya está en la columna destino. La regla cubre outbound (x=0-2), expansión (x=3-4) y el acceso a clasificación.
