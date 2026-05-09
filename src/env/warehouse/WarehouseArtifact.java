@@ -465,7 +465,7 @@ public class WarehouseArtifact extends Environment {
             int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
 
             Robot robot = robots.get(agName);
-            if (robot == null) return false;
+            if (robot == null) { addError(agName, "robot_not_found", agName); return false; }
 
             if (!estaDentroDelMapa(targetX, targetY)) return false;
             if (grid[targetX][targetY] == CellType.SHELF || grid[targetX][targetY] == CellType.BLOCKED) return false;
@@ -613,8 +613,9 @@ public class WarehouseArtifact extends Environment {
             Robot robot = robots.get(agName);
             Container container = containers.get(containerId);
 
-            if (robot == null || container == null) {
-                addError(agName, "invalid_pickup", "Robot or container not found");
+            if (robot == null) { addError(agName, "robot_not_found", agName); return false; }
+            if (container == null) {
+                addError(agName, "invalid_pickup", "Container not found: " + containerId);
                 return false;
             }
 

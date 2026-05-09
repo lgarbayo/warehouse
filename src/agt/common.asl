@@ -247,8 +247,8 @@ shelf_max_weight("shelf_9", 350).
 // que podrían no caber aunque la ocupación por peso esté por debajo del 100%.
 +!pick_least_occupied_shelf(CId, Cat, Urg) <-
     .findall(pair(Occ, S), (shelf_category(S, Cat) & shelf_urgency(S, Urg) &
-                             shelf_available(S) & shelf_occupancy(S, Occ) & Occ < 85 &
-                             not expansion_failed_shelf(CId, S)), Pairs);
+        shelf_available(S) & shelf_occupancy(S, Occ) & Occ < 85 &
+        not expansion_failed_shelf(CId, S)), Pairs);
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +shelf_selected(CId, ShelfId).
 
@@ -260,20 +260,23 @@ shelf_max_weight("shelf_9", 350).
  * pueden haber contenedores re-encolados bloqueando el paso.
  * ============================================================================ */
 
-// Yendo a outbound o expansión (TX<5, TY<2): tres pasos fijos que garantizan
+// Yendo a outbound (TX<3, TY<2): tres pasos fijos que garantizan
 // que el robot nunca cruza la franja y=0-1 en x=3-7 (expansión/entrada).
 //   Paso 1: subir a y=2 en la columna actual      → (X, 2)
 //   Paso 2: deslizarse a la columna destino a y=2  → (TX, 2)
 //   Paso 3: bajar al destino                       → (TX, TY)
 // La guarda (X\==TX | Y\==2) evita recursión cuando el robot ya está en (TX,2).
-+!navigate(TX, TY) : TX < 5 & TY < 2 & robot_pos(X, Y) & (X \== TX | Y \== 2) <-
+// Expansión (x=3-4) queda excluida: navega directo para evitar que varios robots
+// se bloqueen mutuamente en el corredor y=2 yendo a expansión simultáneamente.
++!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & (X \== TX | Y \== 2) <-
     !navigate(X, 2);
     !navigate(TX, 2);
     !navigate(TX, TY).
 
-// Saliendo de zona izquierda (x<5, y<2) hacia el este (entrada, estanterías):
-// subir a y=2 primero para no cruzar la zona de expansión/entrada a y=0-1.
-+!navigate(TX, TY) : TX >= 5 & TY < 2 & robot_pos(X, Y) & X < 5 & Y < 2 <-
+// Saliendo de zona izquierda (x<5, y<2) hacia el este, cualquier destino:
+// subir a y=2 primero para no cruzar la zona de entrada (x=5-7, y=0-1) que puede
+// tener contenedores re-encolados bloqueando el paso, independientemente de TY.
++!navigate(TX, TY) : TX >= 5 & robot_pos(X, Y) & X < 5 & Y < 2 <-
     !navigate(X, 2);
     !navigate(TX, TY).
 
@@ -297,7 +300,21 @@ shelf_max_weight("shelf_9", 350).
     drop_in_outbound(CId);
     !release_zone(outbound).
 
+-!drop_at_outbound(CId) : outbound_drop_retries(CId, N) & N >= 3 <-
+    .abolish(outbound_drop_retries(CId, _));
+    !release_zone(outbound);
+    .fail.
+
+-!drop_at_outbound(CId) : outbound_drop_retries(CId, N) <-
+    N1 = N + 1;
+    -outbound_drop_retries(CId, _);
+    +outbound_drop_retries(CId, N1);
+    !release_zone(outbound);
+    .wait(2000);
+    !drop_at_outbound(CId).
+
 -!drop_at_outbound(CId) <-
+    +outbound_drop_retries(CId, 1);
     !release_zone(outbound);
     .wait(1500);
     !drop_at_outbound(CId).

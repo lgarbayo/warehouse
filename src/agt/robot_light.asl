@@ -109,9 +109,6 @@ nav_limit(300).
  * NAVEGACIÓN AUTÓNOMA
  * ============================================================================ */
 
-// corridor_row: legacy — definido pero no usado en ninguna regla de navegación actual.
-corridor_row(1). corridor_row(4). corridor_row(5).
-corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
 +!navigate(TX, TY) : robot_pos(TX, TY) <- true.
 
@@ -335,7 +332,8 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .abolish(error(_, _));
     !release_zone(inbound);
     !release_zone(expansion);
-    if (container_at_entrance(_, _, Weight, W, H) &
+    if (container_at_entrance(_, Type, Weight, W, H) &
+            not blocked_type(Type) &
             not (Weight > 10) & not (W > 1) & not (H > 1)) {
         -+state(idle)
     } else {
@@ -411,6 +409,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     -nav_limit(_); +nav_limit(300);
     !drop_at_outbound(CId);
     .wait(500);
+    .abolish(outbound_drop_retries(CId, _));
 
     .my_name(Me);
     .time(Hd, Md, Sd); Td = Hd * 3600 + Md * 60 + Sd;
@@ -440,6 +439,7 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
 -!execute_exit(CId, ShelfId) : exit_picked(CId) <-
     .print("⚠️ [LIGHT] Fallo en execute_exit tras pickup, devolviendo ", CId, " a ", ShelfId);
+    .abolish(outbound_drop_retries(CId, _));
     -exit_claimed(CId);
     -exit_picked(CId);
     !return_to_shelf(CId, ShelfId);
@@ -487,30 +487,62 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .send(supervisor, tell, robot_error(Me, destination_conflict, Data));
     .wait(800).
 
++error(robot_not_found, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, robot_not_found, Data));
+    -+state(idle); -+carrying(none).
+
++error(not_carrying, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, not_carrying, Data));
+    -+state(idle); -+carrying(none).
+
++error(invalid_pickup, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, invalid_pickup, Data));
+    -+state(idle); -+carrying(none).
+
++error(invalid_drop, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, invalid_drop, Data));
+    -+state(idle); -+carrying(none).
+
++error(too_far, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, too_far, Data)).
++error(too_far, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, too_far, Data)).
 +error(too_far, Data) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_error(Me, too_far, Data));
     -+state(idle); -+carrying(none).
 
++error(route_blocked, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, route_blocked, Data)).
++error(route_blocked, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, route_blocked, Data)).
 +error(route_blocked, Data) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_error(Me, route_blocked, Data));
     -+state(idle); -+carrying(none).
 
++error(path_blocked, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
++error(path_blocked, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
 +error(path_blocked, Data) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_error(Me, path_blocked, Data));
     -+state(idle); -+carrying(none).
 
++error(illegal_move, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, illegal_move, Data)).
++error(illegal_move, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, illegal_move, Data)).
 +error(illegal_move, Data) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_error(Me, illegal_move, Data));
     -+state(idle); -+carrying(none).
 
-+error(robot_not_found, Data) : true <-
-    .my_name(Me);
-    .send(supervisor, tell, robot_error(Me, robot_not_found, Data));
-    -+state(idle); -+carrying(none).
 
 +error(ErrorType, Data) : carrying(CId) <-
     .send(supervisor, tell, container_error(CId, ErrorType));

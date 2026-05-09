@@ -46,6 +46,7 @@ errors_by_type(deadline_missed, 0).
 errors_by_type(not_carrying, 0).
 errors_by_type(invalid_pickup, 0).
 errors_by_type(invalid_drop, 0).
+errors_by_type(robot_not_found, 0).
 
 /* Estado de los robots */
 robot_status(robot_light, idle).
@@ -141,7 +142,7 @@ shelf_type("shelf_9", non_urgent).
     !print_robot_status;
     .print("========================================").
 
-// Imprime errores de contenedor y de navegación agrupados por tipo
+// Imprime errores de contenedor y de robot agrupados por tipo
 +!print_errors_by_type : true <-
     .findall(T, errors_by_type(T, _), ContainerTypes);
     !print_error_list(ContainerTypes);
@@ -158,7 +159,7 @@ shelf_type("shelf_9", non_urgent).
 +!print_error_list([_|Rest]) : true <-
     !print_error_list(Rest).
 
-// Navegación: itera la lista deduplicando con Seen
+// Errores de robot: itera deduplicando con Seen para no repetir tipos
 +!print_nav_error_list([], _) : true <- true.
 
 +!print_nav_error_list([T|Rest], Seen) : .member(T, Seen) <-
@@ -166,7 +167,7 @@ shelf_type("shelf_9", non_urgent).
 
 +!print_nav_error_list([T|Rest], Seen) : true <-
     .count(navigation_error_occurred(_, T, _), N);
-    .print("  ", T, " (nav): ", N);
+    .print("  ", T, " (robot): ", N);
     !print_nav_error_list(Rest, [T|Seen]).
 
 /* ============================================================================
@@ -238,6 +239,19 @@ shelf_type("shelf_9", non_urgent).
  * MONITORIZACIÓN - Errores
  * Los robots notifican al supervisor cuando detectan un error
  * ============================================================================ */
+
+// Errores de robot (navegación, estado inconsistente): registrar en navigation_error_occurred
+// y actualizar el total combinado con errores de contenedor.
++robot_error(Robot, ErrorType, Data)[source(_)] : true <-
+    if (not navigation_error_occurred(Robot, ErrorType, Data)) {
+        +navigation_error_occurred(Robot, ErrorType, Data);
+        .count(error_occurred(_,_), CE);
+        .count(navigation_error_occurred(_,_,_), NE);
+        N = CE + NE;
+        -total_errors(_);
+        +total_errors(N);
+        !update_rates
+    }.
 
 +container_error(CId, ErrorType)[source(Robot)] : true <-
     .print("[SUPERVISOR] ERROR en ", CId, " tipo: ", ErrorType, " por ", Robot);

@@ -1360,24 +1360,27 @@ addPercept(...container_at_entrance...);
 
 **Problema**: el layout del grid tiene el outbound en x=0-2, la clasificación/expansión en x=3-4, y la entrada en x=5-7, todas en y=0-1. Cuando un robot navegaba hacia outbound desde las estanterías (lado derecho), la ruta greedy cruzaba y=0-1 horizontalmente pasando por la zona de entrada (x=5-7) donde podían estar contenedores re-encolados. Si cuatro robots bloqueaban las cuatro celdas adyacentes al robot, éste quedaba atrapado indefinidamente.
 
-**Solución final — regla de 3 pasos** en `common.asl`: garantiza que el robot **nunca entra en y=0-1 mientras está en x≥3** de camino a outbound. Lo hace subiendo siempre a y=2 primero, deslizándose horizontalmente por el corredor libre, y bajando solo en la columna destino:
+**Solución final — regla de 3 pasos** en `common.asl`: garantiza que el robot **nunca entra en y=0-1 mientras está en x≥3** de camino a outbound. Solo aplica a outbound (TX<3); la expansión (x=3-4) se excluye deliberadamente para evitar congestión en y=2 cuando varios robots hacen expansion_drop simultáneamente.
 
 ```agentspeak
 // Paso 1: subir a y=2 en la columna actual   → (X, 2)
 // Paso 2: deslizarse a la columna destino    → (TX, 2)
 // Paso 3: bajar al destino                  → (TX, TY)
-+!navigate(TX, TY) : TX < 5 & TY < 2 & robot_pos(X, Y) & (X \== TX | Y \== 2) <-
++!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & (X \== TX | Y \== 2) <-
     !navigate(X, 2);
     !navigate(TX, 2);
     !navigate(TX, TY).
 ```
 
-La guarda `(X \== TX | Y \== 2)` detiene la recursión cuando el robot ya está en `(TX, 2)` — ambas condiciones falsas implican que el robot está exactamente ahí. La regla cubre outbound (x=0-2) y expansión (x=3-4), que comparten la franja y=0-1.
+La guarda `(X \== TX | Y \== 2)` detiene la recursión cuando el robot ya está en `(TX, 2)`.
 
-Se añadió también la regla simétrica para salir de la zona izquierda (x<5, y<2) hacia el este sin cruzar y=0-1 de vuelta:
+Se añadieron dos reglas simétricas para salir de la zona izquierda (x<5, y<2):
 
 ```agentspeak
-+!navigate(TX, TY) : TX >= 5 & TY < 2 & robot_pos(X, Y) & X < 5 & Y < 2 <-
+// Hacia el este con cualquier destino: subir a y=2 antes de cruzar x=5-7.
+// Sin esta regla, el robot intentaba cruzar y=0-1 en x=5-7 (zona de entrada),
+// bloqueado por contenedores re-encolados si el robot está en expansión (x=3-4).
++!navigate(TX, TY) : TX >= 5 & robot_pos(X, Y) & X < 5 & Y < 2 <-
     !navigate(X, 2);
     !navigate(TX, TY).
 ```
@@ -1394,3 +1397,58 @@ Revisión completa de comentarios en todos los ficheros del proyecto:
   - Robots (×4): `nav_limit` — contador anti-bucle infinito en navigate; `corridor_row` — marcado como legacy sin uso en ninguna regla actual.
   - `scheduler.asl`: conversión `DT*1000` a ms para `.wait`; semántica de `T1 = T0+DT` (fase no urgente arranca al terminar la urgente); ventana `2·ΔT` para la fase no urgente; `active_exit_cycle` — exclusión mutua entre ciclos.
   - `supervisor.asl`: mecanismo de cola del mutex de zona (concesión directa, encolado único, transferencia sin pasar por `zone_free`); `deadline_checked` — previene doble notificación entre monitor periódico y handler de retracción.
+
+### Fix: Bug 6 (parcial) — desincronización Java-Jason durante ciclo de salida y expansion_drop (`common.asl`, 4 robots)
+
+**Problema**: cuando `path_blocked` u otro error de navegación ocurría mientras un robot portaba un contenedor en dos contextos críticos, el handler reactivo genérico reseteaba `state(idle)` y `carrying(none)` en Jason sin acción Java correspondiente, causando:
+- Durante `!execute_exit` (ciclo de salida): el robot quedaba físicamente portando el contenedor indefinidamente. La zona `outbound` nunca se liberaba, bloqueando a cualquier otro robot que esperase adquirirla.
+- Durante `!safe_expand_drop`: misma desincronización pero con la zona `expansion`.
+
+**Solución**: handlers contextuales que inhiben el reset de estado según el contexto activo, dejando que la jerarquía de planes gestione el fallo:
+
+```agentspeak
+// Durante ciclo de salida: no resetear — propaga a -!execute_exit : exit_picked
++error(path_blocked, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
+
+// Durante expansion_drop: no resetear — propaga a -!safe_expand_drop
++error(path_blocked, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
+
+// Caso general: reset normal
++error(path_blocked, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, path_blocked, Data));
+    -+state(idle); -+carrying(none).
+```
+
+Aplica a `path_blocked`, `route_blocked`, `too_far` e `illegal_move` en los 4 robots.
+
+`drop_at_outbound` añade límite de 3 reintentos: al agotarse propaga `.fail` a `!execute_exit`, cuyo handler de fallo (`exit_picked`) devuelve el contenedor a la estantería o llama `unclaim_container`.
+
+### Fix: `check_queue` ignora contenedores bloqueados durante ciclo de salida (4 robots)
+
+**Problema**: al terminar una tarea durante el ciclo de salida (`blocked_type(standard)` activo), `check_queue` detectaba contenedores en entrada que encajaban en capacidad pero estaban bloqueados. Decidía no volver a base (había trabajo "disponible"), pero luego `check_pending_containers` no podía reclamarlos. El robot quedaba parado en su posición actual hasta que el ciclo terminase.
+
+**Solución**: añadir `not blocked_type(Type)` a la condición de `check_queue` en los 4 robots:
+
+```agentspeak
+if (container_at_entrance(_, Type, Weight, W, H) &
+        not blocked_type(Type) &          // ← nuevo
+        not (Weight > 10) & ...) {
+    -+state(idle)
+} else {
+    -+state(returning); !navigate(InitX, InitY); -+state(idle)
+}.
+```
+
+### Fix: restauración de tracking de errores de robot (`supervisor.asl`, 4 robots, `WarehouseArtifact.java`)
+
+**Problema**: el refactor a pull-protocol (`ba48854`) eliminó el handler `+robot_error[source(Robot)]` del supervisor que populaba `navigation_error_occurred`, dejando las queries (`.findall`, `.count`) como código muerto. Adicionalmente, los handlers para `not_carrying`, `invalid_pickup`, `invalid_drop` y `robot_not_found` en los robots no enviaban al supervisor, y Java no emitía `robot_not_found`.
+
+**Solución**:
+- **Supervisor**: handler `+robot_error(Robot, ErrorType, Data)[source(_)]` que añade `navigation_error_occurred` y recalcula `total_errors` combinando errores de contenedor y de robot. Sección de impresión `!print_nav_error_list` restaurada en el reporte periódico.
+- **4 robots**: handlers específicos para `robot_not_found`, `not_carrying`, `invalid_pickup` e `invalid_drop` que envían `robot_error` al supervisor antes de resetear estado.
+- **Java**: `addError(agName, "robot_not_found", agName)` en `executeMoveStep` y `executePickup` cuando `robots.get(agName)` devuelve null.
+
+El reporte periódico ahora diferencia errores de contenedor (p.ej. `no_shelf_space`) de errores de robot (p.ej. `path_blocked (robot): N`).

@@ -43,9 +43,6 @@ shelf_for(non_urgent, heavy,  "shelf_9").
  * REGLAS
  * ============================================================================ */
 
-urgency_of(urgent,   urgent).
-urgency_of(standard, non_urgent).
-urgency_of(fragile,  non_urgent).
 
 /* ============================================================================
  * SEGUIMIENTO DE ALMACENAMIENTO (necesario para ciclo de salida)
