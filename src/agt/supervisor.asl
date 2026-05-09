@@ -334,11 +334,8 @@ shelf_type("shelf_9", non_urgent).
     if (Tnow >= Deadline) {
         +deadline_checked(urgent);
         .findall(CId,
-            (container_stored_fact(CId, _) &
-             container_received_type(CId, ContType) &
-             urgent_container_type(ContType) &
-             not container_delivered_fact(CId)),
-            Missed);
+            (container_stored_fact(CId, _) & container_received_type(CId, ContType) &
+            urgent_container_type(ContType) & not container_delivered_fact(CId)), Missed);
         !report_deadline_missed(Missed)
     } else {
         .wait(5000);
@@ -356,11 +353,8 @@ shelf_type("shelf_9", non_urgent).
     if (Tnow >= Deadline) {
         +deadline_checked(non_urgent);
         .findall(CId,
-            (container_stored_fact(CId, _) &
-             container_received_type(CId, ContType) &
-             non_urgent_container_type(ContType) &
-             not container_delivered_fact(CId)),
-            Missed);
+            (container_stored_fact(CId, _) & container_received_type(CId, ContType) &
+            non_urgent_container_type(ContType) & not container_delivered_fact(CId)), Missed);
         !report_deadline_missed(Missed)
     } else {
         .wait(5000);
@@ -370,15 +364,16 @@ shelf_type("shelf_9", non_urgent).
 +!monitor_deadline(_, non_urgent, _) : true <- true.
 -!monitor_deadline(_, non_urgent, _) : true <- true.
 
+// deadline_checked(Cat) previene la doble notificación: si el monitor periódico detecta
+// el incumplimiento y llama !report_deadline_missed, la creencia bloquea al handler
+// de retracción (-active_deadline) para que no vuelva a reportar los mismos contenedores.
+
 // Backup: el scheduler retira la creencia antes de que el monitor detecte el incumplimiento
 // (p.ej. el monitor estaba en .wait cuando expiró el plazo)
 -active_deadline(_, urgent, _) : not deadline_checked(urgent) <-
     .findall(CId,
-        (container_stored_fact(CId, _) &
-         container_received_type(CId, ContType) &
-         urgent_container_type(ContType) &
-         not container_delivered_fact(CId)),
-        Missed);
+        (container_stored_fact(CId, _) & container_received_type(CId, ContType) &
+        urgent_container_type(ContType) & not container_delivered_fact(CId)), Missed);
     !report_deadline_missed(Missed);
     -deadline_checked(urgent).
 
@@ -386,11 +381,8 @@ shelf_type("shelf_9", non_urgent).
 
 -active_deadline(_, non_urgent, _) : not deadline_checked(non_urgent) <-
     .findall(CId,
-        (container_stored_fact(CId, _) &
-         container_received_type(CId, ContType) &
-         non_urgent_container_type(ContType) &
-         not container_delivered_fact(CId)),
-        Missed);
+        (container_stored_fact(CId, _) & container_received_type(CId, ContType) &
+        non_urgent_container_type(ContType) & not container_delivered_fact(CId)), Missed);
     !report_deadline_missed(Missed);
     -deadline_checked(non_urgent).
 
@@ -421,6 +413,11 @@ shelf_type("shelf_9", non_urgent).
  * MUTEX DE ZONA - Acceso exclusivo a zonas críticas
  * ============================================================================ */
 
+// Mutex de zona: el supervisor actúa como árbitro centralizado.
+// Si la zona está libre, se concede directamente. Si está ocupada, se encola al robot
+// solicitante (máximo un robot en cola por zona; intentos duplicados del mismo robot se ignoran).
+// Al liberar, si hay robot en cola se le transfiere la zona sin pasar por zone_free,
+// garantizando exclusión mutua estricta sin polling activo por parte de los robots.
 +request_zone(Zone)[source(Robot)] : zone_free(Zone) <-
     -zone_free(Zone);
     +zone_held(Zone, Robot);

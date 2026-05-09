@@ -11,6 +11,12 @@
  * TEMPORIZACIÓN
  * ============================================================================ */
 
+// ΔT = 120s: tiempo máximo por fase del ciclo de salida.
+// Justificación: un robot heavy (velocidad 1, 1 celda/paso) desde shelf_9
+// (x≈18, y≈10) hasta outbound (x=0-2, y=0-1) recorre ~26 celdas.
+// Con backoffs y congestión de navegación el tiempo real puede ser 2-3x,
+// llegando a ~90-100s. 120s da margen suficiente para el peor caso.
+// Fase urgente: [T0, T0+ΔT). Fase no urgente: [T0+ΔT, T0+3·ΔT).
 delta_t(120).
 
 /* ============================================================================
@@ -58,7 +64,7 @@ shelf_max_weight("shelf_9", 350).
 
 /* ============================================================================
  * SELECCIÓN AUTÓNOMA DE ESTANTERÍA
- * Planes compartidos por los tres robots. Cada robot los incluye vía common.asl.
+ * Planes compartidos por los 4 robots. Cada robot los incluye vía common.asl.
  * La selección se basa en el peso del contenedor, no en el tipo de robot.
  * ============================================================================ */
 
@@ -81,13 +87,10 @@ shelf_max_weight("shelf_9", 350).
 // Fallback urgente: respeta urgencia y categoría de tamaño
 +!pick_shelf(CId, Weight, W, H) : claimed_type(CId, "urgent") <-
     .findall(pair(Occ, S), (shelf_urgency(S, urgent) & shelf_available(S) &
-                             shelf_occupancy(S, Occ) & Occ < 85 &
-                             not expansion_failed_shelf(CId, S) &
-                             shelf_max_weight(S, MaxW) & Weight <= MaxW &
-                             shelf_category(S, Cat) &
-                             (Cat == heavy |
-                              (Weight > 10 & Weight <= 30 & (Cat == medium | Cat == heavy)) |
-                              Weight <= 10)), Pairs);
+        shelf_occupancy(S, Occ) & Occ < 85 & not expansion_failed_shelf(CId, S) &
+        shelf_max_weight(S, MaxW) & Weight <= MaxW & shelf_category(S, Cat) &
+        (Cat == heavy | (Weight > 10 & Weight <= 30 & (Cat == medium | Cat == heavy)) |
+        Weight <= 10)), Pairs);
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +shelf_selected(CId, ShelfId).
 
@@ -109,13 +112,10 @@ shelf_max_weight("shelf_9", 350).
 // Fallback no urgente: respeta urgencia y categoría de tamaño
 +!pick_shelf(CId, Weight, W, H) : shelf_available(_) <-
     .findall(pair(Occ, S), (shelf_urgency(S, non_urgent) & shelf_available(S) &
-                             shelf_occupancy(S, Occ) & Occ < 85 &
-                             not expansion_failed_shelf(CId, S) &
-                             shelf_max_weight(S, MaxW) & Weight <= MaxW &
-                             shelf_category(S, Cat) &
-                             (Cat == heavy |
-                              (Weight > 10 & Weight <= 30 & (Cat == medium | Cat == heavy)) |
-                              Weight <= 10)), Pairs);
+        shelf_occupancy(S, Occ) & Occ < 85 & not expansion_failed_shelf(CId, S) &
+        shelf_max_weight(S, MaxW) & Weight <= MaxW & shelf_category(S, Cat) &
+        (Cat == heavy | (Weight > 10 & Weight <= 30 & (Cat == medium | Cat == heavy)) |
+        Weight <= 10)), Pairs);
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +shelf_selected(CId, ShelfId).
 
@@ -133,7 +133,9 @@ shelf_max_weight("shelf_9", 350).
     .send(supervisor, tell, container_error(CId, no_shelf_space));
     !check_queue.
 
-// Cooldown: impide re-reclamar el mismo contenedor durante 20s tras fallo de estantería
+// Cooldown de 20s tras agotar reintentos: evita que dos robots pesados se alternen
+// reclamando el mismo contenedor sin estantería disponible, generando un bucle
+// de errores que impide que el exit cycle tenga tiempo de liberar espacio.
 +shelf_wait(CId) <- .wait(20000); -shelf_wait(CId).
 -container_at_entrance(CId, _, _, _, _) : shelf_wait(CId) <- -shelf_wait(CId).
 
@@ -221,11 +223,14 @@ shelf_max_weight("shelf_9", 350).
  * MUTEX DE ZONA
  * ============================================================================ */
 
+// Si el robot ya tiene la zona (p.ej. re-intento tras fallo), no la pide de nuevo.
 +!acquire_zone(Zone) : holding_zone(Zone) <- true.
 
 +!acquire_zone(Zone) <-
     -zone_granted(Zone);
-    .send(supervisor, tell, request_zone(Zone)); //ask??
+    .send(supervisor, tell, request_zone(Zone));
+    // .wait/1 con un literal de creencia suspende la intención hasta que esa creencia
+    // aparezca en la base — es el patrón Jason de bloqueo sin polling activo.
     .wait(zone_granted(Zone));
     -zone_granted(Zone);
     +holding_zone(Zone).
@@ -234,9 +239,12 @@ shelf_max_weight("shelf_9", 350).
     -holding_zone(Zone);
     .send(supervisor, tell, release_zone(Zone)).
 
+// Idempotente: si el robot no tenía la zona (p.ej. fallo antes de acquire), no falla.
 +!release_zone(Zone) : true <- true.
 
-// Selecciona la estantería menos ocupada de una categoría y urgencia dadas (< 85%)
+// Heurística greedy: elige la estantería menos ocupada de la categoría y urgencia
+// correctas. El umbral del 85% reserva margen para contenedores de tamaño variable
+// que podrían no caber aunque la ocupación por peso esté por debajo del 100%.
 +!pick_least_occupied_shelf(CId, Cat, Urg) <-
     .findall(pair(Occ, S), (shelf_category(S, Cat) & shelf_urgency(S, Urg) &
                              shelf_available(S) & shelf_occupancy(S, Occ) & Occ < 85 &
@@ -246,25 +254,37 @@ shelf_max_weight("shelf_9", 350).
 
 /* ============================================================================
  * ENTREGA EN OUTBOUND
- * Si el robot ya está en una celda outbound (x=17-19, y=0-1), suelta
- * inmediatamente. Evita oscilación cuando el nav_target exacto está ocupado.
+ * Layout de zonas en y=0-1 (de izquierda a derecha):
+ *   x=0-2: outbound (rojo) | x=3-4: expansión (amarillo) | x=5-7: entrada (verde)
+ * Los robots no deben cruzar estas zonas horizontalmente a y=0-1 porque
+ * pueden haber contenedores re-encolados bloqueando el paso.
  * ============================================================================ */
 
-// Going to left outbound/expansion/classification (TX < 5, TY < 2):
-// approach at y=2 first to avoid crossing entrance (x=5-7) and classification (x=3-4) zones at y=0-1.
-// Guard X > TX ensures no recursion when robot is already in the target column.
-+!navigate(TX, TY) : TX < 5 & TY < 2 & robot_pos(X, Y) & Y > 1 & X > TX <-
+// Yendo a outbound o expansión (TX<5, TY<2): tres pasos fijos que garantizan
+// que el robot nunca cruza la franja y=0-1 en x=3-7 (expansión/entrada).
+//   Paso 1: subir a y=2 en la columna actual      → (X, 2)
+//   Paso 2: deslizarse a la columna destino a y=2  → (TX, 2)
+//   Paso 3: bajar al destino                       → (TX, TY)
+// La guarda (X\==TX | Y\==2) evita recursión cuando el robot ya está en (TX,2).
++!navigate(TX, TY) : TX < 5 & TY < 2 & robot_pos(X, Y) & (X \== TX | Y \== 2) <-
+    !navigate(X, 2);
     !navigate(TX, 2);
     !navigate(TX, TY).
 
-// At x=17-18 heading to outbound but blocked by y=2-3 shelf cells (S4 at x=16-17):
-// step to x=19 first (free column), then descend into zone.
+// Saliendo de zona izquierda (x<5, y<2) hacia el este (entrada, estanterías):
+// subir a y=2 primero para no cruzar la zona de expansión/entrada a y=0-1.
++!navigate(TX, TY) : TX >= 5 & TY < 2 & robot_pos(X, Y) & X < 5 & Y < 2 <-
+    !navigate(X, 2);
+    !navigate(TX, TY).
+
+// En x=17-18 yendo al corredor derecho (TX>=17, TY<2): las celdas y=2-3 de S4
+// (x=16-17) bloquean el descenso directo. Rodear por x=19 (columna libre).
 +!navigate(TX, TY) : TX >= 17 & TY < 2 & robot_pos(X, Y) & X >= 17 & X < 19 & Y >= 2 <-
     !navigate(19, Y);
     !navigate(TX, TY).
 
-// At x=19, y>=2, heading to right outbound: descend x=19 column into zone.
-// TX\==19 guard prevents recursion when inner !navigate(19,1) re-evaluates this plan.
+// En x=19, y>=2, yendo al outbound derecho: descender por la columna x=19.
+// La guarda TX\==19 evita recursión cuando el !navigate(19,1) interior se reevalúa.
 +!navigate(TX, TY) : TX >= 17 & TY < 2 & TX \== 19 & robot_pos(X, Y) & X == 19 & Y >= 2 <-
     !navigate(19, 1);
     !navigate(TX, TY).

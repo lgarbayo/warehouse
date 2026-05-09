@@ -1356,16 +1356,41 @@ addPercept(...container_at_entrance...);
 
 **Justificación**: `delta_t(120)` da margen suficiente para el robot más lento en el peor caso de distancia. El enunciado especifica que ΔT es configurable y debe justificarse en la memoria.
 
-### Fix: navegación a outbound lado izquierdo bloqueada por zona de entrada (`common.asl`)
+### Fix: navegación a outbound bloqueada por zona de entrada (`common.asl`)
 
-**Problema**: el layout del grid tiene el outbound en x=0-2, la zona de clasificación/expansión en x=3-4, y la zona de entrada en x=5-7, todas en y=0-1. Cuando un robot navegaba hacia outbound (TX<3, TY<2) desde las estanterías (derecha del grid), la ruta greedy cruzaba la fila y=0-1 de izquierda a derecha, pasando por la zona de entrada (x=5-7) donde podían estar contenedores re-encolados. Esto bloqueaba la navegación y podía aplastar contenedores.
+**Problema**: el layout del grid tiene el outbound en x=0-2, la clasificación/expansión en x=3-4, y la entrada en x=5-7, todas en y=0-1. Cuando un robot navegaba hacia outbound desde las estanterías (lado derecho), la ruta greedy cruzaba y=0-1 horizontalmente pasando por la zona de entrada (x=5-7) donde podían estar contenedores re-encolados. Si cuatro robots bloqueaban las cuatro celdas adyacentes al robot, éste quedaba atrapado indefinidamente.
 
-**Solución**: nueva regla de navegación en `common.asl` que, cuando el destino es TX<5 y TY<2, hace que el robot descienda primero a y=2 (fila libre) y luego se desplace horizontalmente hasta la columna destino antes de bajar a TY:
+**Solución final — regla de 3 pasos** en `common.asl`: garantiza que el robot **nunca entra en y=0-1 mientras está en x≥3** de camino a outbound. Lo hace subiendo siempre a y=2 primero, deslizándose horizontalmente por el corredor libre, y bajando solo en la columna destino:
 
 ```agentspeak
-+!navigate(TX, TY) : TX < 5 & TY < 2 & robot_pos(X, Y) & Y > 1 & X > TX <-
+// Paso 1: subir a y=2 en la columna actual   → (X, 2)
+// Paso 2: deslizarse a la columna destino    → (TX, 2)
+// Paso 3: bajar al destino                  → (TX, TY)
++!navigate(TX, TY) : TX < 5 & TY < 2 & robot_pos(X, Y) & (X \== TX | Y \== 2) <-
+    !navigate(X, 2);
     !navigate(TX, 2);
     !navigate(TX, TY).
 ```
 
-El guard `X > TX` previene recursión cuando el robot ya está en la columna destino. La regla cubre outbound (x=0-2), expansión (x=3-4) y el acceso a clasificación.
+La guarda `(X \== TX | Y \== 2)` detiene la recursión cuando el robot ya está en `(TX, 2)` — ambas condiciones falsas implican que el robot está exactamente ahí. La regla cubre outbound (x=0-2) y expansión (x=3-4), que comparten la franja y=0-1.
+
+Se añadió también la regla simétrica para salir de la zona izquierda (x<5, y<2) hacia el este sin cruzar y=0-1 de vuelta:
+
+```agentspeak
++!navigate(TX, TY) : TX >= 5 & TY < 2 & robot_pos(X, Y) & X < 5 & Y < 2 <-
+    !navigate(X, 2);
+    !navigate(TX, TY).
+```
+
+### Mejoras de documentación y calidad de código (`WarehouseArtifact.java`, todos los `.asl`)
+
+Revisión completa de comentarios en todos los ficheros del proyecto:
+
+- **Traducción**: todos los comentarios en inglés traducidos al castellano en `WarehouseArtifact.java` y en los cuatro robots (`robot_heavy`, `robot_heavy2`, `robot_medium`, `robot_light`), `common.asl`, `scheduler.asl` y `supervisor.asl`.
+
+- **Comentarios explicativos añadidos** (solo donde el WHY no es obvio):
+  - `WarehouseArtifact.java`: bloque `synchronized` en `executeMoveStep` (qué protege y por qué el check externo queda fuera), `setDaemon(true)` (terminación automática con JVM), `putIfAbsent` en `executeClaimContainer` (atomicidad frente a reclamaciones concurrentes), drop de seguridad en `executeReleaseTask` (sincronización Java cuando Jason ya reseteó `carrying`), sort por distancia en `executeMoveToExpansion` (minimizar trayecto), no re-emit en `executeDropInExpansion` (cadena de responsabilidad va por scheduler), `emitShelfAvailable` en `executePickupFromShelf` (restaurar disponibilidad tras retirada).
+  - `common.asl`: `.wait(zone_granted)` — patrón Jason de suspensión por creencia sin polling; `!release_zone : true <- true` — idempotencia.
+  - Robots (×4): `nav_limit` — contador anti-bucle infinito en navigate; `corridor_row` — marcado como legacy sin uso en ninguna regla actual.
+  - `scheduler.asl`: conversión `DT*1000` a ms para `.wait`; semántica de `T1 = T0+DT` (fase no urgente arranca al terminar la urgente); ventana `2·ΔT` para la fase no urgente; `active_exit_cycle` — exclusión mutua entre ciclos.
+  - `supervisor.asl`: mecanismo de cola del mutex de zona (concesión directa, encolado único, transferencia sin pasar por `zone_free`); `deadline_checked` — previene doble notificación entre monitor periódico y handler de retracción.

@@ -207,7 +207,7 @@ public class WarehouseArtifact extends Environment {
     private void startContainerGenerator() {
         containerGeneratorExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "ContainerGenerator");
-            t.setDaemon(true);
+            t.setDaemon(true); // Daemon: se termina automáticamente al salir la JVM sin bloquear el shutdown
             return t;
         });
 
@@ -474,6 +474,10 @@ public class WarehouseArtifact extends Environment {
             // en que un contenedor aparece en la celda entre esta comprobación y el movimiento.
             if (hayContenedorEn(targetX, targetY)) return false;
 
+            // El synchronized protege solo la comprobación robot+aplastamiento para evitar
+            // que dos robots acaben en la misma celda por una carrera entre el check y el move.
+            // El check hayContenedorEn anterior queda fuera del sync intencionalmente: es
+            // la barrera "rápida" que evita el 99% de los conflictos sin bloquear el hilo.
             synchronized (this) {
                 if (hayRobotCerca(targetX, targetY)) return false;
 
@@ -822,7 +826,11 @@ public class WarehouseArtifact extends Environment {
                 }
             }
 
-            // Limpiar estado del robot en el entorno
+            // Limpiar estado del robot en el entorno.
+            // El drop físico es un mecanismo de seguridad: si un fallo de plan deja al robot
+            // llevando un contenedor sin llegar a llamar unclaim_container, evita que el
+            // contenedor quede permanentemente perdido. El agente Jason ya habrá reseteado
+            // su creencia carrying(none), pero Java necesita sincronizarse.
             robot.setBusy(false);
             robot.setCurrentTask(null);
             if (robot.isCarrying()) {
@@ -860,6 +868,8 @@ public class WarehouseArtifact extends Environment {
             }
             if (cells.isEmpty()) return false;
 
+            // Celda más cercana al robot: minimiza el trayecto y reduce la probabilidad
+            // de que el corredor y=2 esté saturado durante la navegación de expansión.
             cells.sort((a, b) -> {
                 int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
                 int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
@@ -891,6 +901,8 @@ public class WarehouseArtifact extends Environment {
             robot.drop();
             container.setPicked(false);
             container.setPosition(rx, ry);
+            // No se re-emite container_at_entrance aquí: el agente Jason notifica
+            // container_in_expansion al scheduler, que decide si reasignar o esperar.
 
             System.out.println("[" + agName + "] " + containerId + " depositado en zona de expansión (" + rx + "," + ry + ")");
             if (view != null) {
@@ -915,6 +927,8 @@ public class WarehouseArtifact extends Environment {
             Container container = containers.get(containerId);
             if (container == null || container.isBroken()) return false;
 
+            // putIfAbsent es atómica: garantiza que solo un robot puede reclamar
+            // el contenedor aunque varios ejecuten claim_container simultáneamente.
             String prev = claimedContainers.putIfAbsent(containerId, agName);
             if (prev != null) {
                 System.err.println("[CLAIM FAIL] " + agName + " no pudo reclamar " + containerId + " — ya reclamado por: " + prev);
@@ -956,11 +970,11 @@ public class WarehouseArtifact extends Environment {
             String containerId = action.getTerm(0).toString().replace("\"", "");
             claimedContainers.remove(containerId);
 
-            // If the robot is physically carrying this container, force-drop it and
-            // reset position to a free entrance cell (Bug 3 fix: avoids dropping at an
-            // arbitrary warehouse position unreachable by other robots).
-            // If the container was already intentionally placed elsewhere (e.g. expansion
-            // zone via drop_in_expansion), leave its position unchanged.
+            // Si el robot lleva físicamente este contenedor, soltarlo y reposicionar
+            // a una celda libre de la zona de entrada (fix Bug 3: evita depositar en
+            // una posición arbitraria del almacén inaccesible para otros robots).
+            // Si el contenedor ya fue colocado intencionalmente en otro lugar (p. ej.
+            // zona de expansión vía drop_in_expansion), no modificar su posición.
             Robot robot = robots.get(agName);
             boolean wasCarrying = false;
             if (robot != null && robot.isCarrying()) {
@@ -1025,7 +1039,9 @@ public class WarehouseArtifact extends Environment {
                 return false;
             }
 
-            // Restaurar disponibilidad de la estantería si estaba llena
+            // Al retirar un contenedor la estantería recupera espacio: re-emitir
+            // shelf_available aunque no estuviera llena (idempotente) y actualizar
+            // ocupación para que los robots puedan volver a elegirla como destino.
             emitShelfAvailable(shelf.getId());
             emitShelfOccupancy(shelf.getId(), shelf);
 
@@ -1064,10 +1080,10 @@ public class WarehouseArtifact extends Environment {
             if (cells.isEmpty()) return false;
 
             cells.sort((a, b) -> {
-                // Prefer y=0 over y=1: robot approaches from y=2, so picking y=1 creates a
-                // TX-X == Y-TY tie that forces x-first stepping and loops back to y=2.
-                // With y=0, Y-TY=2 > TX-X so try_y_then_x fires, stepping to y=1 (outbound)
-                // which triggers navigate early-exit and immediate drop.
+                // Preferir y=0 sobre y=1: el robot se aproxima desde y=2, así que elegir y=1
+                // crea un empate TX-X == Y-TY que fuerza el paso en x primero y vuelve a y=2.
+                // Con y=0, Y-TY=2 > TX-X, por lo que try_y_then_x dispara primero, bajando
+                // a y=1 (outbound) y ejecutando el drop inmediatamente.
                 if (a[1] != b[1]) return Integer.compare(a[1], b[1]);
                 int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
                 int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
@@ -1182,7 +1198,7 @@ public class WarehouseArtifact extends Environment {
     /**
      * Acción: accept_task(ContainerId)
      * El agente llama esto al aceptar una tarea enviada por el scheduler.
-     * Marca el robot como busy en Java (evita double-assignment via request_task)
+     * Marca el robot como ocupado en Java (evita doble asignación vía request_task)
      * y elimina el contenedor de la cola pendiente.
      */
     private boolean executeAcceptTask(String agName, Structure action) {

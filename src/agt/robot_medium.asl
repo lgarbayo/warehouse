@@ -122,6 +122,7 @@ nav_limit(300).
  * NAVEGACIÓN AUTÓNOMA
  * ============================================================================ */
 
+// corridor_row: legacy — definido pero no usado en ninguna regla de navegación actual.
 corridor_row(1). corridor_row(4). corridor_row(5).
 corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
@@ -147,7 +148,8 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     !navigate(9, TY);
     !navigate(TX, TY).
 
-// X<=14 going to right side (TX>=15): use x=19
+// Desde x<=14 yendo hacia la derecha (TX>=15): usar corredor x=19 en lugar de x=9
+// para repartir la carga entre ambos corredores verticales y reducir congestión.
 +!navigate(TX, TY) : TX >= 15 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X >= 10 & Y \== TY & X <= 14 <-
     !navigate(19, Y);
     !navigate(19, TY);
@@ -167,11 +169,15 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     !navigate(9, TY);
     !navigate(TX, TY).
 
-// TY >= 2 guard: don't force route via (19,TY) when targeting outbound (TY<2)
+// Guarda TY>=2: evita forzar la ruta por x=19 cuando el destino es outbound (TY<2).
+// Sin esta guarda, el robot entraría en bucle: navigate(TX,TY<2) → navigate(19,TY) → navigate(TX,TY<2).
 +!navigate(TX, TY) : TX \== 19 & robot_pos(X, Y) & X == 19 & Y \== TY & TY >= 2 <-
     !navigate(19, TY);
     !navigate(TX, TY).
 
+// nav_limit es un contador de pasos que evita bucles infinitos en navigate.
+// Cada llamada a step_with_retry decrementa el contador; cuando llega a 0,
+// el plan de timeout imprime el error y falla.
 +!navigate(TX, TY) : robot_pos(X, Y) & nav_limit(N) & N > 0 <-
     N1 = N - 1; -nav_limit(_); +nav_limit(N1);
     !step_with_retry(X, Y, TX, TY, 0);

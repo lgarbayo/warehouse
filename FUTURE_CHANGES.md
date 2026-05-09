@@ -27,6 +27,9 @@ Distributed coordination among robots to organize themselves autonomously and ef
 
 ## Mejoras pendientes
 
+LOGS EN INGLÉS, CÓDIGO MUERTO, 
+LOGS DE CONSOLA Y REPL AGENT, POSIBLES FIXES DE BUGS DE EJECUCIÓN.
+
 ### Centralizar coordenadas de zona en `common.asl`
 
 Las coordenadas de zona (outbound en x≥17, y≤1; corredores en x=9 y x=19; posiciones iniciales de robots; etc.) están hardcodeadas en las reglas de navegación de los 4 robots. Si el mapa cambia, hay que actualizarlas manualmente en cada archivo.

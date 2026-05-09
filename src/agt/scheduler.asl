@@ -99,7 +99,10 @@ urgency_of(fragile,  non_urgent).
  * CICLO DE SALIDA — Gestión de deadlines
  * ============================================================================ */
 
-// active_exit_cycle garantiza que solo un ciclo corre a la vez.
+// active_exit_cycle garantiza que solo un ciclo corre a la vez. Si llega un segundo
+// aviso de saturación mientras el ciclo actual está en marcha, el tipo queda bloqueado
+// (blocked_type) pero no se lanza un segundo ciclo concurrente; se procesará en el
+// siguiente ciclo cuando active_exit_cycle ya no esté en la base de creencias.
 +exit_cycle(Type, T0) : not active_exit_cycle <-
     +active_exit_cycle;
     !run_exit_cycle(Type, T0).
@@ -117,7 +120,7 @@ urgency_of(fragile,  non_urgent).
     .send(supervisor, tell, active_deadline(short, urgent, T0));
     .time(H1, M1, S1); Tstart1 = H1 * 3600 + M1 * 60 + S1;
     .print("EVENT | time=", Tstart1, " | agent=scheduler | type=deadline_started | data=urgent");
-    DurShort = DT * 1000;
+    DurShort = DT * 1000;  // ΔT en segundos → ms para .wait
     .wait(DurShort);
     -active_deadline(short, urgent, T0);
     for (.member(R, AllRobots)) { .send(R, untell, active_deadline(short, urgent, T0)); };
@@ -127,13 +130,15 @@ urgency_of(fragile,  non_urgent).
     .send(transport, tell, transport_request(urgent, short));
 
     // ---- Deadline largo: [T0+ΔT, T0+3·ΔT) — salen contenedores no urgentes ----
+    // T1 = T0+ΔT: la fase no urgente arranca justo cuando termina la urgente.
+    // La ventana es 2·ΔT porque los robots no urgentes son más y las estanterías más lejanas.
     T1 = T0 + DT;
     +active_deadline(long, non_urgent, T1);
     for (.member(R, AllRobots)) { .send(R, tell, active_deadline(long, non_urgent, T1)); };
     .send(supervisor, tell, active_deadline(long, non_urgent, T1));
     .time(H3, M3, S3); Tstart2 = H3 * 3600 + M3 * 60 + S3;
     .print("EVENT | time=", Tstart2, " | agent=scheduler | type=deadline_started | data=non_urgent");
-    DurLong = DT * 2 * 1000;
+    DurLong = DT * 2 * 1000;  // 2·ΔT en ms
     .wait(DurLong);
     -active_deadline(long, non_urgent, T1);
     for (.member(R, AllRobots)) { .send(R, untell, active_deadline(long, non_urgent, T1)); };
