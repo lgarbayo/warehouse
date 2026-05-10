@@ -81,6 +81,17 @@ robot supera 300 pasos sin alcanzar el destino, la intención falla con
 nav_timeout. Este límite cubre situaciones en que los pasos individuales no
 fallan pero la trayectoria no converge.
 
+Una situación especialmente delicada es la del contenedor perdido tras un fallo
+en el ciclo de salida. Si pickup_from_shelf tiene éxito —el contenedor ya no
+está en la estantería— pero la navegación posterior hacia el outbound falla, el
+robot intenta devolver el contenedor a la estantería de origen con
+!return_to_shelf. Si esta devolución también falla, una versión anterior del
+sistema depositaba el contenedor en la zona de expansión sin re-emitir
+container_at_entrance, dejándolo en un estado inaccesible para cualquier otro
+robot. El fix actual hace que, en ese caso extremo, unclaim_container reposicione
+físicamente el contenedor en una celda libre de la zona de entrada y re-emita
+container_at_entrance, reintroduciéndolo en el ciclo inbound normal.
+
 La única excepción al principio de entorno delgado en la navegación es la
 acción move_to_expansion. Esta precalcula la distancia Manhattan desde la
 posición del robot a cada celda libre de la zona de clasificación y las emite
@@ -506,12 +517,37 @@ tiempo esperan intervalos distintos y uno cede paso naturalmente al otro.
 Finalmente, nav_limit(300) limita el número total de pasos de cada intento de
 navegación. Si se supera, el plan falla con nav_timeout y el supervisor es
 notificado. Este límite protege contra situaciones en que los pasos individuales
-no fallan pero la trayectoria no converge hacia el destino.
+no fallan pero la trayectoria no converge hacia el destino. La elección de
+nav_limit como mecanismo de timeout no es trivial: una versión anterior usaba
+una creencia inexistente ?nav_abort_signal para propagar el fallo fuera de la
+intención de navegación. Si por error algún agente añadía esa creencia a su
+base de creencias, el mecanismo de abort dejaba de funcionar silenciosamente.
+nav_limit resuelve esto con un contador explícito y determinista, sin
+dependencias ocultas en el estado de la base de creencias.
 
 
 ================================================================================
 SEC. 6.3 — COORDINACIÓN DISTRIBUIDA DE ROBOTS  (nueva sección)
 ================================================================================
+
+El feedback de la primera iteración señalaba la ausencia de planificación
+formal. En el modelo clásico descrito en Russell y Norvig \cite{RussellNorvig2021}, un
+planificador central generaría un plan óptimo teniendo en cuenta todos los
+contenedores pendientes y la disponibilidad de los robots, produciendo
+asignaciones del tipo assign(Robot, CId, ShelfId). En la segunda iteración,
+los objetivos concretos de la asignatura imponen que el scheduler no asigne
+ni tareas ni robots, lo que descarta ese modelo centralizado.
+
+La solución adoptada descentraliza la planificación: cada robot aplica
+localmente la misma lógica que el planificador global aplicaría sobre el
+conjunto. La precondición de exclusión mutua del esquema clásico
+(ps_robot_free(Robot) ∧ ps_pending(CId)) se evalúa de forma distribuida:
+cada robot comprueba su propio estado (state(idle)) y la disponibilidad del
+contenedor (claim_container atómico en Java). La selección de estantería
+replica el criterio greedy del planificador (menor ocupación dentro de la
+categoría compatible). La consistencia global —un contenedor gestionado por
+un único robot, ninguna estantería sobrecargada— se garantiza mediante
+primitivas del entorno compartido, no mediante un árbitro que genere el plan.
 
 La coordinación entre los cuatro robots se basa en tres mecanismos, sin que
 ningún agente centralizado tenga que arbitrar el trabajo individual.
@@ -560,7 +596,20 @@ scheduler comprueba si hay ciclos pendientes y los lanza en orden.
 !run_exit_cycle tiene dos variantes. Para contenedores urgentes activa la fase
 corta (active_deadline(short, urgent, T0)), espera ΔT segundos y notifica al
 agente transport. Para contenedores no urgentes activa la fase larga
-(active_deadline(long, non_urgent, T0)) y espera 2·ΔT. En ambos casos, al
+(active_deadline(long, non_urgent, T0)) y espera 2·ΔT.
+
+Conviene aclarar la relación entre este diseño y la fórmula del enunciado. La
+descripción general define el deadline largo como el que vence en T0 + 3·ΔT,
+lo que supone que ambas fases se ejecutan en secuencia: primero la urgente (ΔT)
+y a continuación la no urgente (2·ΔT adicionales). El diseño implementado,
+en cambio, activa únicamente la fase correspondiente al tipo que saturó.
+Cuando saturan los no urgentes, la fase dura 2·ΔT desde T0; cuando saturan
+los urgentes, dura ΔT desde T0. Esta decisión responde a que ejecutar la fase
+urgente cuando lo que saturó fue una estantería no urgente evacuaría estanterías
+distintas a las que tienen el problema, sin liberar el espacio necesario. Los
+objetivos semanales concretos únicamente exigen que haya como máximo un deadline
+activo en cada instante —condición que el mutex active_exit_cycle garantiza—,
+sin especificar que ambas fases deban ejecutarse siempre en secuencia. En ambos casos, al
 terminar retira blocked_type de todos los robots mediante untell, permitiendo
 que vuelvan a aceptar contenedores del tipo que saturó. La fase activa se
 difunde a los robots por broadcast y el supervisor la recibe también para
@@ -603,6 +652,30 @@ El mecanismo nav_failed previene que un robot monopolice intentos sobre un
 contenedor inaccesible: tras tres fallos al intentar alcanzarlo, el robot añade
 +nav_failed(CId), libera el reclamo y espera 20 segundos antes de volver a
 intentarlo. Durante ese tiempo, otro robot con mejor posición puede reclamarlo.
+
+Existe un mecanismo adicional, shelf_wait, que actúa en un caso distinto al de
+nav_failed: cuando un contenedor no encuentra estantería disponible tras todos
+los reintentos de !pick_shelf, o cuando ha pasado por la zona de expansión las
+veces máximas permitidas, unclaim_container lo re-emite como container_at_entrance
+y shelf_wait(CId) previene que los robots vuelvan a reclamarlo inmediatamente en
+bucle. La creencia se auto-elimina a los 20 segundos, tiempo suficiente para que
+el ciclo de salida libere espacio en alguna estantería compatible.
+
+Al terminar cada tarea, !check_queue comprueba si hay algún contenedor compatible
+esperando en la zona de entrada antes de decidir si el robot navega de vuelta a
+su posición base. Si hay contenedor disponible, el robot pasa directamente a
+state(idle) sin el coste de la navegación de retorno. Si no lo hay, usa el estado
+intermedio state(returning) durante la navegación a base: esto bloquea el trigger
+reactivo +container_at_entrance, evitando que se dispare mientras el robot ya
+está en movimiento y generaría dos intenciones de move_step en paralelo.
+
+Tras un claim exitoso, el robot envía container_claimed(CId, Type, Weight) al
+supervisor. Este mensaje es necesario porque claim_container retira
+container_at_entrance de todos los agentes de forma atómica en Java: si el
+supervisor no ha procesado aún esa percepción, nunca sabrá que el contenedor
+llegó. El handler +container_claimed es la ruta principal del supervisor para
+contabilizar contenedores recibidos; +container_at_entrance actúa como fallback
+en caso de que el percept llegue antes que el mensaje.
 
 Durante el ciclo de salida, los robots seleccionan contenedores de sus propias
 estanterías (creencia local stored) y los extraen con pickup_from_shelf. Si la
@@ -824,6 +897,41 @@ outbound —permitiendo más de un robot en tránsito simultáneamente hacia cel
 distintas— mejoraría el throughput sin introducir colisiones, dado que el
 mecanismo de outboundReservations ya previene la asignación de la misma celda
 a dos robots.
+
+================================================================================
+BIBLIOGRAFÍA  (añadir a la sección de referencias del documento LaTeX)
+================================================================================
+
+Las siguientes referencias deben añadirse a la sección de bibliografía de la
+memoria, complementando las ya existentes de la iteración 1.
+
+[RN21] Russell, S. J., & Norvig, P. (2021). Artificial Intelligence: A Modern
+       Approach (4th ed.). Pearson.
+       Capítulo 11: Planning and Acting in the Real World.
+       — Referencia para la discusión sobre planificación formal distribuida
+         en la sección 6.3. Se cita como "Russell y Norvig (cap. 11)" en el
+         texto al justificar por qué la coordinación distribuida reemplaza un
+         planificador centralizado clásico.
+
+En LaTeX (formato BibTeX):
+
+@book{RussellNorvig2021,
+  author    = {Russell, Stuart J. and Norvig, Peter},
+  title     = {Artificial Intelligence: A Modern Approach},
+  edition   = {4th},
+  publisher = {Pearson},
+  year      = {2021},
+  chapter   = {11}
+}
+
+Cita en el texto: \cite{RussellNorvig2021}
+
+Formato APA 7 (para la sección de Referencias de la memoria):
+
+Russell, S. J., & Norvig, P. (2021). Artificial intelligence: A modern
+  approach (4th ed.). Pearson.
+
+Cita en el texto APA 7: (Russell & Norvig, 2021)
 
 ================================================================================
 FIN DEL BORRADOR
