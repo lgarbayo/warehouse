@@ -862,6 +862,45 @@ QUÉ AÑADIR (nuevas acciones explicadas):
     - !path_backoff como desbloqueo perpendicular
     - nav_limit(300) como timeout global
     - Principio de entorno delgado en move_to_expansion
+
+BORRADOR DE TEXTO — gestión de colisiones con step_with_retry (sección 6.2):
+------
+  Cuando move_step falla porque la celda destino está ocupada por otro
+  robot, el plan !step_with_retry gestiona la colisión de forma autónoma
+  mediante un contador de bloqueos BC (Block Counter) que escala la
+  respuesta según la duración del bloqueo.
+
+  BC comienza en 0 en cada intento de navegación. Cada vez que !do_step
+  falla, el handler negativo correspondiente incrementa BC y decide la
+  siguiente acción según su valor:
+
+    BC 0–1: el bloqueo es probablemente transitorio — el otro robot está
+    de paso. El robot espera un intervalo aleatorio de entre 300 y 1500
+    milisegundos antes de reintentar. La aleatoriedad es deliberada: si
+    dos robots colisionan al mismo tiempo y esperan exactamente lo mismo,
+    volverán a colisionar; con esperas distintas uno cede el paso
+    naturalmente al otro.
+
+    BC 2–3: el bloqueo persiste, lo que indica que el robot bloqueante
+    no se va a mover por sí solo. Se ejecuta !path_backoff, que mueve
+    al robot un paso en dirección perpendicular a su trayectoria para
+    salir del callejón, seguido de una nueva espera aleatoria.
+
+    BC 4–5: el bloqueo es prolongado — posible deadlock entre dos robots
+    mirándose. La espera se extiende a entre 1500 y 3000 milisegundos
+    para dar margen a que el otro robot resuelva su propio bloqueo.
+
+    BC ≥ 6: tras seis intentos fallidos el robot considera el bloqueo
+    irrecuperable. Notifica path_blocked al supervisor y falla la
+    intención, lo que propaga el fallo a !execute_task, que libera el
+    contenedor y resetea el estado del robot para que pueda aceptar
+    una nueva tarea.
+
+  Este mecanismo permite que cuatro robots naveguen simultáneamente sin
+  ningún árbitro de tráfico central: la coordinación emerge del backoff
+  escalonado y la aleatoriedad de los tiempos de espera.
+------
+
   Incluir tabla comparativa BFS vs navegación distribuida:
     | Criterio        | BFS (iter.1)          | Greedy Manhattan (iter.2)  |
     |-----------------|----------------------|----------------------------|
