@@ -19,37 +19,54 @@ No se requiere ningún paso de compilación previo: Jason compila los agentes `.
 
 ---
 
-## Qué hemos implementado
+## Estado de la entrega (iteración 2)
 
-Partimos del proyecto base proporcionado y lo extendimos de forma sustancial. Los cinco agentes están completamente implementados y el entorno Java fue modificado en varios puntos críticos.
+Esta entrega extiende la solución de la iteración 1 con un ciclo de salida completo y una arquitectura de coordinación distribuida. Los cambios principales respecto a la iteración anterior son:
 
-### Agentes (`src/agt/`)
+- **Cuatro robots** en lugar de tres: se añade `robot_heavy2` como segunda instancia del robot pesado.
+- **Coordinación distribuida**: los robots ya no reciben tareas del scheduler. Reclaman contenedores de forma autónoma mediante `claim_container` (exclusión mutua atómica en Java).
+- **Ciclo de salida**: cuando el almacén satura, el scheduler activa un deadline; los robots sacan contenedores de las estanterías y los depositan en la zona OUTBOUND.
+- **Agente transport** (nuevo): simula la recogida por camión al finalizar cada deadline.
+- **Código compartido** (`common.asl`): toda la lógica común de los robots reside en un único fichero incluido con `{ include("common.asl") }`.
 
-**`scheduler.asl`** — Núcleo coordinador del sistema. Detecta la llegada de contenedores vía `new_container(CId)`, los clasifica en tres dimensiones (peso, tamaño, tipo) y asigna el robot y la estantería más adecuados. Usa un patrón de *goal* intermedio (`!process_new_container`) para capturar correctamente el caso en que un contenedor es aplastado antes de ser procesado. Implementa reintentos de asignación de estantería con límite de 3 intentos antes de notificar `no_shelf_space` al supervisor.
+---
 
-**`robot_light.asl` / `robot_medium.asl` / `robot_heavy.asl`** — Los tres siguen la misma arquitectura base: esperan en `idle` hasta recibir `task(CId, ShelfId)` del scheduler (modelo push), ejecutan el ciclo `move_to_container → pickup → move_to_shelf → drop_at` y notifican el resultado a scheduler y supervisor. Incluyen planes de fallo específicos para cada tipo de error del entorno. Al terminar cada tarea procesan la cola de tareas encoladas con `!check_queue`.
+## Agentes (`src/agt/`)
 
-**`supervisor.asl`** — Agente puramente observador. Registra cada evento como un hecho individual en su base de creencias y calcula totales con `.count` en el momento del reporte, evitando condiciones de carrera. Emite un reporte cada 30 segundos con tasas de éxito/error y estado de los robots, consultado en tiempo real con `.askOne`.
+**`common.asl`** — Código compartido por los cuatro robots. Incluye la selección autónoma de estantería (`!pick_shelf`), el intento de reclamo (`!try_claim`), el ciclo de transporte completo, el ciclo de salida (`!execute_exit`), la gestión del mutex de zonas y el fallback de expansión (`!safe_expand_drop`).
 
-### Entorno Java (`src/env/warehouse/`)
+**`robot_light.asl` / `robot_medium.asl` / `robot_heavy.asl` / `robot_heavy2.asl`** — Declaran capacidades propias (peso máximo, dimensiones, velocidad) e incluyen `common.asl`. Cuando el entorno emite `container_at_entrance`, cada robot evalúa si el contenedor entra en su capacidad y si está libre; si es así, ejecuta `claim_container` en Java. Solo el robot que obtiene el reclamo procede. La estantería de destino se selecciona localmente comparando `shelf_available` y `shelf_occupancy`.
 
-Los cambios más relevantes respecto a la base:
+**`scheduler.asl`** — Gestiona exclusivamente el ciclo de salida. Al recibir `storage_full` del supervisor, activa un deadline (`active_deadline`) difundido a todos los robots y al supervisor, y bloquea el tipo saturado (`blocked_type`) para que los robots no sigan aceptando ese tipo. Al expirar el deadline, retira las creencias y envía `transport_request` al agente transport. Un mutex interno garantiza que solo un ciclo de salida esté activo en cada instante.
 
-- **BFS con reserva de destinos** (`activeDestinations`): clave por coordenada `"(X,Y)"` en lugar de nombre de agente, con liberación garantizada en bloque `finally`.
-- **`move_to_container` / `move_to_shelf`**: selección dinámica de celda adyacente, filtrando robots y contenedores en tránsito.
-- **`findBestShelf`**: zonificación por peso (ligeros → shelf_1–4, medianos → shelf_5–7, pesados → shelf_8–9) con fallback por porcentaje de ocupación.
-- **Mecánica de aplastamiento**: `doMoveTo` detecta contenedores en la celda destino, los elimina y emite `container_broken(CId)` globalmente.
-- **`getAdyacentes` movido a `Container.java`** para respetar cohesión.
-- API de percepciones migrada de `Literal.parseLiteral` a `ASSyntax.parseLiteral`.
+**`supervisor.asl`** — Detecta la saturación de estanterías reaccionando a la retracción de `shelf_available`; si no quedan estanterías del mismo tipo, envía `storage_full` al scheduler. Monitoriza los deadlines activos cada 5 segundos y registra `deadline_missed` si expiran con contenedores pendientes. Actúa como árbitro centralizado para el acceso a zonas críticas (inbound, expansion, outbound) mediante el protocolo `request_zone` / `zone_granted` / `release_zone`. Emite un reporte de estado cada 30 segundos.
+
+**`transport.asl`** — Agente pasivo. Reacciona a `transport_request` (fin de deadline) y a `outbound_full` (zona llena, recogida inmediata reactiva). Ejecuta `collect_outbound_containers`, que elimina físicamente todos los contenedores del OUTBOUND. Realiza además una recogida periódica cada 30 segundos como salvaguarda.
+
+---
+
+## Entorno Java (`src/env/warehouse/`)
+
+Cambios respecto a la iteración 1:
+
+- **`claim_container` / `unclaim_container`**: reclamo atómico mediante `ConcurrentHashMap.putIfAbsent`. Garantiza que a lo sumo un robot recoge cada contenedor, sin coordinación entre agentes.
+- **`pickup_from_shelf`**: extrae un contenedor de una estantería para el ciclo de salida.
+- **`move_to_outbound` / `drop_in_outbound`**: calcula la celda libre más cercana de la zona OUTBOUND y deposita el contenedor; emite `outbound_full` si no hay hueco.
+- **`move_to_expansion` / `drop_in_expansion`**: gestiona la zona de expansión cuando todas las estanterías de una categoría están llenas; emite `expansion_free_cell(D,X,Y)` con la distancia Manhattan precalculada.
+- **`collect_outbound_containers`**: elimina del sistema todos los contenedores presentes en la zona OUTBOUND.
+- **`exit_claimed`**: clave en `ConcurrentHashMap` análoga a `claim_container` para evitar que dos robots seleccionen el mismo contenedor en el ciclo de salida.
+- **`nav_limit(300)`**: límite determinista de pasos de navegación que reemplaza la señal `nav_abort_signal` de la iteración 1.
+- **Broadcast de percepciones**: `container_at_entrance`, `shelf_available` y `shelf_occupancy` se emiten ahora a todos los agentes (no solo al scheduler).
 
 ---
 
 ## Decisiones de diseño destacadas
 
-- **Push vs pull**: se eliminó el patrón `request_task` original. Los robots esperan pasivamente; el scheduler les asigna tareas directamente con `tell`.
-- **Goal intermedio en scheduler**: necesario porque Jason no permite plan de fallo (`-!plan`) sobre triggers de creencia (`+belief`); el goal intermedio sí lo permite.
-- **`[source(_)]` en supervisor**: se descubrió un bug donde el supervisor nunca disparaba porque esperaba `[source(robot_x)]` pero recibía `[source(scheduler)]`. Se corrigió usando wildcard `_`.
-- **Clave de `activeDestinations`**: usar el nombre del agente como clave provocaba que los destinos quedaran bloqueados permanentemente si el agente fallaba antes del `finally`. La clave es la coordenada destino.
+- **Reclamo atómico vs. asignación centralizada**: se eliminó el modelo push (scheduler → robot) de la iteración 1. El scheduler ya no necesita conocer el estado de cada robot; la exclusión mutua la garantiza Java directamente.
+- **`blocked_type`**: impide que los robots sigan aceptando contenedores del tipo saturado mientras el ciclo de salida está activo, sin necesidad de comunicación directa entre robots.
+- **Diseño asimétrico del ciclo de salida**: cuando saturan las estanterías no urgentes, el scheduler activa la fase larga (non_urgent); cuando saturan las urgentes, activa la fase corta (urgent). No se mezclan fases porque la fase urgente no libera espacio en estanterías no urgentes.
+- **Mutex de zonas en supervisor**: centraliza el acceso a inbound, expansion y outbound para evitar colisiones; los robots no hacen polling sino que esperan `zone_granted`.
+- **`safe_expand_drop` + `discard_container`**: si todas las estanterías de una categoría están llenas y la zona de expansión también, el contenedor se descarta y se notifica al supervisor como error operacional.
 
 ---
 
