@@ -37,6 +37,9 @@ public class WarehouseArtifact extends Environment {
 
     // Contenedores reclamados atómicamente por robots (containerId → robotId)
     private ConcurrentHashMap<String, String> claimedContainers = new ConcurrentHashMap<>();
+    // Reserva de celdas outbound: robotId → "x,y". Evita que dos robots obtengan
+    // la misma celda cuando liberamos el mutex antes de navegar.
+    private ConcurrentHashMap<String, String> outboundReservations = new ConcurrentHashMap<>();
 
     // Gestión del thread generador de contenedores
     private ExecutorService containerGeneratorExecutor;
@@ -1082,15 +1085,23 @@ public class WarehouseArtifact extends Environment {
             Robot robot = robots.get(agName);
             if (robot == null) return false;
 
+            // Celdas reservadas por otros robots (navegando hacia outbound)
+            java.util.Set<String> reservedByOthers = new java.util.HashSet<>();
+            for (Map.Entry<String, String> entry : outboundReservations.entrySet()) {
+                if (!entry.getKey().equals(agName)) reservedByOthers.add(entry.getValue());
+            }
+
             List<int[]> cells = new ArrayList<>();
             for (int x = 0; x < GRID_WIDTH; x++) {
                 for (int y = 0; y < GRID_HEIGHT; y++) {
-                    if (grid[x][y] == CellType.OUTBOUND && !hayContenedorEn(x, y) && !hayRobotCerca(x, y)) {
+                    if (grid[x][y] == CellType.OUTBOUND && !hayContenedorEn(x, y) && !hayRobotCerca(x, y)
+                            && !reservedByOthers.contains(x + "," + y)) {
                         cells.add(new int[]{x, y});
                     }
                 }
             }
             if (cells.isEmpty()) {
+                outboundReservations.remove(agName);
                 addPercept("transport", ASSyntax.parseLiteral("outbound_full"));
                 return false;
             }
@@ -1105,7 +1116,9 @@ public class WarehouseArtifact extends Environment {
                 return Integer.compare(da, db);
             });
 
-            emitNavTarget(agName, cells.get(0)[0], cells.get(0)[1]);
+            int tx = cells.get(0)[0], ty = cells.get(0)[1];
+            outboundReservations.put(agName, tx + "," + ty);
+            emitNavTarget(agName, tx, ty);
             return true;
         } catch (Exception e) {
             e.printStackTrace();
@@ -1127,6 +1140,7 @@ public class WarehouseArtifact extends Environment {
             if (!robot.isCarrying()) { addError(agName, "not_carrying", "Not carrying anything"); return false; }
 
             int rx = robot.getX(), ry = robot.getY();
+            outboundReservations.remove(agName);
             if (grid[rx][ry] != CellType.OUTBOUND) {
                 addError(agName, "not_at_outbound", "Robot not in outbound zone");
                 return false;

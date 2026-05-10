@@ -11,13 +11,15 @@
  * TEMPORIZACIÓN
  * ============================================================================ */
 
-// ΔT = 120s: tiempo máximo por fase del ciclo de salida.
-// Justificación: un robot heavy (velocidad 1, 1 celda/paso) desde shelf_9
-// (x≈18, y≈10) hasta outbound (x=0-2, y=0-1) recorre ~26 celdas.
-// Con backoffs y congestión de navegación el tiempo real puede ser 2-3x,
-// llegando a ~90-100s. 120s da margen suficiente para el peor caso.
+// ΔT = 90s: tiempo máximo por fase del ciclo de salida.
+// Justificación: con las mejoras de navegación actuales (corredores x=9/x=19,
+// guards de ruta, backoff optimizado), un robot heavy desde shelf_9 hasta
+// outbound tarda 20-35s en condiciones normales. El peor caso (arranque en frío
+// desde base + congestión de outbound con 4 robots simultáneos) superó los 60s
+// en pruebas (deadline_missed observado con delta_t=60). 90s da margen suficiente
+// sin los 4 minutos de bloqueo del valor anterior (120s).
 // Fase urgente: [T0, T0+ΔT). Fase no urgente: [T0+ΔT, T0+3·ΔT).
-delta_t(120).
+delta_t(90).
 
 /* ============================================================================
  * CLASIFICACIÓN DE TIPOS DE CONTENEDOR
@@ -119,23 +121,6 @@ shelf_max_weight("shelf_9", 200).
     .sort(Pairs, [pair(_, ShelfId)|_]);
     +shelf_selected(CId, ShelfId).
 
-// Si hay deadline activo para el tipo del contenedor atrapado en el retry loop,
-// señalizar outbound como destino: select_shelf_and_execute continuará con
-// ShelfId=direct_outbound y llamará a execute_task(CId, direct_outbound).
-// not shelf_wait(CId): si el contenedor tiene cooldown activo es porque fue él quien causó
-// el no_shelf_space. Esos no van al outbound — esperan a que el ciclo libere espacio.
-// Solo van al outbound los contenedores que llegan durante un deadline ya activo.
--!pick_shelf(CId, Weight, W, H) :
-    claimed_type(CId, Type) &
-    not shelf_wait(CId) &
-    ((urgent_container_type(Type) & active_deadline(_, urgent, _)) |
-     (non_urgent_container_type(Type) & active_deadline(_, non_urgent, _))) <-
-    .my_name(Me);
-    .print("[", Me, "] Deadline activo durante pick_shelf: redirigiendo ", CId, " a outbound");
-    .abolish(shelf_retried(CId));
-    .abolish(expansion_failed_shelf(CId, _));
-    +shelf_selected(CId, direct_outbound).
-
 // Sin espacio tras 1 reintento: notificar y propagar fallo.
 // El cleanup (unclaim, release, check_queue) lo hace -!select_shelf_and_execute.
 // El robot retiene el container durante el reintento (3s) → la celda de entrada
@@ -148,6 +133,7 @@ shelf_max_weight("shelf_9", 200).
     .abolish(expansion_failed_shelf(CId, _));
     +shelf_wait(CId);
     .send(supervisor, tell, container_error(CId, no_shelf_space));
+    .wait(1500);
     .fail.
 
 -!pick_shelf(CId, Weight, W, H) : true <-
@@ -156,9 +142,9 @@ shelf_max_weight("shelf_9", 200).
     .wait(3000);
     !pick_shelf(CId, Weight, W, H).
 
-// Cooldown de 5s: margen para que blocked_type se propague desde supervisor →
+// Cooldown de 3s: margen para que blocked_type se propague desde supervisor →
 // scheduler → robots antes de que container_at_entrance re-dispare el claim.
-+shelf_wait(CId) <- .wait(5000); -shelf_wait(CId).
++shelf_wait(CId) <- .wait(3000); -shelf_wait(CId).
 
 /* ============================================================================
  * RECLAMACIÓN Y SELECCIÓN DE ESTANTERÍA (compartido por todos los robots)
@@ -174,16 +160,6 @@ shelf_max_weight("shelf_9", 200).
     !select_shelf_and_execute(CId, Weight, W, H).
 
 -!try_claim(CId, Type, Weight, W, H) : true <- true.
-
-// Si hay un ciclo de salida activo para el tipo de este contenedor, llevarlo
-// directamente al outbound sin pasar por la estantería.
-+!select_shelf_and_execute(CId, Weight, W, H) :
-    claimed_type(CId, Type) &
-    ((urgent_container_type(Type) & active_deadline(_, urgent, _)) |
-     (non_urgent_container_type(Type) & active_deadline(_, non_urgent, _))) <-
-    .my_name(Me);
-    .print("[", Me, "] Exit cycle activo para tipo ", Type, ": entrega directa de ", CId);
-    !execute_task(CId, direct_outbound).
 
 +!select_shelf_and_execute(CId, Weight, W, H) : true <-
     !pick_shelf(CId, Weight, W, H);
@@ -271,70 +247,6 @@ shelf_max_weight("shelf_9", 200).
     +shelf_selected(CId, ShelfId).
 
 /* ============================================================================
- * ENTREGA DIRECTA A OUTBOUND (bypass de estantería durante ciclo de salida)
- * Usado cuando active_deadline está activo para el tipo del contenedor en el
- * momento de la reclamación: el robot recoge en inbound y entrega en outbound
- * sin almacenar en estantería, evitando el ciclo store→exit innecesario.
- * ============================================================================ */
-
-+!execute_task(CId, direct_outbound) : true <-
-    -nav_limit(_); +nav_limit(300);
-    .my_name(Me);
-    .print("[", Me, "] Entrega directa: ", CId, " → outbound");
-
-    !acquire_zone(inbound);
-    !get_to_container(CId, 3);
-    .wait(800);
-
-    -+state(picking);
-    pickup(CId);
-    !release_zone(inbound);
-    .wait(800);
-    .time(H_pk, M_pk, S_pk); T_pk = H_pk * 3600 + M_pk * 60 + S_pk;
-    .print("EVENT | time=", T_pk, " | agent=", Me, " | type=pickup | data=", CId);
-
-    -+state(carrying);
-    +exit_picked(CId);
-    -nav_limit(_); +nav_limit(300);
-    !drop_at_outbound(CId);
-    .wait(800);
-    .abolish(outbound_drop_retries(CId, _));
-
-    .time(Hd, Md, Sd); Td = Hd * 3600 + Md * 60 + Sd;
-    .print("EVENT | time=", Td, " | agent=", Me, " | type=container_delivered | data=", CId);
-    .send(supervisor, tell, container_stored(CId, direct_outbound));
-    .send(scheduler, tell, container_stored(CId, direct_outbound));
-    .send(supervisor, tell, container_delivered(CId));
-    .abolish(claimed_type(CId, _));
-    .abolish(expansion_count(CId, _));
-    .abolish(expansion_failed_shelf(CId, _));
-    -exit_picked(CId);
-    -+carrying(none);
-    !check_queue.
-
--!execute_task(CId, direct_outbound) : exit_picked(CId) <-
-    .my_name(Me);
-    .print("⚠️ [", Me, "] Fallo en entrega directa tras pickup, liberando ", CId);
-    .abolish(outbound_drop_retries(CId, _));
-    -exit_picked(CId);
-    -+carrying(none);
-    unclaim_container(CId);
-    release_task(CId);
-    .send(scheduler, tell, task_failed(CId));
-    !safe_return;
-    !check_queue.
-
--!execute_task(CId, direct_outbound) : true <-
-    .my_name(Me);
-    .print("⚠️ [", Me, "] Fallo en entrega directa para ", CId);
-    -+carrying(none);
-    unclaim_container(CId);
-    release_task(CId);
-    .send(scheduler, tell, task_failed(CId));
-    !safe_return;
-    !check_queue.
-
-/* ============================================================================
  * ENTREGA EN OUTBOUND
  * Layout de zonas en y=0-1 (de izquierda a derecha):
  *   x=0-2: outbound (rojo) | x=3-4: expansión (amarillo) | x=5-7: entrada (verde)
@@ -388,15 +300,18 @@ shelf_max_weight("shelf_9", 200).
     !navigate(19, 1);
     !navigate(TX, TY).
 
+// El mutex se libera en cuanto se reserva la celda destino (nav_target),
+// antes de navegar. Así varios robots pueden navegar al outbound simultáneamente
+// hacia celdas distintas, sin bloquearse entre sí durante la navegación.
 +!drop_at_outbound(CId) <-
     !acquire_zone(outbound);
     move_to_outbound;
     ?nav_target(TX, TY);
+    !release_zone(outbound);
     !navigate(TX, TY);
-    +reached_outbound(CId);  // marca que la navegación completó
+    +reached_outbound(CId);
     drop_in_outbound(CId);
-    -reached_outbound(CId);
-    !release_zone(outbound).
+    -reached_outbound(CId).
 
 // Outbound lleno (move_to_outbound no emitió nav_target): Java ya emitió outbound_full
 // y el transport reacciona en < 1s. Esperar 1500ms es suficiente para que la recogida
@@ -412,7 +327,7 @@ shelf_max_weight("shelf_9", 200).
     .abolish(nav_target(_, _));
     -reached_outbound(CId);
     !release_zone(outbound);
-    .wait(3000);
+    .wait(1000);
     !drop_at_outbound(CId).
 
 // Drop real fallido (llegó a celda outbound pero drop_in_outbound falló):
@@ -430,7 +345,7 @@ shelf_max_weight("shelf_9", 200).
     .abolish(nav_target(_, _));
     -reached_outbound(CId);
     !release_zone(outbound);
-    .wait(4000);
+    .wait(1000);
     !drop_at_outbound(CId).
 
 -!drop_at_outbound(CId) <-
@@ -438,5 +353,5 @@ shelf_max_weight("shelf_9", 200).
     .abolish(nav_target(_, _));
     -reached_outbound(CId);
     !release_zone(outbound);
-    .wait(4000);
+    .wait(1000);
     !drop_at_outbound(CId).

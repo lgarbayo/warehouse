@@ -1639,6 +1639,27 @@ El caso de `execute_task` durante tránsito normal a estantería tiene dos rutas
 
 ---
 
+### Limitación identificada: deadlock de contenedores small/fragile en zona de entrada durante ciclos largos
+
+**Síntoma**: durante el ciclo de salida non_urgent (2·ΔT = 180s), los contenedores fragile y de tamaño pequeño (≤10kg, 1x1) que llegan al inbound se acumulan sin que ningún robot pueda alcanzarlos. robot_light entra en un bucle de `nav_failed` indefinido: intenta llegar a un contenedor, falla 3 veces, espera 20s, reintenta — y vuelve a fallar porque el camino sigue bloqueado.
+
+**Causa encadenada**:
+
+1. `blocked_type("standard")` activo durante el ciclo bloquea los contenedores standard en el inbound (6 celdas). Nadie los mueve.
+2. Los contenedores fragile y small que llegan al inbound (container_6, container_14, container_17, container_18...) tampoco están bloqueados — pero sus celdas adyacentes están ocupadas por los standard bloqueados.
+3. Solo robot_light puede manejar contenedores ≤10kg, 1x1. robot_medium/heavy/heavy2 no los reclamarán aunque tengan espacio.
+4. Cuando robot_light hace `!get_to_container(CId, 3)` para llegar al fragile, las celdas adyacentes al contenedor están todas ocupadas (otros contenedores o robots) → 3 intentos fallidos → `nav_failed(CId)` (20s cooldown) → `release_task` (container re-encolado) → pero la situación no cambia → nuevo intento → nuevo fallo.
+5. Cuando el deadline termina y `blocked_type` se elimina, heavy/medium/heavy2 recogen los standard — pero entretanto llegaron más fragile que siguen bloqueando la posición de los anteriores. El deadlock se perpetúa porque los fragile solo los puede mover robot_light, y están todos apilados bloqueándose entre sí.
+
+**Ejemplo observado en logs** (T0=43119s, deadline non_urgent, 2·ΔT=180s):
+- container_6 (fragile, 9.8kg) bloqueado durante ~170s
+- Tras deadline_ended (t=43299): el path sigue bloqueado por containers 14, 17, 18 (todos fragile, solo robot_light los puede mover)
+- robot_light aparece como `working` durante más de 200 segundos sin completar ninguna entrega
+
+**Por qué no se corrige**: la raíz es que el generador del entorno Java sigue produciendo contenedores al mismo ritmo durante el ciclo de salida, y la zona de entrada (6 celdas) no puede absorber 180s de llegadas cuando `blocked_type` retiene los standard. La solución real requeriría pausar/ralentizar el generador durante el ciclo (cambiaría la tasa definida en el enunciado) o dar a robot_light prioridad para evacuar pequeños fragile durante el ciclo (añadiría complejidad al ciclo de salida). Se acepta como limitación de diseño del entorno.
+
+---
+
 ### Mejora: log de recogida de outbound visible en consola MAS (`WarehouseArtifact.java`)
 
 **Contexto**: `view.logMessage` solo aparece en la GUI del warehouse, no en la consola del MAS. La recogida periódica del camión era invisible en la consola.
