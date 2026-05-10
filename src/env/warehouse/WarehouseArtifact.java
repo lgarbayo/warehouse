@@ -867,8 +867,19 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: move_to_expansion
-     * Emite expansion_free_cell(X,Y) para cada celda libre de la zona CLASSIFICATION.
-     * El agente elige la más cercana usando su robot_pos (principio de entorno delgado).
+     *
+     * Implementa el principio de entorno delgado: en lugar de calcular y
+     * devolver la celda óptima (decisión que corresponde al agente), el entorno emite
+     * todas las celdas CLASSIFICATION libres como percepciones
+     * expansion_free_cell(D, X, Y), donde D es la distancia Manhattan
+     * precalculada desde la posición actual del robot.
+     *
+     * El agente selecciona autónomamente la celda más cercana mediante
+     * .sort(Pairs, [d(_, TX, TY)|_]) en common.asl, ejerciendo así su
+     * capacidad deliberativa sin delegar la decisión espacial al entorno Java.
+     *
+     * Si no hay celdas libres, devuelve false y el plan -!safe_expand_drop
+     * reintentará tras 2 segundos (hasta un máximo de 2 reintentos antes de descartar).
      */
     private boolean executeMoveToExpansion(String agName) {
         try {

@@ -4,7 +4,16 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Representa una estantería en el almacén
+ * Representa una estantería en el almacén.
+ *
+ * Las estanterías tienen dos dimensiones de capacidad que deben respetarse
+ * simultáneamente: peso máximo (kg) y volumen máximo (unidades de área de contenedor).
+ * Un contenedor cabe si y solo si tanto el peso acumulado como el volumen acumulado
+ * se mantienen dentro de los límites tras añadirlo.
+ *
+ * La ocupación se reporta como el máximo entre el porcentaje de peso y de volumen,
+ * ya que cualquiera de las dos dimensiones puede ser el cuello de botella.
+ * Los agentes usan shelf_occupancy para elegir la estantería menos cargada.
  */
 public class Shelf {
     private final String id;

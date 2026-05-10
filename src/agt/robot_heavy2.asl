@@ -356,58 +356,78 @@ nav_limit(300).
  * ============================================================================ */
 
 
+// Estrategia de enrutamiento mediante corredores verticales libres de obstáculos:
+//   x=9  → corredor izquierdo (entre zona izquierda y estanterías S1-S7)
+//   x=19 → corredor derecho   (acceso a estanterías S8-S9 y outbound derecho)
+// Patrón general: moverse al corredor vertical de la fila actual → ascender/descender
+// hasta el nivel destino → avanzar horizontalmente al destino.
+// Reparto de carga: TX<15 usa x=9; TX≥15 usa x=19 para balancear ambos corredores.
+
+// Base: el robot ya está en el destino.
 +!navigate(TX, TY) : robot_pos(TX, TY) <- true.
 
+// Desde la zona de estanterías (X≥10) hacia la zona izquierda (TX<9):
+// salir al corredor x=9 en la fila actual, navegar verticalmente al nivel destino y avanzar.
 +!navigate(TX, TY) : TX < 9 & TX \== 9 & robot_pos(X, Y) & X >= 10 <-
     !navigate(9, Y);
     !navigate(9, TY);
     !navigate(TX, TY).
 
+// Hacia el outbound derecho (TX≥17, TY<2) con el robot en una fila alta (Y>3):
+// las celdas de S8-S9 en y=2-3 bloquean el descenso directo — rodear por (19,4)→(19,3).
 +!navigate(TX, TY) : TX >= 17 & TY < 2 & robot_pos(X, Y) & Y > 3 <-
     !navigate(19, 4);
     !navigate(19, 3);
     !navigate(TX, TY).
 
+// Hacia el outbound derecho (TX≥17, TY<2) desde x=10-18 con Y≤3:
+// desplazarse horizontalmente hasta x=19 y descender al destino.
 +!navigate(TX, TY) : TX >= 17 & TY < 2 & TX \== 19 & robot_pos(X, Y) & X >= 10 & X < 19 <-
     !navigate(19, Y);
     !navigate(19, TY);
     !navigate(TX, TY).
 
+// Desde la zona izquierda (X<9) hacia las estanterías (TX≥10, TY≥2):
+// entrar al corredor x=9 en la fila actual y navegar verticalmente hasta el nivel destino.
 +!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X < 9 <-
     !navigate(9, Y);
     !navigate(9, TY);
     !navigate(TX, TY).
 
-// Desde x<=14 yendo hacia la derecha (TX>=15): usar corredor x=19 en lugar de x=9
+// Desde x≤14 hacia la derecha (TX≥15): usar corredor x=19 en lugar de x=9
 // para evitar que los dos robots pesados saturen el mismo corredor vertical.
 +!navigate(TX, TY) : TX >= 15 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X >= 10 & Y \== TY & X <= 14 <-
     !navigate(19, Y);
     !navigate(19, TY);
     !navigate(TX, TY).
 
+// Desde x≤14 hacia estanterías izquierdas (TX<15): usar el corredor x=9 local.
 +!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X >= 10 & Y \== TY & X <= 14 <-
     !navigate(9, Y);
     !navigate(9, TY);
     !navigate(TX, TY).
 
+// Desde x>14 hacia cualquier estantería: ya en zona derecha, usar corredor x=19.
 +!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 19 & robot_pos(X, Y) & X >= 10 & Y \== TY & X > 14 <-
     !navigate(19, Y);
     !navigate(19, TY);
     !navigate(TX, TY).
 
+// Ya en el corredor x=9: avanzar verticalmente hasta la fila destino.
 +!navigate(TX, TY) : TX \== 9 & robot_pos(X, Y) & X == 9 & Y \== TY <-
     !navigate(9, TY);
     !navigate(TX, TY).
 
 // Guarda TY>=2: evita forzar la ruta por x=19 cuando el destino es outbound (TY<2).
 // Sin esta guarda, el robot entraría en bucle: navigate(TX,TY<2) → navigate(19,TY) → navigate(TX,TY<2).
+// Ya en el corredor x=19: avanzar verticalmente hasta la fila destino (solo para TY≥2).
 +!navigate(TX, TY) : TX \== 19 & robot_pos(X, Y) & X == 19 & Y \== TY & TY >= 2 <-
     !navigate(19, TY);
     !navigate(TX, TY).
 
-// nav_limit es un contador de pasos que evita bucles infinitos en navigate.
-// Cada llamada a step_with_retry decrementa el contador; cuando llega a 0,
-// el plan de timeout imprime el error y falla.
+// nav_limit: contador de pasos que previene bucles infinitos de navegación.
+// Se decrementa en cada llamada a step_with_retry. Al llegar a 0, el plan timeout
+// notifica al supervisor y falla la intención para liberar al robot del ciclo.
 +!navigate(TX, TY) : robot_pos(X, Y) & nav_limit(N) & N > 0 <-
     N1 = N - 1; -nav_limit(_); +nav_limit(N1);
     !step_with_retry(X, Y, TX, TY, 0);
@@ -419,6 +439,14 @@ nav_limit(300).
     .send(supervisor, tell, robot_error(Me, nav_timeout, "navigation_timed_out"));
     .fail.
 
+// Navegación con backoff escalonado para gestión de colisiones entre robots:
+//   BC=0     → primer intento sin espera (optimista).
+//   BC∈[1,2) → fallo simple: espera aleatoria 300–1500ms, reintenta desde posición actual.
+//   BC∈[2,4) → dos fallos: movimiento perpendicular (path_backoff) + espera 300–1500ms.
+//   BC∈[4,6) → bloqueo prolongado: espera larga 1500–3000ms para que ceda el bloqueo.
+//   BC≥6     → bloqueo permanente: notifica al supervisor y falla la intención.
+// El factor .random en los tiempos de espera evita el efecto convoy (todos los robots
+// reintentando simultáneamente y volviendo a colisionar entre sí).
 +!step_with_retry(X, Y, TX, TY, BC) <- !do_step(X, Y, TX, TY).
 
 -!step_with_retry(X, Y, TX, TY, BC) : BC >= 4 & BC < 6 <-
@@ -445,25 +473,41 @@ nav_limit(300).
     .send(supervisor, tell, robot_error(Me, path_blocked, "permanently_blocked"));
     .fail.
 
+// Greedy de selección de eje: prioriza el eje con mayor distancia pendiente (Manhattan).
+// Si |ΔX|≥|ΔY|, intenta avanzar en X primero (try_x_then_y); si |ΔY|>|ΔX|, en Y
+// primero (try_y_then_x). Esto produce trayectorias diagonalmente comprimidas.
+// La creencia step_done actúa como postcondición: si no se añade, do_step falla y
+// step_with_retry incrementa BC y aplica backoff. -step_done limpia valores residuales.
+// Caso base: ya en el destino.
 +!do_step(X, Y, TX, TY) : X == TX & Y == TY <- +step_done.
+// Eje X dominante (|ΔX|≥|ΔY|): intentar avanzar en X primero, Y como fallback.
 +!do_step(X, Y, TX, TY) : TX > X & TY >= Y & TX - X >= TY - Y <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
 +!do_step(X, Y, TX, TY) : TX > X & TY <  Y & TX - X >= Y - TY <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
 +!do_step(X, Y, TX, TY) : TX < X & TY >= Y & X - TX >= TY - Y <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
 +!do_step(X, Y, TX, TY) : TX < X & TY <  Y & X - TX >= Y - TY <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
+// Eje Y dominante (caso por defecto: |ΔY|>|ΔX|): intentar avanzar en Y primero, X como fallback.
 +!do_step(X, Y, TX, TY) <- -step_done; !try_y_then_x(X, Y, TX, TY); ?step_done.
 
+// Intenta avanzar un paso en el eje X hacia TX. Si move_step falla (celda bloqueada
+// por otro robot u obstáculo fijo), el handler -!try_x_then_y prueba el eje Y como
+// alternativa. Si Y también falla, step_done no se añade → step_with_retry activa backoff.
 +!try_x_then_y(X, Y, TX, TY) : TX > X <- NX = X + 1; move_step(NX, Y); +step_done.
 +!try_x_then_y(X, Y, TX, TY) : TX < X <- NX = X - 1; move_step(NX, Y); +step_done.
 -!try_x_then_y(X, Y, TX, TY) : TY > Y <- NY = Y + 1; move_step(X, NY); +step_done.
 -!try_x_then_y(X, Y, TX, TY) : TY < Y <- NY = Y - 1; move_step(X, NY); +step_done.
 -!try_x_then_y(X, Y, TX, TY) <- true.
 
+// Equivalente a try_x_then_y con ejes intercambiados: intenta Y primero, X como fallback.
 +!try_y_then_x(X, Y, TX, TY) : TY > Y <- NY = Y + 1; move_step(X, NY); +step_done.
 +!try_y_then_x(X, Y, TX, TY) : TY < Y <- NY = Y - 1; move_step(X, NY); +step_done.
 -!try_y_then_x(X, Y, TX, TY) : TX > X <- NX = X + 1; move_step(NX, Y); +step_done.
 -!try_y_then_x(X, Y, TX, TY) : TX < X <- NX = X - 1; move_step(NX, Y); +step_done.
 -!try_y_then_x(X, Y, TX, TY) <- true.
 
+// Movimiento perpendicular de desbloqueo: activo tras BC∈[2,4) fallos consecutivos.
+// Mueve el robot en la dirección perpendicular a su trayectoria para escapar de una
+// celda bloqueada por otro robot. Los handlers -!path_backoff intentan el sentido
+// opuesto si el primer movimiento perpendicular también está bloqueado.
 +!path_backoff(X, Y, TX, TY) : TX \== X & Y < 14 <- NY = Y + 1; move_step(X, NY).
 +!path_backoff(X, Y, TX, TY) : TX \== X & Y > 0 <- NY = Y - 1; move_step(X, NY).
 +!path_backoff(X, Y, TX, TY) : TY \== Y & X < 19 <- NX = X + 1; move_step(NX, Y).

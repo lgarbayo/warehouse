@@ -107,8 +107,15 @@ shelf_for(non_urgent, heavy,  "shelf_9").
 +exit_cycle(Type, T0) : active_exit_cycle <-
     .print("[SCHEDULER] Ciclo de salida ya activo. Tipo '", Type, "' permanecerá bloqueado hasta que finalice.").
 
-// Ciclo para tipos urgentes: solo fase urgente (ΔT).
-// No tiene sentido evacuar non_urgentes si lo que saturó fue un tipo urgente.
+// Diseño asimétrico del ciclo de salida:
+//   - Urgentes  → solo la fase corta (ΔT). Evacuar no_urgentes no libera espacio en
+//                 estanterías urgentes (S1/S5/S8) y desperdiciaría el tiempo de los
+//                 robots pesados que son los únicos capaces de mover contenedores pesados.
+//   - No urgentes → solo la fase larga (2·ΔT). No se activa la fase urgente porque
+//                   los contenedores standard/fragile no necesitan prioridad temporal
+//                   y la fase corta sería demasiado breve para evacuarlos todos.
+// Este diseño garantiza que "solo un deadline está activo en cada instante" y que
+// cada fase tiene la duración mínima necesaria para su tipo de contenedor.
 +!run_exit_cycle(Type, T0) : delta_t(DT) & urgent_container_type(Type) <-
     .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
     for (.member(R, AllRobots)) { .send(R, tell, blocked_type(Type)); };

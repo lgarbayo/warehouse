@@ -181,8 +181,19 @@ shelf_max_weight("shelf_9", 200).
 
 /* ============================================================================
  * EXPANSION DROP CON REINTENTO
+ *
+ * Principio de entorno delgado (thin environment): el entorno Java no decide
+ * a qué celda ir — emite todas las celdas CLASSIFICATION libres como percepciones
+ * expansion_free_cell(D, X, Y) donde D es la distancia Manhattan precalculada.
+ * El agente selecciona autónomamente la más cercana con .sort + deconstrucción
+ * de lista, ejerciendo así su capacidad deliberativa sin depender del entorno
+ * para la toma de decisión espacial.
  * ============================================================================ */
 
+// Adquiere la zona de expansión (mutex), solicita las celdas libres al entorno,
+// selecciona la más cercana por distancia Manhattan, navega a ella y deposita.
+// nav_limit(200) es suficiente para llegar desde cualquier estantería a la zona
+// de clasificación (x=3-4, y=0-1) en menos de 200 pasos de navegación.
 +!safe_expand_drop(CId) <-
     !acquire_zone(expansion);
     -nav_limit(_); +nav_limit(200);
