@@ -8,6 +8,168 @@ en la memoria de la segunda iteración, tomando como base la memoria de la
 iteración 1 (memoria.pdf) y el código real de la iteración 2.
 
 ================================================================================
+CORRECCIONES PRIORITARIAS — FEEDBACK EVALUACIÓN ITERACIÓN 1 (nota: 80)
+================================================================================
+
+Estas correcciones deben aplicarse ANTES de redactar el nuevo contenido.
+Ignorarlas en la iteración 2 repetirá los mismos errores.
+
+--------------------------------------------------------------------
+A) CARÁCTER LLM — estilo de redacción
+--------------------------------------------------------------------
+PROBLEMA: La memoria tiene un estilo típico de texto generado por IA:
+listas de bullets excesivas, frases del tipo "X es importante porque Y",
+párrafos que empiezan siempre con "El agente X...", estructuras repetitivas
+y formulismo vacío.
+
+CÓMO CORREGIRLO:
+  - Escribir en prosa académica natural, no en listas salvo cuando la
+    información es genuinamente enumerativa (tablas de acciones, etc.).
+  - Evitar frases de relleno: "cabe destacar que", "es importante señalar",
+    "como se puede observar", "de esta manera se logra".
+  - Variar la estructura de párrafos. No todos deben empezar describiendo
+    el agente por nombre.
+  - Usar voz activa y oraciones cortas. Preferir "los robots reclaman
+    contenedores directamente" a "los contenedores son reclamados de
+    forma autónoma por los agentes robot mediante el mecanismo de...".
+  - Hacer que un compañero humano revise el texto antes de entregar.
+
+--------------------------------------------------------------------
+B) ETIQUETAS urgent/fragile en asignación de contenedores
+--------------------------------------------------------------------
+PROBLEMA: La memoria de iteración 1 afirmaba que las etiquetas urgent y
+fragile influían en la asignación de contenedores a robots. ESTO ES FALSO
+en el código. Los robots seleccionan contenedores únicamente por PESO y
+DIMENSIONES (capacity-based). El tipo (urgent/fragile/standard) NO determina
+qué robot lo recoge.
+
+DÓNDE AFECTA:
+  - Sección 4.6.1 (descripción de los robots): si dice que robot_light
+    maneja fragile o que urgent va a un robot concreto, CORREGIR.
+  - Cualquier diagrama de interacción que muestre el tipo como criterio
+    de selección de robot.
+
+QUÉ DICE EL CÓDIGO REAL:
+  El tipo afecta ÚNICAMENTE a:
+    1. Selección de ESTANTERÍA: urgent → S1/S5/S8; non_urgent → S2-S9.
+       (creencia shelf_urgency en common.asl)
+    2. Ciclo de SALIDA: blocked_type activa durante el deadline del tipo
+       correspondiente.
+    3. DEADLINE: la fase activa (short/urgent o long/non_urgent) depende
+       del tipo que saturó el almacén.
+  El tipo NO afecta a qué robot recoge el contenedor del inbound.
+  Un robot_light recogerá un contenedor urgent de 6kg si entra en su
+  capacidad (≤10kg, 1×1) — exactamente igual que uno fragile o standard.
+
+EN LA MEMORIA DE ITERACIÓN 2:
+  Explicar esto con precisión: "La etiqueta de tipo determina la estantería
+  de destino y el comportamiento durante el ciclo de salida, pero no el
+  robot asignado. La selección de robot emerge del primer agente idle capaz
+  de manejar las dimensiones y peso del contenedor."
+
+BORRADOR DE TEXTO PARA LA MEMORIA (sección 4.6.1 o 6.5):
+------
+  La etiqueta de tipo de un contenedor (urgent, standard, fragile) no
+  interviene en la selección del robot que lo recoge. Cada robot evalúa
+  únicamente el peso y las dimensiones del contenedor al recibir la
+  percepción container_at_entrance: si el contenedor cabe dentro de su
+  capacidad máxima y el robot está libre, lo reclama. Así, robot_light
+  puede recoger tanto un contenedor fragile como uno urgent o standard de
+  idénticas dimensiones y peso, sin distinción.
+
+  El tipo sí tiene efecto en dos momentos posteriores. En primer lugar,
+  durante la selección de estantería: las creencias shelf_urgency de
+  common.asl dirigen los contenedores urgentes a las estanterías S1, S5
+  y S8, y los no urgentes al resto. En segundo lugar, durante el ciclo de
+  salida: blocked_type inhibe la reclamación de nuevos contenedores del
+  tipo que ha saturado el almacén, y active_deadline indica a los robots
+  qué estanterías deben vaciar en cada fase.
+------
+
+--------------------------------------------------------------------
+C) SCHEDULER COMO BROKER CENTRALIZADO
+--------------------------------------------------------------------
+PROBLEMA: En iteración 1, el scheduler era un broker centralizado (asignaba
+robots y estanterías). La memoria lo describía así, y era correcto para iter.1.
+En iteración 2, el scheduler YA NO asigna nada. La arquitectura es distribuida.
+
+EN LA MEMORIA DE ITERACIÓN 2:
+  - Describir EXPLÍCITAMENTE el cambio: "El scheduler deja de actuar como
+    planificador central. En la iteración 2 su único rol es gestionar los
+    deadlines del ciclo de salida: recibe el aviso de saturación del
+    supervisor, activa el deadline correspondiente y notifica al agente
+    transport al finalizar cada fase."
+  - NO usar la palabra "broker" ni "central" para describir el scheduler
+    de iteración 2.
+  - Ser explícito: "Los robots no consultan al scheduler para obtener
+    tareas. Reclaman contenedores directamente del entorno mediante
+    claim_container, una operación atómica en Java."
+
+BORRADOR DE TEXTO PARA LA MEMORIA (sección 4.6.2 o 6.4):
+------
+  En la primera iteración el scheduler actuaba como planificador central:
+  recibía los contenedores del entorno, seleccionaba el robot adecuado
+  y le enviaba la tarea. Esta arquitectura fue identificada como contraria
+  al objetivo de coordinación distribuida y se eliminó en su totalidad.
+
+  En la segunda iteración el scheduler no asigna ni tareas ni robots.
+  Los contenedores se publican como percepciones broadcast del entorno
+  mediante container_at_entrance, y los propios robots deciden qué
+  contenedor reclamar. El reclamo se realiza con la acción claim_container,
+  implementada en Java con ConcurrentHashMap.putIfAbsent: la primera
+  llamada exitosa retiene el contenedor y las restantes fallan
+  silenciosamente, de modo que cada contenedor es procesado por exactamente
+  un robot sin coordinación explícita entre ellos.
+
+  El scheduler conserva un único cometido: gestionar el ciclo de salida.
+  Cuando el supervisor detecta que no queda espacio para un tipo de
+  contenedor, envía storage_full al scheduler. Este registra T0, difunde
+  active_deadline a todos los robots, espera la duración de la fase (ΔT
+  para urgentes, 2·ΔT para no urgentes) y notifica al agente transport
+  para que vacíe la zona de salida. Su rol es, en suma, el de un gestor
+  de temporizadores y difusor de estado, no el de un asignador de tareas.
+------
+
+--------------------------------------------------------------------
+D) AFIRMACIONES SIN RESPALDO CUANTITATIVO
+--------------------------------------------------------------------
+PROBLEMA: Frases como "tasa de éxito del 100% en escenarios sin saturación"
+son difíciles de mantener y arriesgadas si no hay logs que las respalden.
+
+REGLA PARA ITERACIÓN 2:
+  - No afirmar porcentajes sin citar logs concretos o escenarios documentados.
+  - Sustituir afirmaciones absolutas por descripciones del comportamiento:
+    "En escenarios sin saturación, los contenedores son almacenados sin
+    errores de capacidad. El supervisor no registra errores de tipo
+    container_too_heavy ni shelf_full durante estas ejecuciones."
+  - Si se quieren dar métricas, extraerlas de los logs reales del sistema
+    y citarlas como "observado en la ejecución X" o incluir una captura
+    de pantalla del reporte periódico del supervisor.
+  - Evitar también: "el sistema es robusto", "el sistema garantiza",
+    "se asegura que..." sin documentación concreta que lo respalde.
+
+BORRADOR DE TEXTO PARA LA MEMORIA (sección 7 — pruebas y resultados):
+------
+  En los escenarios de operación sin saturación —aquellos en que el
+  volumen de contenedores generados no supera la capacidad conjunta de
+  las nueve estanterías— el reporte periódico del supervisor no registra
+  errores de capacidad (container_too_heavy, shelf_full). Los únicos
+  incidentes observados son de tipo nav_failed, producidos cuando la zona
+  de entrada se congestiona puntualmente y un robot no consigue alcanzar
+  la celda adyacente al contenedor tras tres intentos. El mecanismo de
+  cooldown de 20 segundos resuelve estos casos de forma autónoma: pasado
+  ese tiempo, el robot vuelve a intentar el reclamo si el contenedor
+  sigue disponible.
+
+  Estos resultados son consistentes con varias ejecuciones de entre dos
+  y cinco minutos, como se puede observar en la captura del panel de
+  estadísticas adjunta [Figura X.X]. No obstante, no se puede descartar
+  la aparición de errores de capacidad en ejecuciones de larga duración,
+  donde la acumulación de contenedores pesados podría saturar las
+  estanterías antes de que el generador ralentice la producción.
+------
+
+================================================================================
 ÍNDICE PROPUESTO PARA LA MEMORIA COMPLETA (iteraciones 1 y 2)
 ================================================================================
 
