@@ -282,11 +282,23 @@ QUÉ AÑADIR (nuevo contenido completo para este subapartado):
   NUEVO TÍTULO: "2.1.5. Navegación distribuida con heurística Manhattan"
 
   Texto a redactar:
-    a) Por qué se eliminó BFS: era entorno grueso (el entorno calculaba
+    a) Origen del patrón — domestic-robot como punto de partida:
+       El ejercicio domestic-robot de la asignatura define el patrón
+       estructural de navegación en ASL: un plan recursivo que llama a
+       una acción primitiva de movimiento y se reaplica hasta alcanzar
+       el destino. La implementación del almacén adopta ese mismo patrón
+       pero traslada la inteligencia de selección del siguiente paso
+       del entorno Java al agente. En domestic-robot, move_towards(P)
+       calcula el paso en Java (diagonal, entorno grueso). En el almacén,
+       move_step(X,Y) solo ejecuta el movimiento físico de una celda y
+       es el agente quien decide a cuál mediante !do_step, eliminando
+       el razonamiento del entorno.
+
+    b) Por qué se eliminó BFS: era entorno grueso (el entorno calculaba
        la ruta completa), exploraba hasta 300 nodos en el peor caso,
        y el robot no tenía control sobre su propio movimiento.
 
-    b) La nueva arquitectura — el entorno solo expone:
+    c) La nueva arquitectura — el entorno solo expone:
          move_step(X,Y)         — mueve el robot exactamente una celda
          move_to_shelf(ShelfId) — emite nav_target(TX,TY) adyacente a la estantería
          move_to_container(CId) — emite nav_target(TX,TY) adyacente al contenedor
@@ -295,13 +307,13 @@ QUÉ AÑADIR (nuevo contenido completo para este subapartado):
                                   libre de la zona CLASSIFICATION (con distancia
                                   Manhattan precalculada); el agente elige la más cercana
 
-    c) El agente razona sobre cada paso con !navigate / !do_step:
+    d) El agente razona sobre cada paso con !navigate / !do_step:
          Heurística greedy Manhattan: en cada paso se avanza en el eje
          con mayor distancia restante — |ΔX| ≥ |ΔY| → eje X primero.
          Esto es admisible (nunca sobreestima el coste real en un grid
          ortogonal) y produce trayectorias en escalera diagonal.
 
-    d) Sistema de corredores verticales (waypoints):
+    e) Sistema de corredores verticales (waypoints):
          Las estanterías forman filas compactas que el greedy no puede
          atravesar directamente. Se definen dos columnas siempre libres
          como autopistas verticales:
@@ -314,17 +326,17 @@ QUÉ AÑADIR (nuevo contenido completo para este subapartado):
              cercano (x=9 si X≤14, x=19 si X>14)
          Patrón de ruta: posición → (corredor, fila_destino) → destino
 
-    e) Gestión de colisiones (!step_with_retry):
+    f) Gestión de colisiones (!step_with_retry):
          BC=0     → intento optimista sin espera
          BC∈[1,2) → espera aleatoria 300-1500ms y reintenta
          BC∈[2,4) → path_backoff (paso perpendicular) + espera
          BC∈[4,6) → espera larga 1500-3000ms
          BC≥6     → notifica path_blocked al supervisor y falla el plan
 
-    f) nav_limit(300): timeout global en pasos; si un robot supera 300
+    g) nav_limit(300): timeout global en pasos; si un robot supera 300
        pasos sin llegar, notifica nav_timeout y falla la intención.
 
-    g) Principio de entorno delgado en move_to_expansion:
+    h) Principio de entorno delgado en move_to_expansion:
        La selección de la celda de expansión es el único caso donde se
        requirió migración activa: en la versión anterior el entorno
        calculaba y devolvía la celda más cercana (entorno grueso).
