@@ -1,0 +1,895 @@
+================================================================================
+PLAN DE MEMORIA — ITERACIÓN 2
+Warehouse | Grupo SI 8-2 | Sistemas Inteligentes 2025-2026
+================================================================================
+
+Este documento describe qué corregir, qué añadir y dónde colocar cada sección
+en la memoria de la segunda iteración, tomando como base la memoria de la
+iteración 1 (memoria.pdf) y el código real de la iteración 2.
+
+================================================================================
+ÍNDICE PROPUESTO PARA LA MEMORIA COMPLETA (iteraciones 1 y 2)
+================================================================================
+
+  Portada — "Memoria Proyecto (Segunda Parte) - Sistemas Inteligentes"
+  Índice general
+  Índice de figuras
+
+  1. Introducción                                         [ACTUALIZAR]
+  2. Antecedentes y contexto                              [ACTUALIZAR parcialmente]
+     2.1. Herramientas y tecnologías existentes
+       2.1.1. El modelo BDI y AgentSpeak                  [mantener]
+       2.1.2. La plataforma Jason                          [mantener]
+       2.1.3. La metodología Prometheus                    [mantener]
+       2.1.4. El patrón MVC                                [mantener]
+       2.1.5. Algoritmo de navegación distribuida          [REEMPLAZAR — era BFS]
+     2.2. Conclusión                                       [mantener]
+  3. Objetivos                                            [AMPLIAR]
+     3.1. Objetivo general                                 [ACTUALIZAR]
+     3.2. Objetivos específicos
+       3.2.1. Semana 1 (iteración 1)                       [mantener]
+       3.2.2. Semana 2 (iteración 1)                       [mantener]
+       3.2.3. Semana 3 — Zona de salida y coordinación     [NUEVO]
+       3.2.4. Semana 4 — Deadlines y ciclo de salida       [NUEVO]
+       3.2.5. Semana 5 — Control temporal del supervisor   [NUEVO]
+  4. Diseño del SMA                                       [ACTUALIZAR COMPLETAMENTE]
+     4.1. Diagrama de entorno                              [NUEVO diagrama + texto]
+     4.2. Diagrama de organización                         [NUEVO diagrama + texto]
+     4.3. Diagrama de objetivos ideal                      [NUEVO diagrama + texto]
+     4.4. Diagrama de objetivos                            [NUEVO diagrama + texto]
+     4.5. Diagrama de interacción                          [NUEVO diagrama + texto]
+     4.6. Diagrama de agente y tareas
+       4.6.1. Agentes robot (light, medium, heavy, heavy2) [AMPLIAR + heavy2]
+       4.6.2. Agente scheduler                             [REESCRIBIR]
+       4.6.3. Agente supervisor                            [AMPLIAR]
+       4.6.4. Agente transport                             [NUEVO]
+  5. Arquitectura: Patrón MVC                             [ACTUALIZAR ligeramente]
+     5.1. El Modelo                                        [mantener + mencionar Transport]
+     5.2. La Vista                                         [mantener]
+     5.3. El Controlador                                   [mantener + nuevas acciones]
+  6. Implementación de la solución                        [AMPLIAR con nuevas secciones]
+     6.1. El Entorno Java                                  [AMPLIAR — nuevas acciones]
+     6.2. Navegación distribuida en agentes ASL            [NUEVA — reemplaza la nav. BFS]
+     6.3. Coordinación distribuida de robots               [NUEVA]
+     6.4. El Agente Scheduler                              [REESCRIBIR]
+     6.5. Los Agentes Robot                                [AMPLIAR]
+     6.6. El Agente Supervisor                             [AMPLIAR]
+     6.7. El Agente Transport                              [NUEVO]
+     6.8. Robustez y Gestión de Fallos                     [AMPLIAR]
+     6.9. Logging de eventos obligatorios                  [NUEVO]
+  7. Pruebas y Resultados                                 [AMPLIAR con nuevos escenarios]
+     7.1. Escenario base: operación nominal                [mantener]
+     7.2. Escenario de aplastamiento de contenedor         [mantener]
+     7.3. Escenario de saturación del almacén             [mantener]
+     7.4. Validación del agente supervisor                 [mantener]
+     7.5. Ciclo de salida urgente (deadline corto)         [NUEVO]
+     7.6. Ciclo de salida no urgente (deadline largo)      [NUEVO]
+     7.7. Zona de expansión y desbordamiento de estantería [NUEVO]
+     7.8. Outbound lleno: recogida reactiva por Transport  [NUEVO]
+  8. Conclusiones y trabajo futuro                        [ACTUALIZAR]
+
+
+================================================================================
+SECCIÓN POR SECCIÓN: QUÉ CORREGIR, QUÉ AÑADIR Y CÓMO
+================================================================================
+
+------------------------------------------------------------------------
+PORTADA
+------------------------------------------------------------------------
+CORRECCIÓN:
+  - Cambiar "Primera Parte" por "Segunda Parte".
+  - Actualizar fecha si es necesario.
+  - Mantener todos los autores del grupo.
+
+
+------------------------------------------------------------------------
+1. INTRODUCCIÓN  [ACTUALIZAR]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - El último párrafo describe el sistema de la iteración 1: "coordinación
+    de tres tipologías de robots... un agente planificador central que actúa
+    como cerebro decisional del sistema (scheduler)...". Esto ya no es
+    correcto: el scheduler no asigna tareas, los robots son completamente
+    autónomos y se añadió un cuarto robot y un agente transport.
+
+QUÉ AÑADIR:
+  - Un párrafo final que describa el alcance de la iteración 2:
+    "En esta segunda iteración el sistema se extiende con tres nuevas
+    capacidades: (1) un ciclo completo de salida de contenedores con
+    gestión de deadlines temporales, (2) coordinación distribuida donde
+    los robots reclaman y gestionan contenedores sin intervención del
+    scheduler, y (3) un entorno delgado donde toda la deliberación
+    espacial reside en los agentes y el entorno Java se limita a
+    primitivas sensoriales."
+
+DÓNDE: al final del capítulo 1, como párrafo nuevo.
+
+
+------------------------------------------------------------------------
+2.1.5. Algoritmo de búsqueda de rutas  [REEMPLAZAR COMPLETAMENTE]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - El título habla de "BFS" y describe un BFS en Java. BFS fue
+    completamente eliminado del entorno Java. Dejarlo sería una
+    contradicción directa con la realidad del código y con el objetivo
+    "algoritmos de búsqueda de caminos no apropiados" señalado por el
+    profesorado.
+
+QUÉ AÑADIR (nuevo contenido completo para este subapartado):
+
+  NUEVO TÍTULO: "2.1.5. Navegación distribuida con heurística Manhattan"
+
+  Texto a redactar:
+    a) Por qué se eliminó BFS: era entorno grueso (el entorno calculaba
+       la ruta completa), exploraba hasta 300 nodos en el peor caso,
+       y el robot no tenía control sobre su propio movimiento.
+
+    b) La nueva arquitectura — el entorno solo expone:
+         move_step(X,Y)         — mueve el robot exactamente una celda
+         move_to_shelf(ShelfId) — emite nav_target(TX,TY) adyacente a la estantería
+         move_to_container(CId) — emite nav_target(TX,TY) adyacente al contenedor
+         move_to_outbound       — emite nav_target a celda libre de la zona OUTBOUND
+         move_to_expansion      — emite expansion_free_cell(D,X,Y) para cada celda
+                                  libre de la zona CLASSIFICATION (con distancia
+                                  Manhattan precalculada); el agente elige la más cercana
+
+    c) El agente razona sobre cada paso con !navigate / !do_step:
+         Heurística greedy Manhattan: en cada paso se avanza en el eje
+         con mayor distancia restante — |ΔX| ≥ |ΔY| → eje X primero.
+         Esto es admisible (nunca sobreestima el coste real en un grid
+         ortogonal) y produce trayectorias en escalera diagonal.
+
+    d) Sistema de corredores verticales (waypoints):
+         Las estanterías forman filas compactas que el greedy no puede
+         atravesar directamente. Se definen dos columnas siempre libres
+         como autopistas verticales:
+           x=9  — corredor izquierdo (entre zona libre y estanterías)
+           x=19 — corredor derecho  (extremo del almacén)
+         Reglas de routing en !navigate:
+           Destino en zona izquierda (TX<9) desde estanterías → x=9 primero
+           Destino en outbound (TX≥17, TY<2)                  → x=19 primero
+           Cambio de fila dentro de estanterías                → corredor más
+             cercano (x=9 si X≤14, x=19 si X>14)
+         Patrón de ruta: posición → (corredor, fila_destino) → destino
+
+    e) Gestión de colisiones (!step_with_retry):
+         BC=0     → intento optimista sin espera
+         BC∈[1,2) → espera aleatoria 300-1500ms y reintenta
+         BC∈[2,4) → path_backoff (paso perpendicular) + espera
+         BC∈[4,6) → espera larga 1500-3000ms
+         BC≥6     → notifica path_blocked al supervisor y falla el plan
+
+    f) nav_limit(300): timeout global en pasos; si un robot supera 300
+       pasos sin llegar, notifica nav_timeout y falla la intención.
+
+    g) Principio de entorno delgado en move_to_expansion:
+       La selección de la celda de expansión es el único caso donde se
+       requirió migración activa: en la versión anterior el entorno
+       calculaba y devolvía la celda más cercana (entorno grueso).
+       En la versión actual, el entorno emite todas las celdas libres
+       con su distancia Manhattan precalculada como percepciones
+       expansion_free_cell(D,X,Y) y el agente selecciona la mínima
+       con .sort — decisión deliberativa en el agente.
+
+DÓNDE: reemplazar completamente el texto de la sección 2.1.5 actual.
+
+
+------------------------------------------------------------------------
+3.1. Objetivo General  [ACTUALIZAR]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - El párrafo actual menciona "clasificar contenedores, asignar tareas a
+    robots según sus capacidades y almacenar los contenedores en las
+    estanterías correctas". Esto describe solo el ciclo inbound.
+    En iteración 2 se añade el ciclo outbound con deadlines.
+
+QUÉ AÑADIR:
+  - Ampliar el objetivo general para mencionar el ciclo de salida:
+    "...gestionar el ciclo completo de entrada y salida de contenedores,
+    garantizando la entrega en zona de salida dentro de los deadlines
+    temporales establecidos, con coordinación distribuida entre robots
+    y sin intervención del scheduler en la asignación de tareas."
+
+DÓNDE: al final del párrafo existente o como párrafo adicional en 3.1.
+
+
+------------------------------------------------------------------------
+3.2.3. Semana 3 — Zona de salida y coordinación distribuida  [NUEVO]
+------------------------------------------------------------------------
+QUÉ AÑADIR (lista de objetivos cumplidos):
+  - Implementar zona de salida OUTBOUND en x=0-2, y=0-1.
+  - Reorganizar zonas: ENTRANCE → x=5-7 y=0-1; CLASSIFICATION → x=3-4 y=0-1.
+  - Robots consultan el entorno directamente (container_at_entrance broadcast);
+    el scheduler deja de ser proveedor central de información.
+  - Robots mantienen creencias locales sobre el sistema sin dependencia de
+    asignaciones externas.
+  - Segunda instancia del robot pesado (robot_heavy2) incorporada.
+  - Clasificación de estanterías por tipo de contenedor:
+      S1, S5, S8 → urgentes;  S2-S4, S6-S7, S9 → estándar y frágiles.
+  - Supervisor detecta falta de espacio y notifica al scheduler.
+  - Scheduler activa el ciclo de salida del tipo correspondiente y bloquea
+    la recepción de nuevos contenedores de ese tipo (blocked_type).
+  - Logging obligatorio:
+      EVENT | time=T | agent=supervisor | type=no_space_detected | data=...
+      EVENT | time=T | agent=scheduler  | type=output_phase_started | data=...
+
+DÓNDE: nuevo subapartado 3.2.3, justo después del 3.2.2 actual.
+
+
+------------------------------------------------------------------------
+3.2.4. Semana 4 — Deadlines y ciclo de salida físico  [NUEVO]
+------------------------------------------------------------------------
+QUÉ AÑADIR:
+  - Activación correcta del ciclo de salida con instante inicial T0.
+  - Deadline corto: contenedores urgentes, vence en T0 + ΔT (ΔT = 90s).
+    Justificación de ΔT: con la navegación por corredores, un robot
+    heavy tarda 20-35s desde shelf_9 hasta outbound en condiciones
+    normales; 90s es suficiente incluso en el peor caso observado (60s
+    con congestión de 4 robots), sin los 4 minutos de bloqueo que
+    producía ΔT=120s.
+  - Deadline largo: contenedores no urgentes (standard y fragile),
+    vence en T0 + 2·ΔT (diseño asimétrico justificado: solo se activa
+    la fase correspondiente al tipo que saturó; no tiene sentido
+    evacuar urgentes si lo que saturó fue una estantería non-urgent).
+  - Garantía de un solo deadline activo en cada instante (mutex
+    active_exit_cycle en el scheduler).
+  - Robots deciden autónomamente qué contenedor llevar al outbound
+    (select_for_exit), sin asignaciones del scheduler.
+  - Agente Transport creado: recibe transport_request y simula la
+    llegada del camión para vaciar la zona OUTBOUND.
+  - Logging obligatorio:
+      EVENT | time=T | agent=scheduler | type=deadline_started | data=...
+      EVENT | time=T | agent=scheduler | type=deadline_ended   | data=...
+      EVENT | time=T | agent=robot_id  | type=container_delivered | data=...
+
+DÓNDE: nuevo subapartado 3.2.4.
+
+
+------------------------------------------------------------------------
+3.2.5. Semana 5 — Control temporal del supervisor  [NUEVO]
+------------------------------------------------------------------------
+QUÉ AÑADIR:
+  - Supervisor conoce T0 y los deadlines activos (recibe active_deadline
+    del scheduler).
+  - Supervisor implementa monitor periódico (cada 5s) de incumplimiento:
+    comprueba si el tiempo actual supera el deadline activo y existen
+    contenedores del tipo correspondiente no entregados.
+  - Registro de un error de deadline por cada contenedor no entregado
+    a tiempo (error_occurred(CId, deadline_missed)).
+  - La detección y registro no detiene el sistema ni cancela tareas.
+  - Mecanismo dual: monitor periódico + handler de retracción
+    (-active_deadline) como red de seguridad.
+  - Logging obligatorio:
+      EVENT | time=T | agent=supervisor | type=deadline_missed | data=container_id
+
+DÓNDE: nuevo subapartado 3.2.5.
+
+
+------------------------------------------------------------------------
+4.1. Diagrama de entorno  [NUEVO DIAGRAMA + TEXTO ACTUALIZADO]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - El diagrama actual muestra percepciones obsoletas: new_container(CId),
+    free_shelf(CId, ShelfId), robot_at(X,Y), state(Status).
+  - Las acciones muestran get_container_info, get_free_shelf, accept_task
+    que ya no existen o ya no son relevantes.
+
+NUEVO CONTENIDO:
+  Percepciones que el entorno emite a los agentes:
+    container_at_entrance(CId, Type, Weight, W, H)  — broadcast a todos
+    robot_pos(X, Y)                                  — percepción individual
+    nav_target(TX, TY)                               — destino de movimiento
+    expansion_free_cell(D, X, Y)                     — celdas libres de expansión
+    shelf_available(ShelfId)                         — broadcast a todos
+    shelf_occupancy(ShelfId, Occ)                    — broadcast a todos
+    picked(CId)                                      — confirmación de recogida
+    stored(CId, ShelfId)                             — confirmación de almacenaje
+    error(ErrorType, Data)                           — errores operacionales
+    outbound_full                                    — al agente transport
+    container_exited(CId)                            — al scheduler
+
+  Acciones que los agentes ejecutan sobre el entorno:
+    move_step(X, Y)
+    move_to_container(CId)
+    move_to_shelf(ShelfId)
+    move_to_outbound
+    move_to_expansion
+    pickup(CId)
+    drop_at(ShelfId)
+    pickup_from_shelf(CId, ShelfId)
+    drop_in_outbound(CId)
+    drop_in_expansion(CId)
+    claim_container(CId)
+    unclaim_container(CId)
+    accept_task(CId)
+    release_task(CId)
+    collect_outbound_containers
+    discard_container(CId)
+
+DÓNDE: reemplazar completamente texto y diagrama de la sección 4.1.
+
+
+------------------------------------------------------------------------
+4.2. Diagrama de organización  [NUEVO DIAGRAMA + TEXTO ACTUALIZADO]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - El diagrama muestra al scheduler enviando task(CId, ShelfId) a los
+    robots mediante la flecha "collaborates". Esto ya no ocurre en
+    iteración 2.
+  - Solo se muestran 3 robots (light, medium, heavy). Falta heavy2.
+  - No aparece el agente transport.
+
+NUEVO CONTENIDO:
+  Descripción de la nueva topología:
+    Capa de control:
+      - scheduler: ya no asigna tareas. Gestiona el ciclo de salida
+        (deadlines), difunde active_deadline y blocked_type a todos
+        los robots. Recibe avisos del supervisor (storage_full) y
+        notifica al transport (transport_request).
+      - supervisor: monitoriza el sistema de forma pasiva. Recibe
+        notificaciones de robots (container_stored, container_delivered,
+        robot_state_change, container_error) y del scheduler
+        (active_deadline). Envía storage_full al scheduler.
+    Capa de ejecución:
+      - robot_light, robot_medium, robot_heavy, robot_heavy2: operan
+        de forma completamente autónoma. Se comunican con el supervisor
+        (notificaciones) y con el scheduler (solo blocked_type recibido
+        y task_failed enviado como no-op). Acceden directamente al
+        entorno para reclamar, recoger y transportar contenedores.
+    Capa de transporte:
+      - transport: agente pasivo. Recibe transport_request del scheduler
+        y outbound_full del entorno. Ejecuta collect_outbound_containers.
+
+  IMPORTANTE para el texto: los robots NO se comunican entre sí.
+  La coordinación emerge del entorno compartido (claim_container atómico
+  en Java) y de las percepciones broadcast.
+
+DÓNDE: reemplazar completamente texto y diagrama de la sección 4.2.
+
+
+------------------------------------------------------------------------
+4.3. Diagrama de objetivos ideal  [NUEVO DIAGRAMA + TEXTO]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - El diagrama actual muestra el flujo: new_container → get_container_info
+    → assign_shelf → execute_task (AND) → print_stats. Esto es la
+    arquitectura de iteración 1 con scheduler centralizado.
+
+NUEVO CONTENIDO:
+  El diagrama de objetivos ideal de iteración 2 tiene DOS flujos:
+
+  FLUJO INBOUND (ciclo de entrada):
+    container_at_entrance → try_claim → select_shelf_and_execute →
+    execute_task [AND: get_to_container, pickup, navigate_to_shelf,
+    drop_at] → check_queue
+
+  FLUJO OUTBOUND (ciclo de salida):
+    storage_full(supervisor) → exit_cycle(scheduler) → active_deadline
+    (broadcast) → check_exit_cycle → select_for_exit → execute_exit
+    [AND: navigate_to_shelf, pickup_from_shelf, navigate_to_outbound,
+    drop_in_outbound] → container_delivered → transport_request →
+    collect_outbound_containers
+
+  En paralelo: stats_loop (supervisor) → print_stats
+
+DÓNDE: reemplazar completamente texto y diagrama de la sección 4.3.
+
+
+------------------------------------------------------------------------
+4.4. Diagrama de objetivos  [NUEVO DIAGRAMA + TEXTO]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - El diagrama muestra assign_shelf → get_free_shelf como subobjetivo
+    del scheduler. Este objetivo ya no existe en iteración 2.
+
+NUEVO CONTENIDO:
+  Objetivos de los robots:
+    execute_task [AND]:
+      get_to_container → navigate (AND: do_step)
+      pickup
+      navigate_to_shelf
+      drop_at
+    execute_exit [AND]:
+      navigate_to_shelf
+      pickup_from_shelf
+      navigate_to_outbound
+      drop_in_outbound
+    safe_expand_drop (cuando estantería llena):
+      move_to_expansion → navigate → drop_in_expansion
+
+  Objetivos del scheduler:
+    run_exit_cycle:
+      [fase urgente] active_deadline(short, urgent) → wait(ΔT)
+      [fase no urgente] active_deadline(long, non_urgent) → wait(2ΔT)
+
+  Objetivos del supervisor:
+    stats_loop → print_stats [AND: print_errors_by_type,
+                               print_robot_status]
+    monitor_deadline (periódico, cada 5s)
+    report_deadline_missed
+
+DÓNDE: reemplazar completamente texto y diagrama de la sección 4.4.
+
+
+------------------------------------------------------------------------
+4.5. Diagrama de interacción  [NUEVO DIAGRAMA + TEXTO]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - El diagrama actual muestra:
+      percept: new_container(CId) → scheduler
+      tell: task(CId, ShelfId) → robot
+      tell: container_stored / task_failed → scheduler y supervisor
+    Todo esto es obsoleto. El scheduler ya no asigna ni tareas ni robots.
+
+NUEVO CONTENIDO:
+  Interacciones principales en iteración 2:
+
+  1. CICLO INBOUND (autónomo):
+    WarehouseArtifact → container_at_entrance(CId, Type, Weight, W, H)
+      → BROADCAST (todos los robots + supervisor)
+    Robot:
+      claim_container(CId) [acción Java, atómica]
+      → container_claimed(CId, Type, Weight) tell → supervisor
+      → accept_task(CId) [acción Java]
+      [ciclo de transporte]
+      → container_stored(CId, ShelfId) tell → supervisor
+      → container_stored(CId, ShelfId) tell → scheduler (no-op)
+
+  2. DETECCIÓN DE SATURACIÓN:
+    WarehouseArtifact → -shelf_available(ShelfId) → supervisor
+    supervisor → storage_full(Type, T0) tell → scheduler
+    scheduler → blocked_type(Type) tell → TODOS LOS ROBOTS
+    scheduler → active_deadline(Phase, Cat, T0) tell → TODOS LOS ROBOTS
+                                                      + supervisor
+
+  3. CICLO OUTBOUND:
+    Robot → pickup_from_shelf(CId, ShelfId) [acción Java]
+    Robot → drop_in_outbound(CId) [acción Java]
+    WarehouseArtifact → container_exited(CId) → scheduler
+    Robot → container_delivered(CId) tell → supervisor
+
+  4. FIN DE DEADLINE:
+    scheduler → transport_request(Type, Phase) tell → transport
+    transport → collect_outbound_containers [acción Java]
+    scheduler → untell blocked_type(Type) → TODOS LOS ROBOTS
+    scheduler → untell active_deadline(Phase, Cat, T0) → TODOS LOS ROBOTS
+
+  5. ZONA DE EXPANSIÓN (estantería llena):
+    Robot → move_to_expansion [acción Java]
+    WarehouseArtifact → expansion_free_cell(D,X,Y) → robot (individual)
+    Robot selecciona celda más cercana y ejecuta drop_in_expansion(CId)
+    Robot → container_in_expansion(CId) tell → scheduler (no-op)
+
+  6. MUTEX DE ZONA (supervisor):
+    Robot → request_zone(Zone) tell → supervisor
+    supervisor → zone_granted(Zone) tell → robot
+    Robot → release_zone(Zone) tell → supervisor
+
+DÓNDE: reemplazar completamente texto y diagrama de la sección 4.5.
+
+
+------------------------------------------------------------------------
+4.6.1. Agentes robot  [AMPLIAR — añadir heavy2, actualizar descripción]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - El texto dice "El ciclo de trabajo se dispara al recibir la creencia
+    task(CId, ShelfId) procedente del scheduler." INCORRECTO en iter. 2.
+  - Los diagramas de agente y tareas muestran task(CId, ShelfId) como
+    percepción entrante y show scheduler como fuente. OBSOLETO.
+  - No menciona robot_heavy2.
+
+QUÉ AÑADIR:
+  a) Nueva descripción del ciclo de trabajo de los robots:
+     En iteración 2 los robots no esperan asignaciones. El ciclo se
+     inicia de dos formas:
+       - REACTIVA: +container_at_entrance(CId, Type, Weight, W, H)
+         dispara inmediatamente si el robot está idle y el contenedor
+         cabe dentro de sus capacidades.
+       - POR POLLING: !check_pending_containers en !work_cycle recupera
+         contenedores que llegaron mientras el robot estaba ocupado.
+     En ambos casos, !try_claim ejecuta claim_container(CId) en Java
+     (putIfAbsent atómico). Si otro robot ya lo reclamó, falla silenciosamente.
+
+  b) Selección autónoma de estantería (!pick_shelf en common.asl):
+     El robot razona sobre shelf_available y shelf_occupancy para elegir
+     la estantería menos cargada de la categoría compatible con el peso
+     del contenedor. No consulta al scheduler.
+
+  c) Ciclo de salida autónomo:
+     El robot comprueba en cada !work_cycle si existe active_deadline.
+     Si hay deadline activo, selecciona autónomamente un contenedor
+     de la estantería correspondiente (stored + not exit_claimed) y
+     ejecuta execute_exit: navegar a la estantería → pickup_from_shelf
+     → navegar al outbound → drop_in_outbound.
+
+  d) Nuevo agente robot_heavy2:
+     Segunda instancia del robot pesado. Mismas capacidades que
+     robot_heavy (100kg, 2×3). Posición inicial (4,4). Incluye la
+     misma arquitectura autónoma. El corredor x=19 se usa para este
+     robot con preferencia para evitar que ambos robots pesados saturen
+     el mismo corredor vertical.
+
+  e) Plan común compartido (common.asl):
+     Todo el código compartido entre los 4 robots (pick_shelf,
+     try_claim, select_shelf_and_execute, safe_expand_drop, acquire_zone,
+     release_zone, drop_at_outbound, navigate para outbound) reside en
+     common.asl, incluido con { include("common.asl") }.
+     Este diseño respeta la directiva del enunciado sobre modules/namespaces.
+
+  Nuevos diagramas de agente y tareas:
+    - Actualizar para los 4 robots (añadir heavy2)
+    - Quitar task(CId, ShelfId) como entrada
+    - Añadir container_at_entrance, active_deadline, blocked_type como entradas
+    - Añadir pickup_from_shelf, drop_in_outbound, claim_container como acciones
+    - Añadir expansion_free_cell como percepción
+
+DÓNDE: ampliar la subsección 4.6.1 existente; añadir heavy2 al final.
+
+
+------------------------------------------------------------------------
+4.6.2. Agente scheduler  [REESCRIBIR COMPLETAMENTE]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - En iteración 1 el scheduler asignaba tareas y estanterías. En
+    iteración 2 no asigna absolutamente nada a los robots.
+  - El diagrama de agente del scheduler muestra assign_shelf como
+    objetivo principal. OBSOLETO.
+
+NUEVO CONTENIDO:
+  El scheduler en iteración 2 tiene un único objetivo: gestionar el
+  ciclo de salida de contenedores.
+
+  Creencias iniciales:
+    robot_capacity(robot_X, MaxW, MaxWid, MaxH, Speed) — para broadcast
+    shelf_for(Urgency, Cat, ShelfId) — para selección de estantería de
+      salida (creencia estática del conocimiento del almacén)
+    shelf_urgency, shelf_category, shelf_max_weight — de common.asl
+
+  Planes principales:
+    +storage_full(Type, T0)[source(supervisor)]:
+      Si no hay ciclo activo para ese tipo: activa exit_cycle(Type, T0)
+      y añade blocked_type(Type).
+    +exit_cycle(Type, T0):
+      Mutex active_exit_cycle garantiza un único ciclo a la vez.
+      Llama !run_exit_cycle(Type, T0).
+    +!run_exit_cycle(Type, T0):
+      [urgentes]    → solo fase corta: broadcast active_deadline(short, urgent)
+                       → .wait(DT*1000) → untell → transport_request
+      [no urgentes] → solo fase larga: broadcast active_deadline(long, non_urgent)
+                       → .wait(DT*2*1000) → untell → transport_request
+      Diseño asimétrico: activar la fase urgente cuando saturan non_urgent
+      no libera espacio en estanterías non_urgent y desperdiciaría ΔT.
+    +shelf_available(ShelfId):
+      Si hay espacio en la zona correspondiente: untell blocked_type(Type),
+      permitiendo que los robots vuelvan a aceptar ese tipo de contenedor.
+
+  Diagrama de agente:
+    Entradas: storage_full, no_shelf_space (del supervisor),
+              container_stored, task_failed (no-ops de robots),
+              shelf_available (del entorno)
+    Salidas:  blocked_type (tell a todos los robots),
+              active_deadline (tell a todos los robots y supervisor),
+              transport_request (tell a transport)
+    Objetivos: run_exit_cycle → active_deadline(short/long)
+
+DÓNDE: reemplazar completamente el texto de la sección 4.6.2 y su diagrama.
+
+
+------------------------------------------------------------------------
+4.6.3. Agente supervisor  [AMPLIAR]
+------------------------------------------------------------------------
+QUÉ AÑADIR (al contenido existente):
+  - Detección de saturación: al retirarse shelf_available para una
+    estantería, el supervisor busca si quedan estanterías del mismo
+    tipo. Si no quedan, envía storage_full(Type, T0) al scheduler y
+    emite el evento obligatorio no_space_detected.
+  - Monitor periódico de deadlines: al recibir active_deadline del
+    scheduler, lanza un monitor que comprueba cada 5s si el deadline
+    ha expirado con contenedores pendientes. Al detectar incumplimiento:
+    registra error_occurred(CId, deadline_missed) y emite evento
+    deadline_missed por consola.
+  - Gestión del mutex de zonas críticas (inbound, expansion, outbound):
+    actúa como árbitro centralizado; si la zona está libre concede
+    directamente; si está ocupada encola al solicitante.
+
+DÓNDE: añadir como nuevos párrafos y puntos en 4.6.3 (no reescribir,
+ampliar la descripción existente). Actualizar también el diagrama de
+agente para reflejar las nuevas entradas (active_deadline, request_zone,
+release_zone) y salidas (zone_granted, storage_full, deadline_missed).
+
+
+------------------------------------------------------------------------
+4.6.4. Agente transport  [NUEVO — nueva subsección completa]
+------------------------------------------------------------------------
+QUÉ AÑADIR:
+  Descripción:
+    Simula la llegada de camiones que recogen los contenedores de la
+    zona OUTBOUND al finalizar cada fase del ciclo de salida.
+
+  Creencias iniciales: ninguna.
+
+  Planes:
+    +transport_request(Type, Phase)[source(_)]:
+      Recibe la señal del scheduler al finalizar cada deadline.
+      Ejecuta collect_outbound_containers (elimina todos los
+      contenedores físicamente del OUTBOUND). Emite evento:
+      EVENT | time=T | agent=transport | type=transport_dispatched | data=Type
+
+    +outbound_full:
+      Recibe la señal del entorno cuando move_to_outbound no encuentra
+      celda libre. Recoge inmediatamente (reactivo, antes del siguiente
+      intento de los robots). Evita que los robots esperen el timeout
+      completo de nav_failed (20s).
+
+    !periodic_collect_loop:
+      Cada 30s ejecuta collect_outbound_containers como red de
+      seguridad: garantiza que ningún contenedor quede indefinidamente
+      en el outbound si el ciclo de salida no lo llenó completamente.
+
+  Estrategia dual: recogida reactiva (outbound_full, transport_request)
+  + periódica (cada 30s).
+
+  Diagrama de agente y tareas para transport.
+
+DÓNDE: nueva subsección 4.6.4.
+
+
+------------------------------------------------------------------------
+5. Arquitectura: Patrón MVC  [ACTUALIZAR LIGERAMENTE]
+------------------------------------------------------------------------
+QUÉ CORREGIR:
+  - Mencionar las nuevas clases/acciones del Controlador (WarehouseArtifact):
+    claim_container, unclaim_container, pickup_from_shelf, move_to_outbound,
+    drop_in_outbound, drop_in_expansion, collect_outbound_containers,
+    discard_container, move_to_expansion (con lista de celdas libres).
+  - Mencionar que CellType ahora incluye OUTBOUND y CLASSIFICATION.
+
+QUÉ AÑADIR:
+  - Breve párrafo sobre el principio de entorno delgado: "El controlador
+    no toma decisiones — solo expone primitivas sensoriales. La
+    deliberación espacial reside íntegramente en los agentes."
+  - Mención a outboundReservations (ConcurrentHashMap) que evita que
+    dos robots obtengan la misma celda OUTBOUND cuando el mutex se
+    libera antes de navegar.
+
+DÓNDE: añadir en 5.3 (El Controlador) y brevemente en la intro del cap. 5.
+
+
+------------------------------------------------------------------------
+6. IMPLEMENTACIÓN DE LA SOLUCIÓN  [REESTRUCTURAR Y AMPLIAR]
+------------------------------------------------------------------------
+
+--- 6.1. El Entorno Java  [AMPLIAR] ---
+QUÉ AÑADIR (nuevas acciones explicadas):
+  claim_container: putIfAbsent en ConcurrentHashMap — exclusión mutua
+    garantizada sin locks explícitos; falla si ya reclamado.
+  unclaim_container: libera el reclamo; si el robot lleva físicamente
+    el contenedor, lo suelta y lo reposiciona en una celda ENTRANCE libre.
+  pickup_from_shelf: retira el contenedor de la estantería (shelf.remove),
+    restaura shelf_available e incrementa la ocupación.
+  move_to_outbound: busca celda OUTBOUND libre (no ocupada, no reservada
+    por otro robot en outboundReservations); emite nav_target.
+  drop_in_outbound: deposita; requiere que el robot esté en celda OUTBOUND;
+    elimina la reserva; emite container_exited(CId) al scheduler.
+  move_to_expansion: emite expansion_free_cell(D,X,Y) para cada celda
+    CLASSIFICATION libre con D = distancia Manhattan desde el robot.
+    Decisión de celda queda en el agente (entorno delgado).
+  collect_outbound_containers: elimina físicamente todos los contenedores
+    del OUTBOUND del mapa containers y de claimedContainers.
+  discard_container: elimina un contenedor del mapa cuando está en zona
+    de expansión y no hay estantería disponible tras 3 intentos.
+
+--- 6.2. Navegación distribuida en agentes ASL  [NUEVA SECCIÓN] ---
+  Contenido: misma explicación que la propuesta para 2.1.5 pero más
+  detallada y con fragmentos de código ASL reales:
+    - !navigate con reglas de corredor
+    - !do_step con heurística Manhattan
+    - !step_with_retry con niveles de backoff
+    - !path_backoff como desbloqueo perpendicular
+    - nav_limit(300) como timeout global
+    - Principio de entorno delgado en move_to_expansion
+  Incluir tabla comparativa BFS vs navegación distribuida:
+    | Criterio        | BFS (iter.1)          | Greedy Manhattan (iter.2)  |
+    |-----------------|----------------------|----------------------------|
+    | Dónde razona    | Entorno Java          | Agente ASL                 |
+    | Nodos explorados| Hasta 300 (grid 20×15)| 1 por paso                 |
+    | Evasión dinámica| Estática (foto fija)  | Adaptativa (step_with_retry)|
+    | Colisiones      | Recalcula ruta        | Backoff + path_backoff     |
+    | Admisibilidad   | Óptimo pero grueso    | Admisible, agente razona   |
+
+--- 6.3. Coordinación distribuida de robots  [NUEVA SECCIÓN] ---
+  Contenido:
+    - Reclamación atómica: claim_container con putIfAbsent en Java.
+      Equivale a la precondición ps_robot_free + ps_pending del
+      planificador centralizado clásico, evaluada localmente.
+    - blocked_type(Type): mecanismo de auto-bloqueo. El scheduler
+      difunde esta creencia a todos los robots cuando detecta saturación.
+      Los robots dejan de intentar reclamar contenedores de ese tipo.
+      Un robot que falla pick_shelf también se auto-bloquea (+blocked_type)
+      sin esperar el broadcast, evitando la race condition donde el robot
+      re-reclama antes de que llegue el broadcast del scheduler.
+    - Mutex de zona (supervisor como árbitro): inbound, expansion y
+      outbound son zonas de acceso crítico. acquire_zone / release_zone
+      garantizan que como máximo un robot entra en cada zona.
+      Patrón Jason: .wait(zone_granted(Zone)) suspende la intención sin
+      polling activo.
+    - outboundReservations: tabla Java que reserva celdas OUTBOUND antes
+      de que el robot navegue. Permite liberar el mutex de zona antes de
+      navegar (varios robots pueden navegar simultáneamente a celdas
+      distintas del outbound sin bloquearse entre sí).
+    - nav_failed(CId): tras 3 intentos fallidos de acceder a un contenedor,
+      el robot añade esta creencia y espera 20s antes de volver a intentarlo.
+      Evita que un robot monopolice intentos sobre un contenedor inaccesible.
+
+--- 6.4. El Agente Scheduler  [REESCRIBIR] ---
+  Según lo descrito en 4.6.2. Énfasis en:
+    - No asigna ni tareas ni robots (diferencia clave con iter. 1).
+    - Gestión del mutex de ciclos (active_exit_cycle).
+    - Diseño asimétrico de fases (solo se activa la relevante).
+    - Desbloqueo reactivo al recuperar espacio (shelf_available handler).
+
+--- 6.5. Los Agentes Robot  [AMPLIAR] ---
+  Añadir:
+    - Descripción del ciclo reactivo + polling para inbound.
+    - Selección autónoma de estantería con !pick_shelf (common.asl):
+      heurística greedy (menor ocupación dentro de categoría compatible),
+      umbral 85% de ocupación, fallback a cualquier estantería,
+      expansión como último recurso.
+    - Ciclo de salida físico con execute_exit.
+    - robot_heavy2: misma arquitectura, posición distinta, corredor x=19.
+    - common.asl como módulo compartido (include).
+
+--- 6.6. El Agente Supervisor  [AMPLIAR] ---
+  Añadir:
+    - Detección de saturación: handler -shelf_available con lógica para
+      urgentes (directo) y non_urgentes (busca tipos realmente almacenados
+      para notificar con precisión).
+    - Monitor periódico de deadline (cada 5s durante el ciclo activo).
+    - Mecanismo dual: monitor + -active_deadline como backup.
+    - Registro de deadline_missed por contenedor.
+
+--- 6.7. El Agente Transport  [NUEVO] ---
+  Según lo descrito en 4.6.4. Destacar la estrategia triple:
+  reactiva (outbound_full) + por demanda (transport_request) + periódica.
+
+--- 6.8. Robustez y Gestión de Fallos  [AMPLIAR] ---
+  Añadir a los mecanismos existentes:
+    - nav_failed: cooldown de 20s por contenedor inaccesible.
+    - nav_limit: timeout global de 300 pasos por intento de navegación.
+    - Zona de expansión: cuando todas las estanterías compatibles están
+      llenas, el robot deposita en la zona CLASSIFICATION. Hasta 2
+      reintentos; si falla, descarta el contenedor (discard_container).
+    - Devolución a estantería al fallar execute_exit: si el robot recogió
+      el contenedor pero no puede llegar al outbound, lo devuelve a la
+      estantería de origen (return_to_shelf con límite de nav_limit=200).
+    - outbound_drop_retries: hasta 3 reintentos de drop_in_outbound
+      (robot llegó pero la celda ya no es OUTBOUND — carrera con otro
+      robot). Sin reintentos extra si el robot ni siquiera llegó al
+      outbound (intenta con nueva celda directamente).
+
+  LIMITACIÓN CONOCIDA (documentar explícitamente):
+    En escenarios con 4 robots accediendo simultáneamente al outbound,
+    el mecanismo nav_failed (20s de cooldown) puede retrasar hasta 20s
+    la entrega de un contenedor si el corredor de acceso estaba bloqueado.
+    Este comportamiento es observable pero no supone pérdida de datos:
+    el contenedor siempre acaba entregado (o devuelto a la estantería).
+
+--- 6.9. Logging de eventos obligatorios  [NUEVA SECCIÓN] ---
+  Tabla completa de todos los eventos obligatorios con:
+    - Formato: EVENT | time=T | agent=X | type=Y | data=Z
+    - Agente emisor
+    - Condición de disparo
+    - Ejemplo de salida real en consola
+
+  | Evento               | Agente     | Cuándo                                  |
+  |----------------------|------------|-----------------------------------------|
+  | no_space_detected    | supervisor | Al detectar que no quedan estanterías   |
+  |                      |            | del tipo en cuestión                    |
+  | output_phase_started | scheduler  | Al recibir storage_full y activar ciclo |
+  | deadline_started     | scheduler  | Al iniciar cada fase (short/long)       |
+  | deadline_ended       | scheduler  | Al finalizar cada fase                  |
+  | container_delivered  | robot_X    | Tras drop_in_outbound exitoso           |
+  | deadline_missed      | supervisor | Por cada contenedor no entregado a      |
+  |                      |            | tiempo al expirar el deadline           |
+  | transport_dispatched | transport  | Al ejecutar collect_outbound            |
+
+  Incluir ejemplo real de secuencia de eventos en una ejecución.
+
+
+------------------------------------------------------------------------
+7. PRUEBAS Y RESULTADOS  [AMPLIAR]
+------------------------------------------------------------------------
+
+--- 7.5. Ciclo de salida urgente (deadline corto)  [NUEVO] ---
+  Describir:
+    - Condición inicial: almacén con contenedores urgentes en S1/S5/S8
+      y la zona saturada.
+    - Qué se comprueba: los robots llevan contenedores urgentes al
+      outbound durante el deadline corto (T0+ΔT); el transport los
+      recoge al finalizar la fase.
+    - Logs esperados: no_space_detected → output_phase_started →
+      deadline_started → container_delivered (varios) → deadline_ended.
+    - Verificación de que blocked_type previene la recepción de nuevos
+      urgentes durante el ciclo.
+
+--- 7.6. Ciclo de salida no urgente (deadline largo)  [NUEVO] ---
+  Similar al anterior pero para contenedores standard/fragile.
+  Verificar el diseño asimétrico: al saturar non_urgent, la fase
+  urgente no se activa.
+
+--- 7.7. Zona de expansión y desbordamiento de estantería  [NUEVO] ---
+  Describir el escenario en que todas las estanterías de una categoría
+  están llenas. El robot deposita en la zona CLASSIFICATION (x=3-4,
+  y=0-1) y notifica container_in_expansion al scheduler. El scheduler
+  genera un no-op (el contenedor permanece en expansión hasta que haya
+  espacio). Verificar que la selección de celda la hace el agente
+  (expansion_free_cell más cercana).
+
+--- 7.8. Outbound lleno: recogida reactiva por Transport  [NUEVO] ---
+  Describir el escenario en que el outbound se llena antes del fin de
+  la fase. El entorno emite outbound_full al transport, que recoge
+  inmediatamente. Los robots continúan entregando sin esperar el fin
+  del deadline.
+
+
+------------------------------------------------------------------------
+8. CONCLUSIONES Y TRABAJO FUTURO  [ACTUALIZAR]
+------------------------------------------------------------------------
+QUÉ AÑADIR:
+
+  Párrafo sobre correcciones de la iteración 1:
+    "La iteración 2 subsana los defectos identificados en la iteración
+    anterior. El entorno grueso (BFS en Java, cálculo de estantería
+    óptima en Java) fue eliminado: toda la deliberación spatial y de
+    selección de recursos reside ahora en los agentes. El scheduler
+    centralizado que asignaba tareas fue convertido en un gestor de
+    deadlines pasivo, y los robots operan de forma completamente
+    autónoma basándose en percepciones directas del entorno."
+
+  Párrafo sobre la planificación distribuida:
+    "La planificación clásica centralizada (R&N Cap. 11) se sustituye
+    por coordinación emergente: cada robot aplica localmente la misma
+    lógica que un planificador global aplicaría, con consistencia
+    garantizada por el reclamo atómico en Java y las percepciones
+    compartidas del entorno."
+
+  Trabajo futuro (mantener lo de iteración 1 si aplica, añadir):
+    - Optimización del scheduling de salida: actualmente los robots
+      seleccionan el primer contenedor disponible de la lista. Una
+      heurística (por ejemplo, priorizar los más antiguos o los que
+      están en estanterías más cercanas al outbound) mejoraría el
+      throughput del ciclo de salida.
+    - Gestión de múltiples ciclos de salida simultáneos: el mutex
+      active_exit_cycle serializa los ciclos. Un sistema con alta
+      carga podría beneficiarse de ciclos solapados por tipos.
+
+QUÉ CORREGIR:
+  - Si en las conclusiones de iteración 1 se menciona el BFS o el
+    scheduler como planificador central, actualizar para reflejar el
+    estado actual.
+
+
+================================================================================
+CHECKLIST FINAL DE LA MEMORIA
+================================================================================
+
+  [ ] Portada actualizada a "Segunda Parte"
+  [ ] Sección 2.1.5 reemplaza BFS por navegación distribuida
+  [ ] Capítulo 3 incluye objetivos de semanas 3, 4 y 5
+  [ ] Diagrama de entorno actualizado (nuevas percepciones y acciones)
+  [ ] Diagrama de organización actualizado (scheduler pasivo, heavy2, transport)
+  [ ] Diagrama de objetivos ideal refleja flujo inbound + outbound
+  [ ] Diagrama de interacción actualizado (robots autónomos, sin task del scheduler)
+  [ ] Diagrama de agente para cada uno de los 6 agentes (4 robots, scheduler,
+      supervisor, transport)
+  [ ] Sección 4.6 incluye heavy2 y transport
+  [ ] Capítulo 6 incluye secciones de navegación, coordinación, transport,
+      logging y limitaciones conocidas
+  [ ] Todos los eventos de logging obligatorios documentados con tabla
+  [ ] Capítulo 7 incluye escenarios de ciclo de salida, expansión y outbound
+  [ ] Conclusiones mencionan correcciones de entorno grueso de iteración 1
+  [ ] Justificación de ΔT=90s explicada (sección 3.2.4 o 6.4)
+  [ ] La metodología utilizada (Prometheus) referenciada correctamente
+  [ ] No se menciona BFS como algoritmo activo en ningún lugar de la memoria
+
+================================================================================

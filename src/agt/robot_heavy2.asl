@@ -4,8 +4,8 @@
  * Universidad de Vigo - Sistemas Inteligentes
  * Curso 2025-2026
  *
- * Segunda instancia del robot pesado. Mismas capacidades que robot_heavy,
- * posición base distinta (4,3).
+ * Segunda instancia del robot pesado. Mismas capacidades que robot_heavy.
+ * Modo autónomo — reclama contenedores directamente del entorno.
  *
  * CAPACIDADES:
  *   - Peso máximo: 100 kg
@@ -14,25 +14,30 @@
  *
  ******************************************************************************/
 
-/* Estado inicial del robot */
-state(idle).
-position(4,3).       // Posición inicial (diferente a robot_heavy en (3,3))
-carrying(none).
+{ include("common.asl") }
 
 /* ============================================================================
- * PLANES PRINCIPALES
+ * CREENCIAS INICIALES
+ * ============================================================================ */
+
+state(idle).
+position(4,4).
+carrying(none).
+nav_limit(300).
+
+/* ============================================================================
+ * ARRANQUE Y CICLO DE TRABAJO
  * ============================================================================ */
 
 !start.
 
 +!start : true <-
-    .print("🤖 Robot pesado 2 iniciado - Capacidad: 100kg, 2x3 [ESPECIALIZADO]");
-    -+state(idle);
+    .print("🤖 Robot pesado 2 iniciado - Capacidad: 100kg, 2x3 - Modo autónomo");
     !work_cycle.
 
 +!work_cycle : state(idle) <-
-    .print("[HEAVY2] Consultando scheduler para nueva tarea...");
-    .send(scheduler, tell, request_task);
+    !check_exit_cycle;
+    !check_pending_containers;
     .wait(4000);
     !work_cycle.
 
@@ -41,44 +46,86 @@ carrying(none).
     !work_cycle.
 
 /* ============================================================================
- * MANEJO DE TAREAS ASIGNADAS
+ * RECLAMACIÓN AUTÓNOMA DE CONTENEDORES
  * ============================================================================ */
 
-+task(CId, ShelfId) : state(idle) <-
-    .print("✅ [HEAVY2] Tarea especializada asignada: ", CId, " a ", ShelfId);
-    -task(CId, ShelfId)[source(scheduler)];
-    accept_task(CId);
-    -+state(working);
-    -+carrying(CId);
-    !execute_task(CId, ShelfId).
+// Robot pesado 2: Weight>30 OR W>1 OR H>2, hasta 100kg y 2x3
++container_at_entrance(CId, Type, Weight, W, H) :
+    state(idle) & not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) &
+    Weight > 30 & Weight <= 100 & W <= 2 & H <= 3 <-
+    !try_claim(CId, Type, Weight, W, H).
 
-+task(CId, ShelfId) : not state(idle) <-
-    .print("⚠️ [HEAVY2] Ocupado con carga pesada, encolando: ", CId).
++container_at_entrance(CId, Type, Weight, W, H) :
+    state(idle) & not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) &
+    W > 1 & Weight <= 100 & W <= 2 & H <= 3 <-
+    !try_claim(CId, Type, Weight, W, H).
+
++container_at_entrance(CId, Type, Weight, W, H) :
+    state(idle) & not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) &
+    H > 2 & Weight <= 100 & W <= 2 & H <= 3 <-
+    !try_claim(CId, Type, Weight, W, H).
+
++container_at_entrance(_, _, _, _, _) : true <- true.
+
+-container_at_entrance(CId, _, _, _, _) : nav_failed(CId) <- -nav_failed(CId).
+
++nav_failed(CId) <- .wait(20000); -nav_failed(CId).
+
++!check_pending_containers :
+    container_at_entrance(CId, Type, Weight, W, H) &
+    Weight > 30 & Weight <= 100 & W <= 2 & H <= 3 &
+    not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) <-
+    !try_claim(CId, Type, Weight, W, H).
+
++!check_pending_containers :
+    container_at_entrance(CId, Type, Weight, W, H) &
+    W > 1 & Weight <= 100 & W <= 2 & H <= 3 &
+    not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) <-
+    !try_claim(CId, Type, Weight, W, H).
+
++!check_pending_containers :
+    container_at_entrance(CId, Type, Weight, W, H) &
+    H > 2 & Weight <= 100 & W <= 2 & H <= 3 &
+    not nav_failed(CId) & not shelf_wait(CId) & not blocked_type(Type) <-
+    !try_claim(CId, Type, Weight, W, H).
+
++!check_pending_containers : true <- true.
+-!check_pending_containers : true <- true.
+
+
+/* ============================================================================
+ * EJECUCIÓN DE TAREA — inbound
+ * ============================================================================ */
 
 +!execute_task(CId, ShelfId) : true <-
-    .print("🚀 [HEAVY2] Iniciando transporte de carga pesada: ", CId);
+    -nav_limit(_); +nav_limit(300);
+    .print("🚀 [HEAVY2] Iniciando tarea: ", CId, " → ", ShelfId);
 
     .print("📍 [HEAVY2] Fase 1: Localizando contenedor ", CId);
+    !acquire_zone(inbound);
     !get_to_container(CId, 3);
-    .wait(1000);
+    .wait(800);
 
-    .print("📦 [HEAVY2] Fase 2: Recogiendo contenedor pesado ", CId);
+    .print("📦 [HEAVY2] Fase 2: Recogiendo ", CId);
     -+state(picking);
     pickup(CId);
-    .wait(1000);
+    !release_zone(inbound);
+    .wait(800);
+    .time(H_pk,M_pk,S_pk); T_pk=H_pk*3600+M_pk*60+S_pk;
+    .print("EVENT | time=",T_pk," | agent=robot_heavy2 | type=pickup | data=",CId);
 
-    .print("🚚 [HEAVY2] Fase 3: Transportando carga pesada a ", ShelfId);
+    .print("🚚 [HEAVY2] Fase 3: Transportando a estantería ", ShelfId);
     -+state(carrying);
     move_to_shelf(ShelfId);
     ?nav_target(TX2, TY2);
     !navigate(TX2, TY2);
 
-    .print("📥 [HEAVY2] Fase 4: Depositando carga en ", ShelfId);
+    .print("📥 [HEAVY2] Fase 4: Depositando en ", ShelfId);
     -+state(dropping);
     drop_at(ShelfId);
-    .wait(1000);
+    .wait(800);
 
-    .print("✨ [HEAVY2] Tarea especializada completada: ", CId);
+    .print("✨ [HEAVY2] Tarea completada: ", CId);
     -+carrying(none);
     !check_queue.
 
@@ -86,31 +133,63 @@ carrying(none).
  * MANEJO DE ERRORES Y FALLOS DE PLANES
  * ============================================================================ */
 
+-!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) & expansion_count(CId, N) & N >= 2 <-
+    .print("⚠️ [HEAVY2] Sin espacio tras 3 intentos, abandonando ", CId);
+    .abolish(error(shelf_full, _));
+    .time(H_ex,M_ex,S_ex); T_ex=H_ex*3600+M_ex*60+S_ex;
+    .print("EVENT | time=",T_ex," | agent=robot_heavy2 | type=expansion_drop_final | data=",CId,",",ShelfId);
+    .abolish(expansion_count(CId, _));
+    .abolish(expansion_failed_shelf(CId, _));
+    +shelf_wait(CId);
+    -+carrying(none);
+    unclaim_container(CId);
+    release_task(CId);
+    .send(supervisor, tell, container_error(CId, no_shelf_space));
+    .send(scheduler, tell, task_failed(CId));
+    !safe_return;
+    !check_queue.
+
 -!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) <-
     .print("⚠️ [HEAVY2] Estantería llena, llevando ", CId, " a zona de expansión");
     .abolish(error(shelf_full, _));
-    !go_to_expansion(CId);
+    +expansion_failed_shelf(CId, ShelfId);
+    if (expansion_count(CId, N)) {
+        N1 = N + 1;
+        .abolish(expansion_count(CId, _));
+        +expansion_count(CId, N1)
+    } else {
+        +expansion_count(CId, 1)
+    };
+    !safe_expand_drop(CId);
+    -+carrying(none);
+    .time(H_ex,M_ex,S_ex); T_ex=H_ex*3600+M_ex*60+S_ex;
+    .print("EVENT | time=",T_ex," | agent=robot_heavy2 | type=expansion_drop | data=",CId,",",ShelfId);
+    unclaim_container(CId);
+    release_task(CId);
+    !safe_return;
+    .send(scheduler, tell, container_in_expansion(CId));
     !check_queue.
 
-+!go_to_expansion(CId) <-
-    move_to_expansion;
-    ?nav_target(TX, TY);
-    !navigate(TX, TY);
-    drop_in_expansion(CId);
-    -+carrying(none);
-    release_task(CId);
-    .send(scheduler, tell, container_in_expansion(CId)).
+-!execute_task(CId, ShelfId) : not carrying(CId) & nav_failed(CId) <-
+    .wait(2000);
+    !safe_return;
+    !check_queue.
 
--!go_to_expansion(CId) <-
-    .print("⚠️ [HEAVY2] No se pudo llegar a expansión con ", CId, ". Liberando tarea.");
-    -+carrying(none);
+-!execute_task(CId, ShelfId) : not carrying(CId) <-
+    unclaim_container(CId);
     release_task(CId);
-    .send(scheduler, tell, task_failed(CId)).
+    .send(scheduler, tell, task_failed(CId));
+    .wait(2000);
+    !safe_return;
+    !check_queue.
 
 -!execute_task(CId, ShelfId) : true <-
-    .print("⚠️ [HEAVY2] Fallo en execute_task para ", CId, ". Limpiando estado...");
+    .print("⚠️ [HEAVY2] Fallo en execute_task para ", CId);
     -+carrying(none);
+    unclaim_container(CId);
     release_task(CId);
+    .time(H_tf,M_tf,S_tf); T_tf=H_tf*3600+M_tf*60+S_tf;
+    .print("EVENT | time=",T_tf," | agent=robot_heavy2 | type=task_failed | data=",CId,",",ShelfId);
     .send(scheduler, tell, task_failed(CId));
     .wait(5000);
     !safe_return;
@@ -124,140 +203,267 @@ carrying(none).
     ?nav_target(TX, TY);
     !navigate(TX, TY).
 
+-!get_to_container(CId, N) : error(container_not_found, _) <-
+    .abolish(error(container_not_found, _));
+    .print("⚠️ [HEAVY2] Contenedor ", CId, " no existe. Descartando.");
+    -+carrying(none);
+    release_task(CId);
+    .send(scheduler, tell, task_failed(CId));
+    .fail.
+
 -!get_to_container(CId, N) : N > 1 <-
     .print("⚠️ [HEAVY2] Reintentando nav a ", CId, " (", N, " intentos restantes)");
-    .wait(5000);
+    .wait(2000);
     N1 = N - 1;
     !get_to_container(CId, N1).
 
+-!get_to_container(CId, 1) : true <-
+    .print("⚠️ [HEAVY2] Inaccesible tras 3 intentos: ", CId);
+    -+carrying(none);
+    release_task(CId);
+    +nav_failed(CId);
+    .time(H_nf,M_nf,S_nf); T_nf=H_nf*3600+M_nf*60+S_nf;
+    .print("EVENT | time=",T_nf," | agent=robot_heavy2 | type=nav_failed | data=",CId);
+    .send(scheduler, tell, task_failed(CId));
+    .fail.
+
++!check_queue : position(InitX, InitY) <-
+    .abolish(error(_, _));
+    !release_zone(inbound);
+    !release_zone(expansion);
+    if (container_at_entrance(_, Type, Weight, W, H) &
+            not blocked_type(Type) &
+            (Weight > 30 | W > 1 | H > 2) &
+            Weight <= 100 & W <= 2 & H <= 3) {
+        -+state(idle)
+    } else {
+        -+state(returning);
+        !navigate(InitX, InitY);
+        -+state(idle)
+    }.
+
+-!check_queue : true <-
+    .abolish(error(_, _));
+    !release_zone(inbound);
+    !release_zone(expansion);
+    -+state(idle).
+
 /* ============================================================================
- * CICLO OUTBOUND — extraer contenedor de estantería y llevar a zona de salida
+ * CICLO DE SALIDA
  * ============================================================================ */
 
-+outbound_available(CId, ShelfId, W, H, Weight) : state(idle) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
-                                                  & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
-    .print("📤 [HEAVY2] Tomando outbound: ", CId, " de ", ShelfId);
-    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)];
-    accept_task(CId);
++active_deadline(_, Cat, _) : not state(idle) <-
+    +pending_exit_flag(Cat).
+
++active_deadline(_, Cat, _) : true <- true.
+
++!check_exit_cycle : pending_exit_flag(Cat) <-
+    .abolish(pending_exit_flag(_));
+    .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
+    !select_for_exit(Candidates, Cat).
+
++!check_exit_cycle : active_deadline(_, Category, _) <-
+    .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
+    !select_for_exit(Candidates, Category).
+
++!check_exit_cycle : true <- true.
+
++!select_for_exit([pair(CId, ShelfId)|_], urgent) : shelf_urgency(ShelfId, urgent) & state(idle) <-
+    +exit_claimed(CId);
+    .my_name(Me);
+    .print("[", Me, "] Ciclo de salida (urgente): seleccionado ", CId, " en ", ShelfId);
     -+state(working);
     -+carrying(CId);
-    !execute_outbound_task(CId, ShelfId).
+    !execute_exit(CId, ShelfId).
 
-+outbound_available(CId, ShelfId, W, H, Weight) : not state(idle) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
-                                                  & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
-    .print("⚠️ [HEAVY2] Ocupado, guardando outbound: ", CId).
+-!select_for_exit([_|Rest], urgent) : true <-
+    !select_for_exit(Rest, urgent).
 
-+outbound_available(CId, ShelfId, W, H, Weight) : true <-
-    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)].
++!select_for_exit([pair(CId, ShelfId)|_], non_urgent) : shelf_urgency(ShelfId, non_urgent) & state(idle) <-
+    +exit_claimed(CId);
+    .my_name(Me);
+    .print("[", Me, "] Ciclo de salida (no urgente): seleccionado ", CId, " en ", ShelfId);
+    -+state(working);
+    -+carrying(CId);
+    !execute_exit(CId, ShelfId).
 
-+!execute_outbound_task(CId, ShelfId) : true <-
-    .print("📤 [HEAVY2] Fase 1: Navegando a estantería ", ShelfId);
+-!select_for_exit([_|Rest], non_urgent) : true <-
+    !select_for_exit(Rest, non_urgent).
+
++!select_for_exit([], _) : true <- true.
+
++!execute_exit(CId, ShelfId) : true <-
+    -nav_limit(_); +nav_limit(300);
+    .print("🚀 [HEAVY2] Execute exit: ", CId, " desde ", ShelfId);
+
     move_to_shelf(ShelfId);
     ?nav_target(TX, TY);
     !navigate(TX, TY);
 
-    .print("📦 [HEAVY2] Fase 2: Recogiendo de estantería ", ShelfId);
-    -+state(picking);
-    pickup_from_shelf(ShelfId, CId);
-    .wait(1000);
-
-    .print("🚚 [HEAVY2] Fase 3: Navegando a zona outbound");
+    pickup_from_shelf(CId, ShelfId);
+    .wait(800);
+    +exit_picked(CId);
     -+state(carrying);
-    move_to_outbound;
-    ?nav_target(TX2, TY2);
-    !navigate(TX2, TY2);
 
-    .print("📤 [HEAVY2] Fase 4: Entregando contenedor");
-    -+state(dropping);
-    drop_in_outbound(CId);
-    .wait(1000);
+    -nav_limit(_); +nav_limit(300);
+    !drop_at_outbound(CId);
+    .wait(800);
+    .abolish(outbound_drop_retries(CId, _));
 
-    .print("✨ [HEAVY2] Outbound completado: ", CId);
+    .my_name(Me);
+    .time(Hd, Md, Sd); Td = Hd * 3600 + Md * 60 + Sd;
+    .print("EVENT | time=", Td, " | agent=", Me, " | type=container_delivered | data=", CId);
+    .send(supervisor, tell, container_delivered(CId));
+    -stored(CId, ShelfId);
+    .abolish(claimed_type(CId, _));
+    .abolish(expansion_failed_shelf(CId, _));
+    .abolish(expansion_count(CId, _));
+    -exit_picked(CId);
     -+carrying(none);
-    release_task(CId);
-    .send(scheduler, tell, container_shipped(CId, ShelfId));
     !check_queue.
 
--!execute_outbound_task(CId, ShelfId) : true <-
-    .print("⚠️ [HEAVY2] Fallo en tarea outbound: ", CId);
++!return_to_shelf(CId, ShelfId) <-
+    -nav_limit(_); +nav_limit(200);
+    move_to_shelf(ShelfId);
+    ?nav_target(TX, TY);
+    !navigate(TX, TY);
+    drop_at(ShelfId).
+
+-!return_to_shelf(CId, _) <-
+    unclaim_container(CId);
+    .abolish(stored(CId, _));
+    .abolish(claimed_type(CId, _)).
+
+-!return_to_shelf(_, _) : true <- true.
+
+-!execute_exit(CId, ShelfId) : exit_picked(CId) <-
+    .print("⚠️ [HEAVY2] Fallo en execute_exit tras pickup, devolviendo ", CId, " a ", ShelfId);
+    .abolish(outbound_drop_retries(CId, _));
+    -exit_claimed(CId);
+    -exit_picked(CId);
+    !return_to_shelf(CId, ShelfId);
     -+carrying(none);
-    release_task;
-    .send(scheduler, tell, outbound_failed(CId, ShelfId));
     !check_queue.
 
-+shipped(CId) : true <- true.
-
-+!check_queue : outbound_available(CId, ShelfId, W, H, Weight) & max_weight(MaxW) & max_size(MaxDimW, MaxDimH)
-              & not (Weight > MaxW) & not (W > MaxDimW) & not (H > MaxDimH) <-
-    .print("✅ [HEAVY2] Procesando outbound disponible: ", CId, " desde ", ShelfId);
-    -outbound_available(CId, ShelfId, W, H, Weight)[source(scheduler)];
-    accept_task(CId);
-    -+state(working);
-    -+carrying(CId);
-    !execute_outbound_task(CId, ShelfId).
-
-+!check_queue : task(CId, ShelfId) <-
-    .print("✅ [HEAVY2] Procesando tarea encolada: ", CId, " a ", ShelfId);
-    -task(CId, ShelfId)[source(scheduler)];
-    accept_task(CId);
-    -+state(working);
-    -+carrying(CId);
-    !execute_task(CId, ShelfId).
-
-+!check_queue : not task(_, _) & not outbound_available(_, _, _, _, _) & position(InitX, InitY) <-
-    .send(scheduler, tell, request_task);
-    .wait(2000);
-    if (task(CId, ShelfId)) {
-        -task(CId, ShelfId)[source(scheduler)];
-        accept_task(CId);
-        -+state(working);
-        -+carrying(CId);
-        !execute_task(CId, ShelfId);
-    } else {
-        !navigate(InitX, InitY);
-        -+state(idle);
-    }.
-
--!check_queue : not task(_, _) & not outbound_available(_, _, _, _, _) <-
-    .abolish(error(_, _));
-    -+state(idle).
-
--!check_queue : task(CId, ShelfId) <-
-    .print("⚠️ [HEAVY2] Fallo al navegar a base, procesando tarea encolada: ", CId);
-    -task(CId, ShelfId)[source(scheduler)];
-    accept_task(CId);
-    -+state(working);
-    -+carrying(CId);
-    !execute_task(CId, ShelfId).
+-!execute_exit(CId, ShelfId) : true <-
+    .print("⚠️ [HEAVY2] Fallo en execute_exit para ", CId);
+    -exit_claimed(CId);
+    -+carrying(none);
+    !check_queue.
 
 /* ============================================================================
  * NAVEGACIÓN AUTÓNOMA
  * ============================================================================ */
 
-corridor_row(1). corridor_row(4). corridor_row(5).
-corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 
+// Estrategia de enrutamiento mediante corredores verticales libres de obstáculos:
+//   x=9  → corredor izquierdo (entre zona izquierda y estanterías S1-S7)
+//   x=19 → corredor derecho   (acceso a estanterías S8-S9 y outbound derecho)
+// Patrón general: moverse al corredor vertical de la fila actual → ascender/descender
+// hasta el nivel destino → avanzar horizontalmente al destino.
+// Reparto de carga: TX<15 usa x=9; TX≥15 usa x=19 para balancear ambos corredores.
+
+// Base: el robot ya está en el destino.
 +!navigate(TX, TY) : robot_pos(TX, TY) <- true.
 
-+!navigate(TX, TY) : TX >= 10 & robot_pos(X, Y) & not (Y == TY & corridor_row(TY)) <-
+// Desde la zona de estanterías (X≥10) hacia la zona izquierda (TX<9):
+// salir al corredor x=9 en la fila actual, navegar verticalmente al nivel destino y avanzar.
++!navigate(TX, TY) : TX < 9 & TX \== 9 & robot_pos(X, Y) & X >= 10 <-
+    !navigate(9, Y);
     !navigate(9, TY);
     !navigate(TX, TY).
 
-+!navigate(TX, TY) : robot_pos(X, Y) <-
+// Hacia el outbound derecho (TX≥17, TY<2) con el robot en una fila alta (Y>3):
+// las celdas de S8-S9 en y=2-3 bloquean el descenso directo — rodear por (19,4)→(19,3).
++!navigate(TX, TY) : TX >= 17 & TY < 2 & robot_pos(X, Y) & Y > 3 <-
+    !navigate(19, 4);
+    !navigate(19, 3);
+    !navigate(TX, TY).
+
+// Hacia el outbound derecho (TX≥17, TY<2) desde x=10-18 con Y≤3:
+// desplazarse horizontalmente hasta x=19 y descender al destino.
++!navigate(TX, TY) : TX >= 17 & TY < 2 & TX \== 19 & robot_pos(X, Y) & X >= 10 & X < 19 <-
+    !navigate(19, Y);
+    !navigate(19, TY);
+    !navigate(TX, TY).
+
+// Desde la zona izquierda (X<9) hacia las estanterías (TX≥10, TY≥2):
+// entrar al corredor x=9 en la fila actual y navegar verticalmente hasta el nivel destino.
++!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X < 9 <-
+    !navigate(9, Y);
+    !navigate(9, TY);
+    !navigate(TX, TY).
+
+// Desde x≤14 hacia la derecha (TX≥15): usar corredor x=19 en lugar de x=9
+// para evitar que los dos robots pesados saturen el mismo corredor vertical.
++!navigate(TX, TY) : TX >= 15 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X >= 10 & Y \== TY & X <= 14 <-
+    !navigate(19, Y);
+    !navigate(19, TY);
+    !navigate(TX, TY).
+
+// Desde x≤14 hacia estanterías izquierdas (TX<15): usar el corredor x=9 local.
++!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 9 & robot_pos(X, Y) & X >= 10 & Y \== TY & X <= 14 <-
+    !navigate(9, Y);
+    !navigate(9, TY);
+    !navigate(TX, TY).
+
+// Desde x>14 hacia cualquier estantería: ya en zona derecha, usar corredor x=19.
++!navigate(TX, TY) : TX >= 10 & TY >= 2 & TX \== 19 & robot_pos(X, Y) & X >= 10 & Y \== TY & X > 14 <-
+    !navigate(19, Y);
+    !navigate(19, TY);
+    !navigate(TX, TY).
+
+// Ya en el corredor x=9: avanzar verticalmente hasta la fila destino.
++!navigate(TX, TY) : TX \== 9 & robot_pos(X, Y) & X == 9 & Y \== TY <-
+    !navigate(9, TY);
+    !navigate(TX, TY).
+
+// Guarda TY>=2: evita forzar la ruta por x=19 cuando el destino es outbound (TY<2).
+// Sin esta guarda, el robot entraría en bucle: navigate(TX,TY<2) → navigate(19,TY) → navigate(TX,TY<2).
+// Ya en el corredor x=19: avanzar verticalmente hasta la fila destino (solo para TY≥2).
++!navigate(TX, TY) : TX \== 19 & robot_pos(X, Y) & X == 19 & Y \== TY & TY >= 2 <-
+    !navigate(19, TY);
+    !navigate(TX, TY).
+
+// nav_limit: contador de pasos que previene bucles infinitos de navegación.
+// Se decrementa en cada llamada a step_with_retry. Al llegar a 0, el plan timeout
+// notifica al supervisor y falla la intención para liberar al robot del ciclo.
++!navigate(TX, TY) : robot_pos(X, Y) & nav_limit(N) & N > 0 <-
+    N1 = N - 1; -nav_limit(_); +nav_limit(N1);
     !step_with_retry(X, Y, TX, TY, 0);
     !navigate(TX, TY).
 
++!navigate(TX, TY) : true <-
+    .my_name(Me);
+    .print("⚠️ [HEAVY2] Nav timeout hacia (", TX, ",", TY, ")");
+    .send(supervisor, tell, robot_error(Me, nav_timeout, "navigation_timed_out"));
+    .fail.
+
+// Navegación con backoff escalonado para gestión de colisiones entre robots:
+//   BC=0     → primer intento sin espera (optimista).
+//   BC∈[1,2) → fallo simple: espera aleatoria 300–1500ms, reintenta desde posición actual.
+//   BC∈[2,4) → dos fallos: movimiento perpendicular (path_backoff) + espera 300–1500ms.
+//   BC∈[4,6) → bloqueo prolongado: espera larga 1500–3000ms para que ceda el bloqueo.
+//   BC≥6     → bloqueo permanente: notifica al supervisor y falla la intención.
+// El factor .random en los tiempos de espera evita el efecto convoy (todos los robots
+// reintentando simultáneamente y volviendo a colisionar entre sí).
 +!step_with_retry(X, Y, TX, TY, BC) <- !do_step(X, Y, TX, TY).
 
--!step_with_retry(X, Y, TX, TY, BC) : BC >= 2 & BC < 6 <-
+-!step_with_retry(X, Y, TX, TY, BC) : BC >= 4 & BC < 6 <-
+    .random(R); .wait(1500 + R * 1500);
+    BC1 = BC + 1;
+    ?robot_pos(CX, CY);
+    !step_with_retry(CX, CY, TX, TY, BC1).
+
+-!step_with_retry(X, Y, TX, TY, BC) : BC >= 2 & BC < 4 <-
     !path_backoff(X, Y, TX, TY);
-    .wait(1000);
+    .random(R); .wait(300 + R * 1200);
     BC1 = BC + 1;
     ?robot_pos(CX, CY);
     !step_with_retry(CX, CY, TX, TY, BC1).
 
 -!step_with_retry(X, Y, TX, TY, BC) : BC < 6 <-
-    .wait(1000);
+    .random(R); .wait(300 + R * 1200);
     BC1 = BC + 1;
     ?robot_pos(CX, CY);
     !step_with_retry(CX, CY, TX, TY, BC1).
@@ -265,68 +471,154 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
 -!step_with_retry(_, _, _, _, _) <-
     .my_name(Me);
     .send(supervisor, tell, robot_error(Me, path_blocked, "permanently_blocked"));
-    ?nav_abort_signal.
+    .fail.
 
+// Greedy de selección de eje: prioriza el eje con mayor distancia pendiente (Manhattan).
+// Si |ΔX|≥|ΔY|, intenta avanzar en X primero (try_x_then_y); si |ΔY|>|ΔX|, en Y
+// primero (try_y_then_x). Esto produce trayectorias diagonalmente comprimidas.
+// La creencia step_done actúa como postcondición: si no se añade, do_step falla y
+// step_with_retry incrementa BC y aplica backoff. -step_done limpia valores residuales.
+// Caso base: ya en el destino.
++!do_step(X, Y, TX, TY) : X == TX & Y == TY <- +step_done.
+// Eje X dominante (|ΔX|≥|ΔY|): intentar avanzar en X primero, Y como fallback.
 +!do_step(X, Y, TX, TY) : TX > X & TY >= Y & TX - X >= TY - Y <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
 +!do_step(X, Y, TX, TY) : TX > X & TY <  Y & TX - X >= Y - TY <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
 +!do_step(X, Y, TX, TY) : TX < X & TY >= Y & X - TX >= TY - Y <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
 +!do_step(X, Y, TX, TY) : TX < X & TY <  Y & X - TX >= Y - TY <- -step_done; !try_x_then_y(X, Y, TX, TY); ?step_done.
+// Eje Y dominante (caso por defecto: |ΔY|>|ΔX|): intentar avanzar en Y primero, X como fallback.
 +!do_step(X, Y, TX, TY) <- -step_done; !try_y_then_x(X, Y, TX, TY); ?step_done.
 
+// Intenta avanzar un paso en el eje X hacia TX. Si move_step falla (celda bloqueada
+// por otro robot u obstáculo fijo), el handler -!try_x_then_y prueba el eje Y como
+// alternativa. Si Y también falla, step_done no se añade → step_with_retry activa backoff.
 +!try_x_then_y(X, Y, TX, TY) : TX > X <- NX = X + 1; move_step(NX, Y); +step_done.
 +!try_x_then_y(X, Y, TX, TY) : TX < X <- NX = X - 1; move_step(NX, Y); +step_done.
 -!try_x_then_y(X, Y, TX, TY) : TY > Y <- NY = Y + 1; move_step(X, NY); +step_done.
 -!try_x_then_y(X, Y, TX, TY) : TY < Y <- NY = Y - 1; move_step(X, NY); +step_done.
 -!try_x_then_y(X, Y, TX, TY) <- true.
 
+// Equivalente a try_x_then_y con ejes intercambiados: intenta Y primero, X como fallback.
 +!try_y_then_x(X, Y, TX, TY) : TY > Y <- NY = Y + 1; move_step(X, NY); +step_done.
 +!try_y_then_x(X, Y, TX, TY) : TY < Y <- NY = Y - 1; move_step(X, NY); +step_done.
 -!try_y_then_x(X, Y, TX, TY) : TX > X <- NX = X + 1; move_step(NX, Y); +step_done.
 -!try_y_then_x(X, Y, TX, TY) : TX < X <- NX = X - 1; move_step(NX, Y); +step_done.
 -!try_y_then_x(X, Y, TX, TY) <- true.
 
-+!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X + 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
-+!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X + 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
-+!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y + 1; move_step(X, NY).
-+!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y + 1; move_step(X, NY).
+// Movimiento perpendicular de desbloqueo: activo tras BC∈[2,4) fallos consecutivos.
+// Mueve el robot en la dirección perpendicular a su trayectoria para escapar de una
+// celda bloqueada por otro robot. Los handlers -!path_backoff intentan el sentido
+// opuesto si el primer movimiento perpendicular también está bloqueado.
++!path_backoff(X, Y, TX, TY) : TX \== X & Y < 14 <- NY = Y + 1; move_step(X, NY).
++!path_backoff(X, Y, TX, TY) : TX \== X & Y > 0 <- NY = Y - 1; move_step(X, NY).
++!path_backoff(X, Y, TX, TY) : TY \== Y & X < 19 <- NX = X + 1; move_step(NX, Y).
++!path_backoff(X, Y, TX, TY) : TY \== Y & X > 0 <- NX = X - 1; move_step(NX, Y).
 +!path_backoff(_, _, _, _) <- true.
--!path_backoff(X, Y, TX, TY) : TY > Y <- NX = X - 1; NY = Y + 1; move_step(NX, Y); move_step(NX, NY).
--!path_backoff(X, Y, TX, TY) : TY < Y <- NX = X - 1; NY = Y - 1; move_step(NX, Y); move_step(NX, NY).
--!path_backoff(X, Y, TX, TY) : TX > X <- NY = Y - 1; move_step(X, NY).
--!path_backoff(X, Y, TX, TY) : TX < X <- NY = Y - 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TX \== X & Y > 0 <- NY = Y - 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TX \== X & Y < 14 <- NY = Y + 1; move_step(X, NY).
+-!path_backoff(X, Y, TX, TY) : TY \== Y & X > 0 <- NX = X - 1; move_step(NX, Y).
+-!path_backoff(X, Y, TX, TY) : TY \== Y & X < 19 <- NX = X + 1; move_step(NX, Y).
 -!path_backoff(_, _, _, _) <- true.
+
+/* ============================================================================
+ * MANEJADORES DE ERRORES DEL ENTORNO
+ * ============================================================================ */
 
 +error(shelf_full, Data) : true <- true.
 
 +error(container_too_heavy, Data) : carrying(CId) <-
-    .send(scheduler, tell, container_error(CId, container_too_heavy));
     .send(supervisor, tell, container_error(CId, container_too_heavy));
-    -+state(idle);
-    -+carrying(none);
-    .abolish(task(CId, _)).
+    -+state(idle); -+carrying(none);
+    .abolish(claimed_type(CId, _)).
 
 +error(container_too_big, Data) : carrying(CId) <-
-    .send(scheduler, tell, container_error(CId, container_too_big));
     .send(supervisor, tell, container_error(CId, container_too_big));
-    -+state(idle);
-    -+carrying(none);
-    .abolish(task(CId, _)).
+    -+state(idle); -+carrying(none);
+    .abolish(claimed_type(CId, _)).
+
++error(destination_conflict, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, destination_conflict, Data));
+    .wait(800).
+
++error(robot_not_found, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, robot_not_found, Data));
+    -+state(idle); -+carrying(none).
+
++error(not_carrying, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, not_carrying, Data));
+    -+state(idle); -+carrying(none).
+
++error(invalid_pickup, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, invalid_pickup, Data));
+    -+state(idle); -+carrying(none).
+
++error(invalid_drop, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, invalid_drop, Data));
+    -+state(idle); -+carrying(none).
+
++error(too_far, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, too_far, Data)).
++error(too_far, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, too_far, Data)).
++error(too_far, Data) : exit_claimed(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, too_far, Data)).
++error(too_far, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, too_far, Data));
+    -+state(idle); -+carrying(none).
+
++error(route_blocked, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, route_blocked, Data)).
++error(route_blocked, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, route_blocked, Data)).
++error(route_blocked, Data) : exit_claimed(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, route_blocked, Data)).
++error(route_blocked, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, route_blocked, Data));
+    -+state(idle); -+carrying(none).
+
++error(path_blocked, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
++error(path_blocked, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
++error(path_blocked, Data) : exit_claimed(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
++error(path_blocked, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, path_blocked, Data));
+    -+state(idle); -+carrying(none).
+
++error(illegal_move, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, illegal_move, Data)).
++error(illegal_move, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, illegal_move, Data)).
++error(illegal_move, Data) : exit_claimed(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, illegal_move, Data)).
++error(illegal_move, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, illegal_move, Data));
+    -+state(idle); -+carrying(none).
+
 
 +error(ErrorType, Data) : carrying(CId) <-
-    .send(scheduler, tell, container_error(CId, ErrorType));
     .send(supervisor, tell, container_error(CId, ErrorType));
-    -+state(idle);
-    -+carrying(none).
+    -+state(idle); -+carrying(none).
 
 +error(ErrorType, Data) : true <-
-    -+state(idle);
-    -+carrying(none).
+    -+state(idle); -+carrying(none).
 
 +picked(CId) : true <-
-    .print("✓ [HEAVY2] Carga pesada ", CId, " asegurada correctamente").
+    .print("✓ [HEAVY2] ", CId, " recogido").
 
 +stored(CId, ShelfId) : true <-
-    .print("✓ [HEAVY2] Carga pesada ", CId, " almacenada en ", ShelfId);
+    .print("✓ [HEAVY2] ", CId, " almacenado en ", ShelfId);
+    .time(H_st,M_st,S_st); T_st=H_st*3600+M_st*60+S_st;
+    .print("EVENT | time=",T_st," | agent=robot_heavy2 | type=stored | data=",CId,",",ShelfId);
     .send(scheduler, tell, container_stored(CId, ShelfId));
     .send(supervisor, tell, container_stored(CId, ShelfId)).
 
@@ -338,14 +630,18 @@ corridor_row(8). corridor_row(9). corridor_row(13). corridor_row(14).
     .my_name(Me);
     .send(supervisor, tell, robot_state_change(Me, working)).
 
++state(returning) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_state_change(Me, idle)).
+
 +state(idle) : task(CId, ShelfId) <-
-    .print("✅ [HEAVY2] Tarea pendiente al quedar idle: ", CId, " a ", ShelfId);
+    .print("✅ [HEAVY2] Tarea pendiente al quedar idle: ", CId, " → ", ShelfId);
     -task(CId, ShelfId)[source(scheduler)];
     accept_task(CId);
     -+state(working);
     -+carrying(CId);
     !execute_task(CId, ShelfId).
 
-+state(idle) : not task(_, _) <-
++state(idle) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_state_change(Me, idle)).

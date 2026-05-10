@@ -257,7 +257,7 @@ public class WarehouseView extends JFrame {
                             g.setColor(new Color(255, 255, 200));
                             break;
                         case OUTBOUND:
-                            g.setColor(new Color(255, 180, 180));
+                            g.setColor(new Color(220, 60, 60));
                             break;
                         case STORAGE:
                             g.setColor(new Color(220, 220, 255));
@@ -387,7 +387,14 @@ public class WarehouseView extends JFrame {
                 
                 // Dibujar ID
                 g.setFont(new Font("Arial", Font.BOLD, 9));
-                String shortId = robot.getId().replace("robot_", "");
+                String shortId;
+                switch (robot.getId()) {
+                    case "robot_light":  shortId = "L";  break;
+                    case "robot_medium": shortId = "M";  break;
+                    case "robot_heavy":  shortId = "H";  break;
+                    case "robot_heavy2": shortId = "H2"; break;
+                    default: shortId = robot.getId().replace("robot_", "");
+                }
                 FontMetrics fm = g.getFontMetrics();
                 int textWidth = fm.stringWidth(shortId);
                 g.drawString(shortId, px + (CELL_SIZE - textWidth) / 2, py + CELL_SIZE / 2 + 3);

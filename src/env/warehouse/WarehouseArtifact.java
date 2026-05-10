@@ -35,6 +35,12 @@ public class WarehouseArtifact extends Environment {
     private int totalContainersProcessed = 0;
     private long startTime;
 
+    // Contenedores reclamados atómicamente por robots (containerId → robotId)
+    private ConcurrentHashMap<String, String> claimedContainers = new ConcurrentHashMap<>();
+    // Reserva de celdas outbound: robotId → "x,y". Evita que dos robots obtengan
+    // la misma celda cuando liberamos el mutex antes de navegar.
+    private ConcurrentHashMap<String, String> outboundReservations = new ConcurrentHashMap<>();
+
     // Gestión del thread generador de contenedores
     private ExecutorService containerGeneratorExecutor;
     private volatile boolean running = true;
@@ -118,6 +124,7 @@ public class WarehouseArtifact extends Environment {
                 grid[x][y] = CellType.ENTRANCE;
             }
         }
+
     }
 
     /**
@@ -125,28 +132,28 @@ public class WarehouseArtifact extends Environment {
      */
     private void initializeRobots() {
         Robot light = new Robot("robot_light", "light", 10, 1, 1, 3);
-        light.setPosition(1, 3);
+        light.setPosition(1, 4);
         robots.put("robot_light", light);
 
         Robot medium = new Robot("robot_medium", "medium", 30, 1, 2, 2);
-        medium.setPosition(2, 3);
+        medium.setPosition(2, 4);
         robots.put("robot_medium", medium);
 
         Robot heavy = new Robot("robot_heavy", "heavy", 100, 2, 3, 1);
-        heavy.setPosition(3, 3);
+        heavy.setPosition(3, 4);
         robots.put("robot_heavy", heavy);
 
         Robot heavy2 = new Robot("robot_heavy2", "heavy", 100, 2, 3, 1);
-        heavy2.setPosition(4, 3);
+        heavy2.setPosition(4, 4);
         robots.put("robot_heavy2", heavy2);
 
         // Emitir posición inicial de cada robot para que sus planes de navegación
         // tengan robot_pos disponible desde el primer ciclo.
         try {
-            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,3)"));
-            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(2,3)"));
-            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(3,3)"));
-            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(4,3)"));
+            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,4)"));
+            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(2,4)"));
+            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(3,4)"));
+            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(4,4)"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }
@@ -203,7 +210,7 @@ public class WarehouseArtifact extends Environment {
     private void startContainerGenerator() {
         containerGeneratorExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "ContainerGenerator");
-            t.setDaemon(true);
+            t.setDaemon(true); // Daemon: se termina automáticamente al salir la JVM sin bloquear el shutdown
             return t;
         });
 
@@ -229,8 +236,15 @@ public class WarehouseArtifact extends Environment {
                                 container.getId(), container.getWeight(), container.getType()));
                     }
 
-                    // Notificar a los agentes
-                    addPercept(ASSyntax.parseLiteral("new_container(\"" + container.getId() + "\")"));
+                    // Notificar a los agentes con propiedades completas del contenedor
+                    addPercept(ASSyntax.parseLiteral(
+                        "container_at_entrance(\"" + container.getId() + "\",\"" +
+                        container.getType() + "\"," + container.getWeight() + "," +
+                        container.getWidth() + "," + container.getHeight() + ")"));
+
+                    // Notificar al scheduler para activar el planificador formal
+                    addPercept("scheduler", ASSyntax.parseLiteral(
+                        "new_container(\"" + container.getId() + "\")"));
 
                     if (view != null) {
                         view.update();
@@ -324,10 +338,20 @@ public class WarehouseArtifact extends Environment {
                 }
             }
         }
-        if (entranceCells.isEmpty()) {
-            // ENTRANCE llena, colocar en (5,0) como fallback (primera celda de la zona de entrada)
-            container.setPosition(5, 0);
-        } else {
+        // Si no hay celdas libres, esperar hasta que se libere una en lugar de apilar
+        // en (5,0). El apilado hace el container invisible para los robots (hayContenedorEn
+        // solo detecta uno por celda), efectivamente perdiéndolo del sistema.
+        while (entranceCells.isEmpty() && running) {
+            try { Thread.sleep(500); } catch (InterruptedException e) { break; }
+            entranceCells.clear();
+            for (int x = 0; x < GRID_WIDTH; x++) {
+                for (int y = 0; y < GRID_HEIGHT; y++) {
+                    if (grid[x][y] == CellType.ENTRANCE && !hayContenedorEn(x, y))
+                        entranceCells.add(new int[]{x, y});
+                }
+            }
+        }
+        if (!entranceCells.isEmpty()) {
             int[] cell = entranceCells.get(rand.nextInt(entranceCells.size()));
             container.setPosition(cell[0], cell[1]);
         }
@@ -361,12 +385,20 @@ public class WarehouseArtifact extends Environment {
                     return executeMoveToExpansion(agName);
                 case "drop_in_expansion":
                     return executeDropInExpansion(agName, action);
+                case "claim_container":
+                    return executeClaimContainer(agName, action);
+                case "unclaim_container":
+                    return executeUnclaimContainer(agName, action);
                 case "pickup_from_shelf":
                     return executePickupFromShelf(agName, action);
                 case "move_to_outbound":
                     return executeMoveToOutbound(agName);
                 case "drop_in_outbound":
                     return executeDropInOutbound(agName, action);
+                case "discard_container":
+                    return executeDiscardContainer(agName, action);
+                case "collect_outbound_containers":
+                    return executeCollectOutboundContainers(agName);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
@@ -416,6 +448,7 @@ public class WarehouseArtifact extends Environment {
             Container container = containers.get(containerId);
             if (container == null) {
                 System.err.println("[" + agName + "] Container not found: " + containerId);
+                addError(agName, "container_not_found", containerId);
                 return false;
             }
             List<int[]> adyacentes = container.getAdyacentes(grid, GRID_WIDTH, GRID_HEIGHT);
@@ -447,7 +480,7 @@ public class WarehouseArtifact extends Environment {
             int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
 
             Robot robot = robots.get(agName);
-            if (robot == null) return false;
+            if (robot == null) { addError(agName, "robot_not_found", agName); return false; }
 
             if (!estaDentroDelMapa(targetX, targetY)) return false;
             if (grid[targetX][targetY] == CellType.SHELF || grid[targetX][targetY] == CellType.BLOCKED) return false;
@@ -456,6 +489,10 @@ public class WarehouseArtifact extends Environment {
             // en que un contenedor aparece en la celda entre esta comprobación y el movimiento.
             if (hayContenedorEn(targetX, targetY)) return false;
 
+            // El synchronized protege solo la comprobación robot+aplastamiento para evitar
+            // que dos robots acaben en la misma celda por una carrera entre el check y el move.
+            // El check hayContenedorEn anterior queda fuera del sync intencionalmente: es
+            // la barrera "rápida" que evita el 99% de los conflictos sin bloquear el hilo.
             synchronized (this) {
                 if (hayRobotCerca(targetX, targetY)) return false;
 
@@ -469,10 +506,13 @@ public class WarehouseArtifact extends Environment {
                 }
                 for (String crushedId : aplastados) {
                     containers.remove(crushedId);
+                    claimedContainers.remove(crushedId);
                     System.err.println("[WARNING] " + agName + " aplastó " + crushedId
                             + " en (" + targetX + "," + targetY + ")");
                     if (view != null) view.logMessage("💥 " + agName + " aplastó " + crushedId);
                     try {
+                        removePerceptsByUnif(ASSyntax.parseLiteral(
+                            "container_at_entrance(\"" + crushedId + "\",_,_,_,_)"));
                         addPercept(ASSyntax.parseLiteral("container_broken(\"" + crushedId + "\")"));
                     } catch (jason.asSyntax.parser.ParseException e) {
                         e.printStackTrace();
@@ -588,8 +628,9 @@ public class WarehouseArtifact extends Environment {
             Robot robot = robots.get(agName);
             Container container = containers.get(containerId);
 
-            if (robot == null || container == null) {
-                addError(agName, "invalid_pickup", "Robot or container not found");
+            if (robot == null) { addError(agName, "robot_not_found", agName); return false; }
+            if (container == null) {
+                addError(agName, "invalid_pickup", "Container not found: " + containerId);
                 return false;
             }
 
@@ -686,14 +727,10 @@ public class WarehouseArtifact extends Environment {
             robot.setBusy(false);
             container.setAssignedShelf(shelfId);
 
-            // Si la estantería ya no admite más carga, retirar su disponibilidad
-            // del scheduler y del supervisor para que no intenten asignarla a futuros contenedores.
+            // Estantería llena: retirar shelf_available de todos los agentes
             if (shelf.isFull()) {
                 try {
-                    removePerceptsByUnif("scheduler",
-                            ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
-                    removePerceptsByUnif("supervisor",
-                            ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+                    removePerceptsByUnif(ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
                 } catch (jason.asSyntax.parser.ParseException e) {
                     e.printStackTrace();
                 }
@@ -729,31 +766,25 @@ public class WarehouseArtifact extends Environment {
 
 
     /**
-     * Emite la percepción shelf_available(ShelfId) al scheduler y al supervisor.
-     * El scheduler la usa para razonar qué estantería asignar; el supervisor la
-     * monitoriza para detectar saturación por tipo de contenedor.
+     * Emite shelf_available(ShelfId) a todos los agentes.
+     * Robots la usan para seleccionar estanterías autónomamente.
      */
     private void emitShelfAvailable(String shelfId) {
         try {
-            addPercept("scheduler", ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
-            addPercept("supervisor", ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+            addPercept(ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }
     }
 
     /**
-     * Emite/actualiza shelf_occupancy(ShelfId, Occ) al scheduler.
-     * Dato puro: el entorno solo reporta el porcentaje actual; el agente
-     * decide qué hacer con él (elegir la menos cargada).
+     * Emite/actualiza shelf_occupancy(ShelfId, Occ) a todos los agentes.
      */
     private void emitShelfOccupancy(String shelfId, Shelf shelf) {
         try {
-            removePerceptsByUnif("scheduler",
-                    ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\",_)"));
+            removePerceptsByUnif(ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\",_)"));
             int occ = (int) Math.round(shelf.getOccupancyPercentage());
-            addPercept("scheduler",
-                    ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\"," + occ + ")"));
+            addPercept(ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\"," + occ + ")"));
         } catch (jason.asSyntax.parser.ParseException e) {
             e.printStackTrace();
         }
@@ -811,7 +842,11 @@ public class WarehouseArtifact extends Environment {
                 }
             }
 
-            // Limpiar estado del robot en el entorno
+            // Limpiar estado del robot en el entorno.
+            // El drop físico es un mecanismo de seguridad: si un fallo de plan deja al robot
+            // llevando un contenedor sin llegar a llamar unclaim_container, evita que el
+            // contenedor quede permanentemente perdido. El agente Jason ya habrá reseteado
+            // su creencia carrying(none), pero Java necesita sincronizarse.
             robot.setBusy(false);
             robot.setCurrentTask(null);
             if (robot.isCarrying()) {
@@ -832,13 +867,22 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: move_to_expansion
-     * Encuentra la celda libre más cercana de la zona CLASSIFICATION y emite nav_target(X,Y).
+     *
+     * Implementa el principio de entorno delgado: en lugar de calcular y
+     * devolver la celda óptima (decisión que corresponde al agente), el entorno emite
+     * todas las celdas CLASSIFICATION libres como percepciones
+     * expansion_free_cell(D, X, Y), donde D es la distancia Manhattan
+     * precalculada desde la posición actual del robot.
+     *
+     * El agente selecciona autónomamente la celda más cercana mediante
+     * .sort(Pairs, [d(_, TX, TY)|_]) en common.asl, ejerciendo así su
+     * capacidad deliberativa sin delegar la decisión espacial al entorno Java.
+     *
+     * Si no hay celdas libres, devuelve false y el plan -!safe_expand_drop
+     * reintentará tras 2 segundos (hasta un máximo de 2 reintentos antes de descartar).
      */
     private boolean executeMoveToExpansion(String agName) {
         try {
-            Robot robot = robots.get(agName);
-            if (robot == null) return false;
-
             List<int[]> cells = new ArrayList<>();
             for (int x = 0; x < GRID_WIDTH; x++) {
                 for (int y = 0; y < GRID_HEIGHT; y++) {
@@ -849,13 +893,13 @@ public class WarehouseArtifact extends Environment {
             }
             if (cells.isEmpty()) return false;
 
-            cells.sort((a, b) -> {
-                int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
-                int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
-                return Integer.compare(da, db);
-            });
-
-            emitNavTarget(agName, cells.get(0)[0], cells.get(0)[1]);
+            Robot robot = robots.get(agName);
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("expansion_free_cell(_,_,_)"));
+            for (int[] cell : cells) {
+                int dist = Math.abs(cell[0] - robot.getX()) + Math.abs(cell[1] - robot.getY());
+                addPercept(agName, ASSyntax.parseLiteral(
+                    "expansion_free_cell(" + dist + "," + cell[0] + "," + cell[1] + ")"));
+            }
             return true;
         } catch (Exception e) {
             e.printStackTrace();
@@ -880,6 +924,8 @@ public class WarehouseArtifact extends Environment {
             robot.drop();
             container.setPicked(false);
             container.setPosition(rx, ry);
+            // No se re-emite container_at_entrance aquí: el agente Jason notifica
+            // container_in_expansion al scheduler, que decide si reasignar o esperar.
 
             System.out.println("[" + agName + "] " + containerId + " depositado en zona de expansión (" + rx + "," + ry + ")");
             if (view != null) {
@@ -894,54 +940,140 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
-     * Acción: pickup_from_shelf(ShelfId, ContainerId)
-     * Recoge un contenedor almacenado en una estantería (ciclo outbound).
-     * Libera espacio en la estantería inmediatamente.
+     * Acción: claim_container(ContainerId)
+     * Reclama atómicamente un contenedor. Falla si ya fue reclamado.
+     * En éxito, retira container_at_entrance de todos los agentes.
+     */
+    private boolean executeClaimContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Container container = containers.get(containerId);
+            if (container == null || container.isBroken()) return false;
+
+            // putIfAbsent es atómica: garantiza que solo un robot puede reclamar
+            // el contenedor aunque varios ejecuten claim_container simultáneamente.
+            String prev = claimedContainers.putIfAbsent(containerId, agName);
+            if (prev != null) {
+                System.err.println("[CLAIM FAIL] " + agName + " no pudo reclamar " + containerId + " — ya reclamado por: " + prev);
+                return false;
+            }
+
+            removePerceptsByUnif(ASSyntax.parseLiteral(
+                "container_at_entrance(\"" + containerId + "\",_,_,_,_)"));
+
+            if (view != null) view.logMessage("🔒 " + agName + " reclamó " + containerId);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Devuelve una celda libre de la zona ENTRANCE, o (5,0) como fallback.
+     */
+    private int[] findFreeEntranceCell() {
+        List<int[]> cells = new ArrayList<>();
+        for (int x = 0; x < GRID_WIDTH; x++) {
+            for (int y = 0; y < GRID_HEIGHT; y++) {
+                if (grid[x][y] == CellType.ENTRANCE && !hayContenedorEn(x, y)) {
+                    cells.add(new int[]{x, y});
+                }
+            }
+        }
+        return cells.isEmpty() ? new int[]{5, 0} : cells.get(0);
+    }
+
+    /**
+     * Acción: unclaim_container(ContainerId)
+     * Libera el reclamo y re-emite container_at_entrance para otros robots.
+     */
+    private boolean executeUnclaimContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            claimedContainers.remove(containerId);
+
+            // Si el robot lleva físicamente este contenedor, soltarlo y reposicionar
+            // a una celda libre de la zona de entrada (fix Bug 3: evita depositar en
+            // una posición arbitraria del almacén inaccesible para otros robots).
+            // Si el contenedor ya fue colocado intencionalmente en otro lugar (p. ej.
+            // zona de expansión vía drop_in_expansion), no modificar su posición.
+            Robot robot = robots.get(agName);
+            boolean wasCarrying = false;
+            if (robot != null && robot.isCarrying()) {
+                Container carried = robot.getCarriedContainer();
+                if (carried != null && containerId.equals(carried.getId())) {
+                    robot.drop();
+                    carried.setPicked(false);
+                    wasCarrying = true;
+                }
+            }
+
+            Container container = containers.get(containerId);
+            if (container == null || container.isBroken()) return true;
+
+            if (wasCarrying) {
+                int[] cell = findFreeEntranceCell();
+                container.setPosition(cell[0], cell[1]);
+            }
+
+            addPercept(ASSyntax.parseLiteral(
+                "container_at_entrance(\"" + containerId + "\",\"" + container.getType() + "\"," +
+                container.getWeight() + "," + container.getWidth() + "," + container.getHeight() + ")"));
+
+            if (view != null) view.logMessage("🔓 " + agName + " liberó " + containerId);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: pickup_from_shelf(ContainerId, ShelfId)
+     * Recoge un contenedor almacenado en una estantería (ciclo de salida).
      */
     private boolean executePickupFromShelf(String agName, Structure action) {
         try {
-            String shelfId = action.getTerm(0).toString().replace("\"", "");
-            String containerId = action.getTerm(1).toString().replace("\"", "");
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            String shelfId = action.getTerm(1).toString().replace("\"", "");
 
             Robot robot = robots.get(agName);
-            Shelf shelf = shelves.get(shelfId);
             Container container = containers.get(containerId);
+            Shelf shelf = shelves.get(shelfId);
 
-            if (robot == null || shelf == null || container == null) return false;
-
-            if (!shelf.getStoredContainers().contains(containerId)) {
-                addError(agName, "container_not_on_shelf", containerId);
+            if (robot == null || container == null || shelf == null) return false;
+            if (robot.isCarrying()) { addError(agName, "already_carrying", "Robot already carrying"); return false; }
+            if (!shelfId.equals(container.getAssignedShelf())) {
+                addError(agName, "not_in_shelf", "Container not assigned to " + shelfId);
                 return false;
             }
             if (robot.distanceTo(shelf.getX(), shelf.getY()) > 3) {
-                addError(agName, "too_far", "Shelf too far away");
+                addError(agName, "too_far", "Shelf too far for exit pickup");
                 return false;
             }
             if (!robot.canCarry(container)) {
-                if (container.getWeight() > robot.getMaxWeight()) {
-                    addError(agName, "container_too_heavy", containerId);
-                } else {
-                    addError(agName, "container_too_big", containerId);
-                }
+                addError(agName, "container_too_heavy", "Container too heavy for exit pickup");
                 return false;
             }
 
-            boolean wasFull = shelf.isFull();
-            shelf.remove(container);
-            container.setPicked(true);
-            container.setPosition(robot.getX(), robot.getY());
+            if (!shelf.remove(container)) {
+                addError(agName, "not_in_shelf", "Container not found in shelf storage");
+                return false;
+            }
+
+            // Al retirar un contenedor la estantería recupera espacio: re-emitir
+            // shelf_available aunque no estuviera llena (idempotente) y actualizar
+            // ocupación para que los robots puedan volver a elegirla como destino.
+            emitShelfAvailable(shelf.getId());
+            emitShelfOccupancy(shelf.getId(), shelf);
+
+            container.setAssignedShelf(null);
             robot.pickup(container);
 
-            if (wasFull) {
-                emitShelfAvailable(shelfId);
-            }
-            emitShelfOccupancy(shelfId, shelf);
-
-            removePerceptsByUnif(agName, ASSyntax.parseLiteral("picked(_)"));
             addPercept(agName, ASSyntax.parseLiteral("picked(\"" + containerId + "\")"));
-
             if (view != null) {
-                view.logMessage("📦 " + agName + " retiró " + containerId + " de " + shelfId + " (outbound)");
+                view.logMessage("📤 " + agName + " recogió " + containerId + " de " + shelfId + " (salida)");
                 view.update();
             }
             return true;
@@ -953,30 +1085,47 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: move_to_outbound
-     * Encuentra la celda libre más cercana de la zona OUTBOUND y emite nav_target(X,Y).
+     * Emite nav_target a la celda libre más cercana de la zona OUTBOUND.
      */
     private boolean executeMoveToOutbound(String agName) {
         try {
             Robot robot = robots.get(agName);
             if (robot == null) return false;
 
+            // Celdas reservadas por otros robots (navegando hacia outbound)
+            java.util.Set<String> reservedByOthers = new java.util.HashSet<>();
+            for (Map.Entry<String, String> entry : outboundReservations.entrySet()) {
+                if (!entry.getKey().equals(agName)) reservedByOthers.add(entry.getValue());
+            }
+
             List<int[]> cells = new ArrayList<>();
             for (int x = 0; x < GRID_WIDTH; x++) {
                 for (int y = 0; y < GRID_HEIGHT; y++) {
-                    if (grid[x][y] == CellType.OUTBOUND) {
+                    if (grid[x][y] == CellType.OUTBOUND && !hayContenedorEn(x, y) && !hayRobotCerca(x, y)
+                            && !reservedByOthers.contains(x + "," + y)) {
                         cells.add(new int[]{x, y});
                     }
                 }
             }
-            if (cells.isEmpty()) return false;
+            if (cells.isEmpty()) {
+                outboundReservations.remove(agName);
+                addPercept("transport", ASSyntax.parseLiteral("outbound_full"));
+                return false;
+            }
 
             cells.sort((a, b) -> {
+                // Preferir y=0 sobre y=1: se llena el fondo primero para que y=1 quede
+                // libre como pasillo de acceso. El guard Y>=2 en navigate evita el bucle
+                // arriba-abajo al reintentar desde y=1.
+                if (a[1] != b[1]) return Integer.compare(a[1], b[1]);
                 int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
                 int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
                 return Integer.compare(da, db);
             });
 
-            emitNavTarget(agName, cells.get(0)[0], cells.get(0)[1]);
+            int tx = cells.get(0)[0], ty = cells.get(0)[1];
+            outboundReservations.put(agName, tx + "," + ty);
+            emitNavTarget(agName, tx, ty);
             return true;
         } catch (Exception e) {
             e.printStackTrace();
@@ -986,7 +1135,7 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: drop_in_outbound(ContainerId)
-     * Deposita el contenedor en la zona outbound y lo elimina de la simulación (enviado).
+     * Deposita el contenedor en la zona de salida. Robot debe estar en celda OUTBOUND.
      */
     private boolean executeDropInOutbound(String agName, Structure action) {
         try {
@@ -995,17 +1144,85 @@ public class WarehouseArtifact extends Environment {
             Container container = containers.get(containerId);
 
             if (robot == null || container == null) return false;
-            if (!robot.isCarrying()) return false;
+            if (!robot.isCarrying()) { addError(agName, "not_carrying", "Not carrying anything"); return false; }
+
+            int rx = robot.getX(), ry = robot.getY();
+            outboundReservations.remove(agName);
+            if (grid[rx][ry] != CellType.OUTBOUND) {
+                addError(agName, "not_at_outbound", "Robot not in outbound zone");
+                return false;
+            }
 
             robot.drop();
-            containers.remove(containerId);
+            robot.setBusy(false);
+            container.setPicked(false);
+            container.setPosition(rx, ry);
+
+            totalContainersProcessed++;
             removePerceptsByUnif(agName, ASSyntax.parseLiteral("picked(_)"));
 
             if (view != null) {
-                view.logMessage("🚚 " + agName + " → outbound: " + containerId + " enviado");
+                view.logMessage("🚚 " + agName + " entregó " + containerId + " a zona de salida");
                 view.update();
             }
-            System.out.println("[" + agName + "] " + containerId + " enviado por outbound");
+
+            addPercept("scheduler", ASSyntax.parseLiteral("container_exited(\"" + containerId + "\")"));
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: collect_outbound_containers
+     * El agente transport recoge todos los contenedores de la zona OUTBOUND,
+     * eliminándolos físicamente del grid y del mapa de contenedores.
+     */
+    private boolean executeCollectOutboundContainers(String agName) {
+        try {
+            List<String> collected = new ArrayList<>();
+            for (Map.Entry<String, Container> entry : new ArrayList<>(containers.entrySet())) {
+                Container c = entry.getValue();
+                if (!c.isPicked() && grid[c.getX()][c.getY()] == CellType.OUTBOUND) {
+                    collected.add(entry.getKey());
+                }
+            }
+            for (String cId : collected) {
+                containers.remove(cId);
+                claimedContainers.remove(cId);
+                removePerceptsByUnif(ASSyntax.parseLiteral("container_at_entrance(\"" + cId + "\",_,_,_,_)"));
+            }
+            if (!collected.isEmpty()) {
+                System.out.println("🚛 [TRANSPORT] Camión recogió " + collected.size() + " contenedor(es) del outbound");
+                if (view != null) {
+                    view.logMessage("🚛 [TRANSPORT] Camión recogió " + collected.size() + " contenedor(es) del outbound");
+                    view.update();
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: discard_container(ContainerId)
+     * Elimina permanentemente un contenedor del sistema (inaccesible definitivo).
+     */
+    private boolean executeDiscardContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            containers.remove(containerId);
+            claimedContainers.remove(containerId);
+            try {
+                removePerceptsByUnif(ASSyntax.parseLiteral(
+                    "container_at_entrance(\"" + containerId + "\",_,_,_,_)"));
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            if (view != null) view.logMessage("🗑️ " + containerId + " descartado definitivamente");
             return true;
         } catch (Exception e) {
             e.printStackTrace();
@@ -1050,7 +1267,7 @@ public class WarehouseArtifact extends Environment {
     /**
      * Acción: accept_task(ContainerId)
      * El agente llama esto al aceptar una tarea enviada por el scheduler.
-     * Marca el robot como busy en Java (evita double-assignment via request_task)
+     * Marca el robot como ocupado en Java (evita doble asignación vía request_task)
      * y elimina el contenedor de la cola pendiente.
      */
     private boolean executeAcceptTask(String agName, Structure action) {

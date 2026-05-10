@@ -1,5 +1,96 @@
 # Changes
 
+## Fix: Robot Navigation Deadlocks
+
+### 1. Sistema de autopistas verticales (x=9 y x=19)
+Se solucionó el problema de los robots atascándose o sufriendo `nav_timeout` al intentar ir a la zona de salida (Outbound) o moverse entre estanterías. El problema principal era que la zona de salida se movió a `x=17..19` pero las reglas de navegación (`!navigate`) seguían asumiendo que estaba en `x < 3`. Como resultado, los robots usaban navegación "greedy" (diagonal directa) y chocaban contra los bloques horizontales de las estanterías, atascándose indefinidamente.
+
+Para solucionarlo, se reescribió por completo la lógica de enrutamiento con waypoints en los 4 agentes (`robot_light`, `robot_medium`, `robot_heavy`, `robot_heavy2`):
+- **Highway 9 y 19**: Se usan las columnas `x=9` (izquierda de las estanterías) y `x=19` (derecha de las estanterías) como pasillos verticales principales.
+- Al salir de las estanterías hacia la entrada o clasificación (`TX < 9`), se usa la ruta por `x=9`.
+- Al salir hacia Outbound (`TX >= 17, TY < 2`), se usa la ruta por `x=19`, evitando por completo chocar con las estanterías.
+- Para cambios de fila (`Y \== TY`) cuando el robot ya está dentro de las estanterías (`X >= 10`), el robot busca la autopista más cercana (`x=9` si está en la mitad izquierda, `x=19` si está en la mitad derecha) para cambiar de fila de forma segura antes de adentrarse en el pasillo correcto. Se solucionó también un fallo de recursión infinita en esta regla.
+
+### 2. `path_backoff` ortogonal
+Se solucionó el problema de los robots quedándose atascados (el "sándwich" en la columna `x=1` como `1,10`). Antes, cuando un robot encontraba un obstáculo en el eje Y, el `path_backoff` intentaba moverse en el mismo eje Y (hacia adelante o atrás), lo que causaba colisiones continuas. Ahora, cuando se bloquea en el eje Y, el backoff intenta un movimiento ortogonal (lateral) en el eje X, y viceversa. Esto permite a los robots esquivarse fluidamente en los pasillos.
+
+### 2. Bucle infinito en `!navigate` para estanterías (`TX >= 10`)
+Se corrigió un bucle de recursión infinita en la regla de navegación `+!navigate(TX, TY) : TX >= 10`. Si un robot era asignado a una celda adyacente a una estantería que no era un corredor principal (`corridor_row`), el robot evaluaba infinitamente la regla que intentaba enviarlo a la columna `x=9` y de vuelta, causando que se quedara completamente inmóvil. La condición se simplificó para comprobar si el robot ya cruzó la columna `9` (`X < 9`), evitando retrocesos innecesarios y bucles infinitos.
+## Iteración 3: Ciclo de salida por tipo, deadlines y agente Transport
+
+### Objetivos cumplidos
+
+1. Ciclo de salida activado por tipo de contenedor con instante inicial T0.
+2. Deadline corto (urgentes, ΔT) y deadline largo (no urgentes, 2·ΔT) implementados y no solapados. **Decisión de diseño**: el ciclo activa solo la fase correspondiente al tipo que saturó — si saturan no urgentes, la fase urgente no se ejecuta porque no libera espacio en estanterías non_urgent. Esta decisión está documentada en detalle más adelante (Fix: `run_exit_cycle` ejecuta solo la fase relevante).
+3. Solo un deadline activo en cada instante (mutex `active_exit_cycle`).
+4. Robots deciden autónomamente qué contenedor transportar sin asignaciones explícitas.
+5. Agente Transport creado para simular recogida de contenedores del OUTBOUND.
+6. Fix bug #4 (iteración 2): `askOne` eliminado del ciclo de salida.
+
+---
+
+### 1. `common.asl`: creencias `shelf_urgency`
+
+Se añaden 9 creencias estáticas `shelf_urgency(ShelfId, urgent|non_urgent)` para los nueve shelves. Necesarias para que los robots filtren contenedores outbound por fase de deadline sin consultar al scheduler.
+
+---
+
+### 2. Scheduler: broadcast de `active_deadline` y llamada a Transport (`scheduler.asl`)
+
+**`!run_exit_cycle`** ampliado con dos cambios:
+
+- Al inicio de cada deadline: `for (.member(R, AllRobots)) { .send(R, tell, active_deadline(...)); }` — broadcast directo a todos los robots. Elimina la necesidad de que cada robot haga `askOne` (fix bug #4).
+- Al final de cada deadline: `for (.member(R, AllRobots)) { .send(R, untell, active_deadline(...)); }` — retira la creencia localmente en cada robot al terminar la fase.
+- Al final de cada deadline: `.send(transport, tell, transport_request(Type, Phase))` — notifica al agente Transport.
+
+---
+
+### 3. Robots `robot_light`, `robot_medium`, `robot_heavy`: fix `!check_exit_cycle`
+
+**Antes** (bug #4):
+```agentspeak
++!check_exit_cycle : true <-
+    .send(scheduler, askOne, active_deadline(_, Category, _), active_deadline(_, Category, _));
+    ...
+```
+
+**Después**:
+```agentspeak
++!check_exit_cycle : active_deadline(_, Category, _) <-
+    .findall(pair(CId, ShelfId), (stored(CId, ShelfId) & not exit_claimed(CId)), Candidates);
+    !select_for_exit(Candidates, Category).
+
++!check_exit_cycle : true <- true.
+```
+
+El robot consulta su propia base de creencias (creencia `active_deadline` recibida por broadcast) sin suspender la intención.
+
+---
+
+### 4. `robot_heavy2.asl`: unificado con el resto de robots
+
+robot_heavy2 adoptó la misma arquitectura que `robot_light`, `robot_medium` y `robot_heavy`: reclamación desde `+container_at_entrance`, selección autónoma de estantería con `!pick_shelf`, ciclo de salida por `active_deadline`. Se corrigieron además: argumentos invertidos en `pickup_from_shelf`, `release_task` sin argumento, y `unclaim_container` ausente en varios handlers de error.
+
+---
+
+### 5. Agente `transport.asl` (nuevo)
+
+Simula la llegada de camiones al finalizar cada deadline. Recibe `transport_request(ContainerType, Phase)` del scheduler y emite el evento obligatorio:
+
+```
+EVENT | time=T | agent=transport | type=transport_dispatched | data=ContainerType
+```
+
+Añadido a `warehouse.mas2j`.
+
+---
+
+### 6. Java: fix enum `OUTBOUND` duplicado (`CellType.java`, `WarehouseView.java`)
+
+`CellType.java` tenía dos entradas `OUTBOUND` (bug de merge). `WarehouseView.java` tenía el `case OUTBOUND:` duplicado en el switch de pintado. Se eliminó la entrada duplicada en ambos ficheros; se conserva el color azul claro `(200, 230, 255)` para la zona de salida (x=17-19, y=0-1).
+
+---
+
 ## Nota de diseño: distancia Manhattan como heurística implícita de navegación
 
 El plan `!do_step` elige en cada paso el eje con mayor distancia restante al destino:
@@ -29,74 +120,193 @@ En la práctica, este plan nunca se ha activado: los robots siempre han llegado 
 
 ---
 
-## Sustitución del algoritmo de pathfinding: BFS → Movimiento coordinado con waypoints
+## Iteración 2: Coordinación distribuida y ciclo de salida físico
+
+### Objetivos cumplidos
+
+1. El entorno solo provee localización de agentes, estanterías y contenedores.
+2. Nueva zona de salida (OUTBOUND) en el lado opuesto a la entrada.
+3. Control temporal con deadlines gestionado por el scheduler.
+4. El scheduler deja de ser proveedor central de información.
+5. Coordinación distribuida: los robots seleccionan y reclaman contenedores autónomamente.
+
+---
+
+### 1. Zona OUTBOUND y nuevas acciones Java (`WarehouseArtifact.java`, `CellType.java`, `Shelf.java`, `WarehouseView.java`)
+
+Se añade `CellType.OUTBOUND` (celdas x=17-19, y=0-1) en el extremo opuesto a la entrada (ENTRANCE x=0-2, y=0-1). Se visualizan en azul claro en la GUI.
+
+`Shelf.java` añade `remove(Container)` para retirar contenedores en el ciclo de salida.
+
+Nuevas acciones Java en `executeAction`:
+
+| Acción | Descripción |
+|---|---|
+| `claim_container(CId)` | Reclamo atómico con `ConcurrentHashMap.putIfAbsent`. Retira `container_at_entrance` de todos los agentes si tiene éxito. Falla si ya reclamado. |
+| `unclaim_container(CId)` | Libera el reclamo. Si el robot lleva físicamente ese contenedor (estado inconsistente tras error), lo suelta (`robot.drop()`) antes de re-emitir el percept `container_at_entrance`. |
+| `pickup_from_shelf(CId, ShelfId)` | Recoge un contenedor ya almacenado en una estantería. Comprueba adyacencia, llama `shelf.remove()` y restaura `shelf_available`. |
+| `move_to_outbound` | Calcula la celda libre de la zona OUTBOUND más cercana y emite `nav_target`. |
+| `drop_in_outbound(CId)` | Deposita el contenedor en la zona OUTBOUND. Requiere que el robot esté en una celda OUTBOUND. Incrementa `totalContainersProcessed` y emite `container_exited(CId)` al scheduler. |
+| `discard_container(CId)` | Elimina el contenedor del mapa Java y de `claimedContainers`. Retira el percept `container_at_entrance` de todos los agentes. |
+
+`container_at_entrance` pasa de `addPercept("scheduler", ...)` a `addPercept(...)` (broadcast a todos los agentes). Incluye todas las propiedades del contenedor: `container_at_entrance(CId, Type, Weight, W, H)`.
+
+`shelf_available` y `shelf_occupancy` también se vuelven broadcast (antes solo al scheduler).
+
+---
+
+### 2. Scheduler: solo gestión del ciclo de salida (`scheduler.asl`)
+
+**Eliminado**: toda la lógica de asignación de tareas y robots. El scheduler no interviene en el ciclo inbound.
+
+**Conservado**:
+- Gestión del ciclo de salida: `no_shelf_space/storage_full → exit_cycle → run_exit_cycle` con `active_deadline` broadcast a todos los robots.
+- Handler `container_exited(CId)` para confirmación de entrega y limpieza de `stored_at`.
+- No-ops para mensajes inbound que los robots siguen enviando (`task_failed`, `container_in_expansion`).
+
+---
+
+### 3. Supervisor: percepción directa de contenedores (`supervisor.asl`)
+
+- Handler cambiado de `+new_container(CId)` a `+container_at_entrance(CId, Type, Weight, W, H)`.
+- Se añade `container_received_type(CId, Type)` para trackear el tipo localmente.
+- `+!query_container_type_and_notify(CId)` ya no usa `askOne` al scheduler: consulta la creencia local `container_received_type(CId, Type)` para determinar el tipo antes de enviar `storage_full` al scheduler.
+
+---
+
+### 4. `common.asl`: creencias de categoría de estantería y selección autónoma
+
+`common.asl` se amplía con:
+- Creencias estáticas `shelf_category(ShelfId, Cat)` (light/medium/heavy) para las 9 estanterías.
+- Planes compartidos `!pick_shelf(CId, Weight, W, H)` y `!pick_least_occupied_shelf(CId, Cat)` para selección autónoma de estantería según peso y tamaño del contenedor, con fallback a expansión tras 3 reintentos.
+
+---
+
+### 5. Robots: reclamación autónoma y ciclo de salida físico
+
+Los tres robots reescriben su arquitectura de tareas:
+
+**Eliminado**: plan `+task(CId, ShelfId)` recibido del scheduler.
+
+**Añadido**:
+
+- `+container_at_entrance(CId, Type, Weight, W, H)`: trigger reactivo con guardia de capacidad hardcodeada (sin `max_weight/max_size` del `.mas2j`, que Jason no carga al tener múltiples `beliefs=`). Se usa `|` eliminado a favor de múltiples planes separados (Jason 3.x no soporta `|` fiablemente en guardias).
+  - robot_light: `Weight <= 10 & W <= 1 & H <= 1`
+  - robot_medium: dos planes — `Weight > 10` y `H > 1` (hasta 30kg, 1×2)
+  - robot_heavy: tres planes — `Weight > 30`, `W > 1`, `H > 2` (hasta 100kg, 2×3)
+
+- `+container_at_entrance(...) : nav_failed(CId) <- true.` — skip plan: evita reclamar contenedores a los que el robot falló navegar recientemente.
+
+- `-container_at_entrance(...) : nav_failed(CId) <- -nav_failed(CId).` — limpia el skip cuando el percept es retirado (por otro robot que lo reclamó, o por `discard_container`).
+
+- `!try_claim(CId, ...)`: llama `claim_container(CId)` como acción directa. Si falla (ya reclamado), `-!try_claim : true <- true` absorbe silenciosamente.
+
+- `!check_pending_containers`: versión de polling (work_cycle), con guarda `not nav_failed(CId)`.
+
+- `!select_shelf_and_execute → !pick_shelf → !execute_task`: flujo de almacenamiento igual que iteración 1 pero con estantería seleccionada autónomamente.
+
+- `+!execute_exit(CId, ShelfId)`: ciclo de salida físico.
+  1. `move_to_shelf(ShelfId)` + `!navigate` → adyacente a la estantería.
+  2. `pickup_from_shelf(CId, ShelfId)` → recoge de la estantería.
+  3. `move_to_outbound` + `!navigate` → zona OUTBOUND.
+  4. `drop_in_outbound(CId)` → entrega.
+  5. Limpia `stored(CId, ShelfId)`, `claimed_type(CId, _)`, `exit_claimed(CId)`, `carrying`.
+
+- `+!select_for_exit([pair(CId,ShelfId)|_], Category) : claimed_type(CId, ...) & state(idle)`: guarda `state(idle)` añadida para evitar iniciar exit cycle concurrentemente con execute_task (el `askOne` al scheduler suspende la intención, abriendo una ventana donde un trigger reactivo podría cambiar el estado).
+
+- `stored(CId, ShelfId)` handler: notifica solo al supervisor (ya no al scheduler).
+
+**Correcciones de bugs en robustez**:
+
+- `-!execute_task : not carrying(CId) & nav_failed(CId)`: el cleanup ya fue hecho por `-!get_to_container(CId,1)`, solo hace `!safe_return; !check_queue`.
+- `-!execute_task : not carrying(CId)`: (sin `nav_failed`) el error ocurrió después del pickup (ej. `path_blocked` durante navigate a estantería). Hace `release_task + unclaim_container + task_failed` completo. `unclaim_container` con la nueva lógica Java fuerza-suelta el contenedor si el robot lo lleva físicamente.
+- `-!get_to_container(CId,1)`: añade `+nav_failed(CId)` antes de `unclaim_container` para activar el mecanismo de skip.
+
+---
+
+## Logging de eventos
+
+Los eventos obligatorios se emiten por consola con `.print()` siguiendo el formato:
+
+```
+EVENT | time=T | agent=scheduler   | type=output_phase_started | data=container_type
+EVENT | time=T | agent=supervisor  | type=no_space_detected    | data=container_type
+EVENT | time=T | agent=scheduler   | type=deadline_started     | data=urgent|non_urgent
+EVENT | time=T | agent=scheduler   | type=deadline_ended       | data=urgent|non_urgent
+EVENT | time=T | agent=robot_id    | type=container_delivered  | data=container_id
+EVENT | time=T | agent=supervisor  | type=deadline_missed      | data=container_id
+```
+
+`T` es el tiempo en segundos desde medianoche (`H*3600 + M*60 + S`). Formato consistente en todos los agentes.
+
+| Evento | Agente | Cuándo |
+|---|---|---|
+| `output_phase_started` | scheduler | Al activar el ciclo de salida (receipt de `storage_full`) |
+| `no_space_detected` | supervisor | Al detectar que no quedan estanterías disponibles del tipo |
+| `deadline_started` | scheduler | Al iniciar cada fase (urgente o no urgente) |
+| `deadline_ended` | scheduler | Al finalizar cada fase (tras `.wait(DT)`) |
+| `container_delivered` | robot | Tras depositar cada contenedor en zona outbound |
+| `deadline_missed` | supervisor | Por cada contenedor no entregado antes del deadline |
+
+## Sustitución del algoritmo de pathfinding: BFS → Navegación distribuida en agentes ASL
 
 ### Problema
-El algoritmo BFS (`calcularRuta`) utilizado para la navegación de robots era inadecuado:
-- Requería estructuras de datos proporcionales al tamaño del grid: `HashMap<List<Integer>, List<Integer>>` para rastrear padres y `ArrayDeque` para la cola de exploración. En el peor caso exploraba los 300 nodos del grid (20×15) por cada paso.
+El algoritmo BFS (`calcularRuta`) en Java era inadecuado:
+- Requería estructuras de datos proporcionales al tamaño del grid: `HashMap` para rastrear padres y `ArrayDeque` para la cola. En el peor caso exploraba los 300 nodos del grid (20×15) por cada paso.
 - Calculaba la ruta completa de una vez aunque solo se necesitara el siguiente paso.
-- La reconstrucción de la ruta (`construirRutaFinal`) añadía una pasada adicional hacia atrás sobre el mapa de padres.
+- El razonamiento de navegación estaba en el entorno (entorno grueso): el agente decía "ve a X" y Java calculaba cómo. Los robots no tenían control sobre su propio movimiento.
 
-### Solución: movimiento coordinado inspirado en el robot doméstico
+### Solución: navegación distribuida en los agentes
 
-Se reemplazaron `calcularRuta` y `construirRutaFinal` por tres métodos nuevos:
+Se eliminó todo el razonamiento de ruta de Java. El entorno ahora solo provee primitivas:
 
-#### `nextCoordinateStep(fromX, fromY, toX, toY, avoidRobots)`
-Calcula el siguiente paso en O(1) sin estructuras auxiliares, siguiendo el mismo principio que el `moveTowards` del robot doméstico de Jason:
-
-```java
-int dx = Integer.compare(toX, fromX);  // -1, 0 o +1
-int dy = Integer.compare(toY, fromY);  // -1, 0 o +1
-boolean xFirst = Math.abs(toX - fromX) >= Math.abs(toY - fromY);
-```
-
-Se prioriza el eje con mayor distancia Manhattan restante. Si ese eje está bloqueado, se intenta el perpendicular. Si ambos están bloqueados, devuelve lista vacía y el robot cede el paso.
-
-A diferencia del robot doméstico (entorno sin obstáculos), este método delega la comprobación de obstáculos en `isFreeStep`.
-
-#### Comportamiento visual: escalera diagonal ("zigzag")
-Al alternar entre los dos ejes según cuál tiene mayor distancia restante, el robot traza el camino diagonal más corto posible en un grid ortogonal. Visualmente produce un patrón de escalera — una secuencia de pasos horizontales y verticales alternados que converge en diagonal hacia el destino. Esto no es un error sino el equivalente Manhattan de una línea recta diagonal, y es exactamente el comportamiento del robot doméstico.
-
-#### `isFreeStep(x, y, avoidRobots)`
-Comprueba que una celda es transitable:
-1. Dentro del mapa
-2. No es `SHELF` ni `BLOCKED`
-3. No tiene un contenedor no recogido (`hayContenedorEn`)
-4. Si `avoidRobots=true`, no está ocupada por otro robot
-
-La comprobación de contenedores es crítica: sin ella el greedy navega en línea recta a través de la celda del contenedor destino aplastándolo antes de recogerlo. El BFS original incluía `!hayContenedorEn` al expandir nodos por la misma razón. Al restaurar esta comprobación, si la ruta directa pasa por la celda del contenedor `doMoveTo` falla, y `executeMoveToContainer` prueba automáticamente la siguiente celda adyacente libre.
-
-#### `computeWaypointPath(fromX, fromY, toX, toY)`
-En la zona de almacenamiento (x≥10) las estanterías forman filas compactas que el greedy no puede atravesar. Se usa `x=9` como corredor vertical siempre libre (no hay estanterías en x<10) y los corredores horizontales del layout como puntos de paso seguros:
-
-```
-y=1   — sobre estanterías pequeñas  (x=10..17, y=2-3)
-y=4-5 — entre pequeñas y medianas
-y=8-9 — entre medianas y grandes
-y=13  — bajo estanterías grandes    (x=10..17, y=10-12)
-```
-
-Para cualquier destino en la zona de almacenamiento el path es:
-```
-posición_actual → (9, targetY) → (targetX, targetY)
-```
-
-El primer waypoint `(9, targetY)` garantiza que el robot entra al pasillo correcto antes de deslizarse horizontalmente. Si el robot ya está en el mismo corredor que el destino (`fromY == targetY` y es fila de corredor libre), va directo sin waypoint intermedio.
-
-### Acceso a estanterías desde el corredor inferior
-
-`executeMoveToShelf` itera las celdas adyacentes a la estantería en el orden: fila superior → fila inferior → laterales. En condiciones normales el robot accede desde el corredor superior (p.ej. y=5 para estanterías medianas). Si ese corredor está bloqueado por contenedores soltados (p.ej. por `shelf_full`), `doMoveTo` falla para esas celdas y `executeMoveToShelf` prueba automáticamente las del corredor inferior (p.ej. y=8). El depósito funciona igual desde cualquier lado: `drop_at` solo comprueba distancia, no dirección de acceso.
-
-### Resumen de cambios en `WarehouseArtifact.java`
-
-| Eliminado | Añadido |
+| Acción Java | Descripción |
 |---|---|
-| `calcularRuta` (BFS, O(W×H)) | `nextCoordinateStep` (greedy coordinado, O(1)) |
-| `construirRutaFinal` | `isFreeStep` |
-| — | `computeWaypointPath` |
-| — | `isCorridorRow` |
+| `move_step(X, Y)` | Mueve el robot exactamente una celda. Valida límites, obstáculos y colisiones. Falla si la celda está ocupada. |
+| `move_to_shelf(ShelfId)` | Calcula la celda adyacente libre a la estantería y emite `nav_target(TX,TY)`. |
+| `move_to_container(CId)` | Calcula la celda adyacente libre al contenedor y emite `nav_target(TX,TY)`. |
+| `move_to_outbound` | Encuentra la celda libre más cercana en la zona OUTBOUND y emite `nav_target`. |
+| `move_to_expansion` | Encuentra la celda libre más cercana en la zona CLASSIFICATION y emite `nav_target`. |
 
-El método `doMoveTo` se refactorizó para navegar waypoint a waypoint usando `nextCoordinateStep` en cada iteración, manteniendo la misma lógica de yield (espera 1s si bloqueado por robot, activa `avoidRobots=true` tras 3s).
+Cada robot conduce su propia ruta en ASL con el plan `!navigate(TX, TY)`.
+
+### Arquitectura de navegación ASL
+
+#### Paso greedy con prioridad Manhattan (`!do_step`)
+En cada paso se prioriza el eje con mayor distancia restante al destino:
+
+```agentspeak
++!do_step(X, Y, TX, TY) : TX > X & TX - X >= TY - Y <- !try_x_then_y(...)
++!do_step(X, Y, TX, TY)                              <- !try_y_then_x(...)
+```
+
+Equivale a usar la **distancia Manhattan** como heurística implícita: `h = |TX-X| + |TY-Y|`. Es admisible — nunca sobreestima el coste en un grid ortogonal.
+
+El patrón visual resultante es una escalera diagonal (zigzag): pasos horizontales y verticales alternados que convergen hacia el destino. Es el equivalente Manhattan de una línea recta diagonal.
+
+#### Waypoints de corredor (`!navigate`)
+Las estanterías forman filas compactas que el greedy no puede atravesar directamente. Se usan dos columnas siempre libres como autopistas verticales:
+
+- **x=9** — corredor izquierdo (entre zona libre y estanterías)
+- **x=19** — corredor derecho (extremo del almacén)
+
+Reglas de routing en `!navigate`:
+- Destino en zona libre (`TX < 9`) desde estanterías → cruzar por x=9 primero
+- Destino en outbound (`TX >= 17, TY < 2`) → cruzar por x=19
+- Cambio de fila dentro de estanterías → ir al corredor más cercano (x=9 si X≤14, x=19 si X>14)
+
+```
+posición → (9 o 19, targetY) → (targetX, targetY)
+```
+
+#### Gestión de colisiones (`!step_with_retry`)
+Si `move_step` falla porque otra celda está ocupada:
+- Intentos 1-2: espera aleatoria 300-1200ms y reintenta
+- Intentos 3-4: ejecuta `!path_backoff` (paso perpendicular) + espera
+- Intentos 5-6: espera larga 1500-3000ms
+- Tras 6 fallos: notifica al supervisor con `path_blocked` y falla el plan
+
+`nav_limit(300)` actúa como timeout global: si el robot da más de 300 pasos sin llegar, notifica `nav_timeout` y falla.
 
 ---
 
@@ -161,7 +371,57 @@ Se usa `pair(Occ, S)` como functor explícito en lugar de `Occ-S` porque Jason e
 | Archivo | Eliminado | Añadido |
 |---|---|---|
 | `WarehouseArtifact.java` | `findBestShelf`, `executeGetFreeShelf`, case `"get_free_shelf"` | `emitShelfAvailable`, `emitShelfOccupancy` |
-| `scheduler.asl` | `get_free_shelf(CId)` | `shelf_category` beliefs, 4 planes `assign_shelf`, `pick_least_occupied` |
+| `common.asl` | — | `shelf_category` beliefs, `!pick_shelf`, `!pick_least_occupied_shelf` |
+
+> Nota: la selección de estantería pasó primero al scheduler (como planificador centralizado) y posteriormente se movió a `common.asl` para que los robots la ejecuten autónomamente, en coherencia con el objetivo "el scheduler no asigna tareas ni robots".
+
+---
+
+## Decisión de diseño: Planificación formal distribuida (R&N Cap. 11)
+
+### El modelo de planificación clásico
+
+El enunciado requería planificación formal sobre contenedores pendientes y disponibilidad de robots (R&N Cap. 11). El modelo centralizado sería:
+
+- **Estado**: `ps_robot_free(Robot)`, `ps_shelf(ShelfId, Occ)`, `ps_pending(CId, W, H, Weight, Type)`
+- **Esquema de acción**: `assign(Robot, CId, ShelfId)` con precondiciones (robot libre, contenedor pendiente, estantería compatible, robot capaz) y efectos (robot ocupado, contenedor asignado, ocupación +1)
+- **Búsqueda**: forward search greedy best-first con heurística `urgency_weight + 3 - occupancy`
+
+Esto fue implementado en una iteración anterior. Los objetivos de la semana 2 lo reemplazaron.
+
+### Por qué no se implementa centralizado
+
+El objetivo de la semana 2 impone que el scheduler **no asigne tareas ni robots**. Un planificador centralizado que genera `assign(Robot, CId, Shelf)` viola directamente este requisito: los robots quedan subordinados al razonamiento del scheduler y pierden autonomía.
+
+### Cómo se resuelve en el código actual
+
+La planificación se **descentraliza**: cada robot aplica localmente el mismo razonamiento que el planificador centralizado haría globalmente.
+
+**Contenedores pendientes** — gestión reactiva y por polling:
+- `+container_at_entrance(CId, Type, Weight, W, H)` dispara inmediatamente si el robot puede manejar el contenedor y está idle. Equivale a la precondición `ps_robot_free(Robot) & ps_pending(CId, ...)` del esquema clásico.
+- `!check_pending_containers` en `!work_cycle` recupera contenedores que llegaron mientras el robot estaba ocupado.
+- `claim_container(CId)` (Java `ConcurrentHashMap.putIfAbsent`) garantiza exclusión mutua: equivale a la restricción de que un contenedor solo puede aparecer en un `assign(...)` del plan.
+
+**Disponibilidad de robots** — estado local:
+- Cada robot mantiene `state(idle/working)`. La guarda `state(idle)` en `+container_at_entrance` es la precondición `ps_robot_free(Robot)` del esquema clásico, evaluada localmente sin consultar al scheduler.
+
+**Selección de estantería** — planificación greedy con heurística en `!pick_shelf` (`common.asl`):
+- **Estado observado**: `shelf_available(S)`, `shelf_occupancy(S, Occ)` — percepciones del entorno compartido
+- **Decisión**: menor ocupación dentro de la categoría compatible (light/medium/heavy) según peso del contenedor
+- **Fallback**: cualquier estantería con ocupación < 85% que aguante el peso
+- La heurística es admisible: nunca asigna a estantería incompatible ni sobrecargada
+
+**Resultado**: la planificación clásica centralizada se reemplaza por coordinación emergente entre agentes autónomos. La consistencia global (sin doble asignación, sin sobrecarga de estanterías) se garantiza mediante el entorno compartido y el reclamo atómico, no mediante un planificador central.
+
+---
+
+## Fix: eliminación de `nav_abort_signal`
+
+### Problema
+La gestión de timeout de navegación dependía de `?nav_abort_signal` — una consulta de creencia diseñada para fallar — como mecanismo de propagación de fallo fuera de una intención anidada. Si algún agente añadía accidentalmente `nav_abort_signal` a su base de creencias, el abort dejaba de dispararse silenciosamente.
+
+### Solución
+Sustituido por un contador `nav_limit(N)` decrementado en cada paso de `!navigate`. Cuando `N` llega a 0, el plan de timeout `+!navigate(TX, TY) : true` notifica al supervisor y falla explícitamente. El control de flujo es directo y sin dependencias ocultas en el estado de la base de creencias.
 
 ---
 
@@ -442,33 +702,7 @@ Al generalizar el backoff a movimiento perpendicular (X±1 para movimientos con 
 
 ### Solución
 
-#### 1. Plan `+state(idle) : task(CId, ShelfId)` y `-!check_queue : task(CId, ShelfId)`
-
-Se añade antes del plan `+state(idle) : not task(_, _)` un plan reactivo que procesa la tarea encolada en la transición a idle:
-
-```agentspeak
-+state(idle) : task(CId, ShelfId) <-
-    .print("✅ Tarea pendiente al quedar idle: ", CId, " a ", ShelfId);
-    -task(CId, ShelfId)[source(scheduler)];
-    accept_task(CId);
-    -+state(working);
-    -+carrying(CId);
-    !execute_task(CId, ShelfId).
-```
-
-Se añade también el plan de fallo de `check_queue` cuando hay tarea encolada (evita propagar el fallo de navegación):
-
-```agentspeak
--!check_queue : task(CId, ShelfId) <-
-    .print("⚠️ Fallo al navegar a base, procesando tarea encolada: ", CId);
-    -task(CId, ShelfId)[source(scheduler)];
-    accept_task(CId);
-    -+state(working);
-    -+carrying(CId);
-    !execute_task(CId, ShelfId).
-```
-
-#### 2. Backoff general `!path_backoff` con estrategia híbrida
+#### Backoff general `!path_backoff` con estrategia híbrida
 
 Se sustituye el anterior `!corridor_backoff` (específico de x=9, retroceso en Y) por `!path_backoff` (cualquier posición, movimiento en X):
 
@@ -537,6 +771,45 @@ Se añade `OUTBOUND` al enum `CellType` para distinguir semánticamente la zona 
 
 El fallback de `generateRandomContainer()` cuando la zona de entrada está llena se actualiza de `(0,0)` (ahora zona outbound) a `(5,0)` (primera celda de la nueva zona de entrada).
 
+---
+
+## Constantes globales y clasificación de tipos de contenedor (`common.asl`)
+
+### Motivación
+
+Las constantes y clasificaciones usadas por varios agentes estaban dispersas o implícitas en la lógica. Se necesitaba un lugar único, fácilmente modificable, para:
+
+- El parámetro temporal ΔT que el scheduler usa para razonar sobre el ciclo de salida de contenedores urgentes.
+- La clasificación de tipos de contenedor en dos grupos semánticamente distintos: urgentes y no urgentes.
+
+### Solución
+
+Se crea el archivo `src/agt/common.asl`, incluido desde los cinco agentes con `{ include("common.asl") }`. Contiene únicamente hechos base — sin planes ni triggers.
+
+#### `delta_t`
+
+```agentspeak
+// ΔT: tiempo mínimo razonable (en ciclos de razonamiento) para que los robots
+// urgentes completen sus transportes dado el layout del almacén.
+delta_t(30).
+```
+
+Valor de referencia: robot ligero (speed=3) ida+vuelta a `shelf_1` (y=2 desde ENTRANCE en y≈0) ≈ 20 pasos → margen con δt=30. Ajustable sin tocar lógica de agente.
+
+#### Clasificación de tipos de contenedor
+
+```agentspeak
+urgent_container_type("urgent").
+urgent_shelf("shelf_1").
+urgent_shelf("shelf_5").
+urgent_shelf("shelf_8").
+
+non_urgent_container_type("standard").
+non_urgent_container_type("fragile").
+```
+
+`urgent_shelf` designa una estantería representante por categoría de peso (light/medium/heavy). La clasificación es independiente del criterio de asignación por peso del scheduler — expresa la urgencia semántica del contenedor, no su categoría física.
+
 ### Resumen de cambios
 
 | Archivo | Cambio |
@@ -544,6 +817,8 @@ El fallback de `generateRandomContainer()` cuando la zona de entrada está llena
 | `CellType.java` | Añadido valor `OUTBOUND` |
 | `WarehouseView.java` | Añadido case `OUTBOUND` con color rojo suave en el render del grid |
 | `WarehouseArtifact.java` | `initializeGrid()`: tres bloques con nuevas coordenadas; fallback spawn de (0,0) a (5,0) |
+| `src/agt/common.asl` | Creado con `delta_t(30)`, `urgent_container_type`, `urgent_shelf`, `non_urgent_container_type` |
+| `robot_{light,medium,heavy}.asl`, `scheduler.asl`, `supervisor.asl` | Añadido `{ include("common.asl") }` al inicio |
 
 ---
 
@@ -605,6 +880,20 @@ EVENT | time=H:M:S | agent=supervisor | type=no_space_detected | data=urgent
 EVENT | time=H:M:S | agent=scheduler  | type=output_phase_started | data=urgent
 ```
 
+---
+
+## Supervisor: detección de saturación de almacenamiento por tipo
+
+### Problema
+
+Cuando el scheduler agotaba sus 3 reintentos para encontrar estantería a un contenedor (`no_shelf_space`), el supervisor registraba el error genéricamente pero no distinguía si el sistema había alcanzado una condición estructural: ninguna estantería puede aceptar más contenedores de un tipo concreto. Sin esta señal, el scheduler continuaba recibiendo y encolando contenedores de ese tipo sin posibilidad de almacenarlos.
+
+### Solución
+
+El supervisor detecta la saturación por tipo al recibir `no_shelf_space` y notifica al scheduler con `storage_full(Type, T0)`.
+
+La creencia `storage_saturated(Type)` actúa como semáforo por tipo: la notificación se envía **una sola vez** por tipo, independientemente de cuántos `no_shelf_space` lleguen. El tipo del contenedor se obtiene de `container_received_type(CId, Type)`, creencia que el supervisor mantiene desde la recepción inicial del contenedor. T0 se expresa en segundos desde medianoche usando `.time/3` de Jason.
+
 ### Resumen de cambios
 
 | Archivo | Cambio |
@@ -612,6 +901,7 @@ EVENT | time=H:M:S | agent=scheduler  | type=output_phase_started | data=urgent
 | `WarehouseArtifact.java` | `emitShelfAvailable`: añade percept también a supervisor; `executeDropAt`: retira percept también de supervisor |
 | `supervisor.asl` | Añadidas creencias `shelf_type/2`; plan `-shelf_available` con detección y log obligatorio; creencia `no_space_notified` anti-duplicado |
 | `scheduler.asl` | Plan `+no_shelf_space(ContainerType)[source(supervisor)]` con log obligatorio |
+| `supervisor.asl` | `+container_error`: añadida llamada `!maybe_notify_storage_full(CId, ErrorType)`; nuevos planes `!maybe_notify_storage_full`, `!query_container_type_and_notify`, `-!query_container_type_and_notify` |
 
 ---
 
@@ -645,283 +935,111 @@ El fallback anti-starvation (cualquier estantería disponible cuando todas las c
 
 La asignación de robot (`free_shelf`) no cambia: sigue siendo por peso y dimensiones, que determinan qué robot puede transportar el contenedor.
 
+---
+
+## Scheduler: gestión de deadlines del ciclo de salida
+
+### Motivación
+
+Una vez registrado `exit_cycle(Type, T0)`, el scheduler debe orquestar dos fases de salida con duraciones definidas por ΔT, emitir los eventos de log estructurados y notificar al agente Transport. Las dos fases deben ser mutuamente excluyentes: la fase larga no puede empezar hasta que la corta haya terminado.
+
+### Solución
+
+Se añade la sección 8 a `scheduler.asl` con dos planes: un trigger reactivo sobre `+exit_cycle` y el plan principal `+!run_exit_cycle`.
+
+#### Trigger reactivo
+
+```agentspeak
++exit_cycle(Type, T0) : true <-
+    !run_exit_cycle(Type, T0).
+```
+
+Se dispara en el ciclo de razonamiento siguiente a que `+storage_full` añada la creencia, manteniendo la separación entre "recibir el aviso" (sección 7) y "gestionar los deadlines" (sección 8).
+
+#### Secuencia de deadlines
+
+```agentspeak
++!run_exit_cycle(Type, T0) : delta_t(DT) <-
+
+    // Deadline corto: [T0, T0+ΔT) — salen contenedores urgentes
+    +active_deadline(short, urgent, T0);
+    .time(H1, M1, S1); Tstart1 = H1 * 3600 + M1 * 60 + S1;
+    .print("EVENT | time=", Tstart1, " | agent=scheduler | type=deadline_started | data=urgent");
+    .send(transport, tell, start_transport(urgent, T0));
+    .wait(DT * 1000);
+    -active_deadline(short, urgent, T0);
+    .time(H2, M2, S2); Tend1 = H2 * 3600 + M2 * 60 + S2;
+    .print("EVENT | time=", Tend1, " | agent=scheduler | type=deadline_ended | data=urgent");
+
+    // Deadline largo: [T0+ΔT, T0+3·ΔT) — salen contenedores no urgentes
+    T1 = T0 + DT;
+    +active_deadline(long, non_urgent, T1);
+    .time(H3, M3, S3); Tstart2 = H3 * 3600 + M3 * 60 + S3;
+    .print("EVENT | time=", Tstart2, " | agent=scheduler | type=deadline_started | data=non_urgent");
+    .send(transport, tell, start_transport(non_urgent, T1));
+    .wait(DT * 2 * 1000);
+    -active_deadline(long, non_urgent, T1);
+    .time(H4, M4, S4); Tend2 = H4 * 3600 + M4 * 60 + S4;
+    .print("EVENT | time=", Tend2, " | agent=scheduler | type=deadline_ended | data=non_urgent").
+```
+
+**Exclusión mutua**: `.wait()` es bloqueante dentro de la intención — `active_deadline(long,...)` no se añade hasta que `active_deadline(short,...)` se retira. No es necesario un semáforo explícito.
+
+**Duraciones**: `DT * 1000` ms para el deadline corto; `DT * 2 * 1000` ms para el largo (span `T0+ΔT` a `T0+3·ΔT` = 2·ΔT de duración).
+
+**Llamada a Transport**: `.send(transport, tell, start_transport(Category, StartTime))` donde `Category` es `urgent` o `non_urgent`. En Jason Centralised, el envío a un agente no registrado se descarta silenciosamente — el plan no falla si Transport aún no existe.
+
+**Formato de log**:
+```
+EVENT | time=T | agent=scheduler | type=deadline_started | data=urgent
+EVENT | time=T | agent=scheduler | type=deadline_ended   | data=urgent
+EVENT | time=T | agent=scheduler | type=deadline_started | data=non_urgent
+EVENT | time=T | agent=scheduler | type=deadline_ended   | data=non_urgent
+```
+
+`T` se calcula con `.time(H, M, S)` → `H*3600 + M*60 + S` en el instante exacto de inicio/fin de cada deadline.
+
 ### Resumen de cambios
 
 | Archivo | Cambio |
 |---|---|
 | `scheduler.asl` | `shelf_category` → `shelf_for(Urgency, SizeCat, ShelfId)`; 6 planes `assign_shelf` tipados; `pick_least_occupied` con 3 argumentos |
-
-
-
-# IMPORTANTE -> Planificación Formal — R&N Capítulo 11 (scheduler.asl + supervisor.asl)
-
-## Motivación
-
-El scheduler de la iteración anterior reaccionaba de forma puramente secuencial: al llegar cada contenedor buscaba una estantería disponible y asignaba un robot de inmediato, sin elaborar ningún plan previo. Esto cumplía el objetivo básico, pero carecía de los tres elementos que define la planificación formal según Russell & Norvig (Cap. 11): (1) representación explícita del estado del mundo, (2) esquemas de acción con precondiciones y efectos, y (3) búsqueda guiada por una heurística admisible. El ticket de segunda semana exigía incorporar estos elementos.
-
----
-
-## Qué se implementó
-
-### 1. Estado del mundo proyectado (`ps_*`)
-
-Se introdujo un conjunto de creencias de planificación prefijadas con `ps_` que representan un **snapshot del mundo** en el momento de iniciar cada ciclo del planificador, y que se modifican a medida que el planificador aplica acciones sobre ellas (sin tocar el estado real del agente):
-
-- `ps_robot_free(Robot)` — robot sin tarea activa asignada en la proyección.
-- `ps_shelf(ShelfId, Occ)` — ocupación proyectada de cada estantería disponible.
-- `ps_pending(CId, W, H, Weight, Type)` — contenedor aún sin asignar en la proyección.
-
-El plan `!build_planning_state` limpia cualquier proyección anterior con `.abolish` y reconstruye las tres vistas desde el estado real: consulta `assigned(R, _, _)` para saber qué robots están libres, `shelf_available(S) & shelf_occupancy(S, Occ)` para las estanterías, y `planner_pending(CId, ...)` (la cola de entrada del planificador) para los pendientes.
-
-La cola de entrada `planner_pending(CId, W, H, Weight, Type)` es la creencia en la que cada contenedor queda registrado al llegar su `container_info` del entorno. Permanece hasta que el plan la ejecuta (`-planner_pending`) o hasta que se detecta que el contenedor fue aplastado.
-
-### 2. Esquema de acción `assign(Robot, CId, ShelfId)`
-
-La única acción del planificador es `assign/3`. Tiene precondiciones implícitas (evaluadas en `!get_applicable_actions`) y efectos explícitos (aplicados por `!apply_action`):
-
-**Precondiciones:**
-- `ps_robot_free(Robot)` — el robot debe estar libre en la proyección.
-- `ps_pending(CId, W, H, Weight, Type)` — el contenedor debe estar sin asignar.
-- `ps_shelf(ShelfId, _)` — la estantería debe existir y tener espacio en la proyección.
-- Compatibilidad robot ↔ contenedor (peso y dimensiones).
-- Compatibilidad estantería ↔ tipo de contenedor (urgent/non_urgent).
-- `not blocked_type(urgency)` — el tipo no está bloqueado por saturación (outbound).
-
-**Efectos (aplicados sobre `ps_*`):**
-- Se elimina `ps_robot_free(Robot)` → el robot queda ocupado en la proyección.
-- Se elimina `ps_pending(CId, ...)` → el contenedor queda asignado en la proyección.
-- Se incrementa `ps_shelf(ShelfId, Occ+1)` → la ocupación proyectada aumenta en 1.
-
-Esto permite que el planificador proyecte correctamente múltiples asignaciones en un mismo ciclo sin que las primeras contaminen las siguientes.
-
-### 3. Heurística admisible `h(assign(Robot, CId, ShelfId)) → Score`
-
-```
-h = urgency_weight + fit_bonus - occupancy_penalty
-```
-
-- **urgency_weight**: 10 si el contenedor es `"urgent"`, 5 si es `standard` o `fragile`. Prioriza contenedores urgentes en cada paso de búsqueda.
-- **fit_bonus**: fijo en 3 (simplificación; todos los robots asignados son exactamente compatibles con el contenedor por construcción de las acciones aplicables).
-- **occupancy_penalty**: ocupación proyectada de la estantería destino. Distribuye la carga entre estanterías del mismo tipo evitando llenar siempre la misma.
-
-Score mayor = mejor acción. El planificador ordena la lista de acciones puntuadas con `.sort` (ascendente) + `.reverse` y toma la primera, obteniendo la de mayor score. En caso de empate entre estanterías, la ordenación alfabética de Jason hace que se elija la última alfabéticamente (ej. shelf_7 antes que shelf_6 cuando ambas tienen Occ=0).
-
-La heurística es admisible: en cada paso del forward search evalúa solo el beneficio inmediato sin sobreestimar el coste real hasta el objetivo.
-
-### 4. Forward search greedy best-first
-
-El plan `!run_planner` orquesta el ciclo completo:
-
-1. `!build_planning_state` — construye el snapshot `ps_*`.
-2. `!forward_search([], Plan)` — bucle recursivo:
-   - Genera todas las acciones aplicables en el estado proyectado actual (`!get_applicable_actions`).
-   - Si hay acciones: puntúa cada una con `!heuristic`, selecciona la mejor (`!pick_best_action`), aplica sus efectos sobre `ps_*` (`!apply_action`), y llama recursivamente con la acción acumulada.
-   - Si no hay acciones (robots saturados o estanterías llenas): detiene la búsqueda y devuelve el plan parcial.
-   - Caso base: cuando `ps_pending` queda vacío, el plan está completo.
-3. `.reverse(Plan, OrderedPlan)` — el plan se acumuló en orden inverso; se invierte para ejecutarlo en el orden correcto.
-4. `!execute_plan(OrderedPlan)` — envía las tareas a los robots en el orden planificado.
-
-Este flujo genera el plan **completo antes de enviar ningún mensaje a ningún robot**, satisfaciendo el requisito formal de planificación previa.
-
-### 5. Restricciones estrictas robot ↔ contenedor ↔ estantería
-
-Se mantienen exactamente las mismas restricciones de la iteración anterior:
-
-| Robot | Contenedor | Estanterías |
-|---|---|---|
-| `robot_light` | ≤10kg, 1×1 | urgent: shelf_1 / non_urgent: shelf_2, shelf_3, shelf_4 |
-| `robot_medium` | ≤30kg, 1×2, NO ligero | urgent: shelf_5 / non_urgent: shelf_6, shelf_7 |
-| `robot_heavy` | no cabe en medium | urgent: shelf_8 / non_urgent: shelf_9 |
-
-"No ligero" se expresa como: Weight>10 OR H>1 (dos condiciones OR → dos `.findall` separados + `.concat`, para evitar `not` anidado en Jason).
-
-"No cabe en medium" se expresa como: Weight>30 OR W>1 OR H>2 (tres `.findall` + `.concat`).
-
-### 6. `planning_active` — mutex para evitar planificadores concurrentes
-
-El planificador puede ser disparado desde múltiples eventos: llegada de un nuevo `container_info`, o confirmación de almacenamiento de un robot (`container_stored`). Para evitar que dos instancias del planificador se ejecuten en paralelo y generen asignaciones duplicadas, se usa la creencia `planning_active` como semáforo:
-
-- Al iniciar: `+planning_active`.
-- Al terminar: `-planning_active`.
-- Antes de lanzar: `if (not planning_active) { ... }`.
-
-Hay además un `.wait(300)` al inicio del ciclo para acumular contenedores que llegan casi simultáneamente en el mismo ciclo de planificación, evitando lanzar N planes para N contenedores que podrían planificarse de golpe.
-
-### 7. Relanzamiento automático al liberar robot
-
-Cuando un robot confirma el almacenamiento (`+container_stored`), el scheduler elimina la creencia `assigned(Robot, CId, ShelfId)` y comprueba si hay contenedores en `planner_pending` que no pudieron asignarse en el ciclo anterior (por falta de robots o espacio). Si los hay, relanza el planificador. Esto resuelve el caso en que llega un contenedor pesado pero `robot_heavy` estaba ocupado: el contenedor queda en `planner_pending` y se asigna en cuanto el robot queda libre.
-
----
-
-## Bugs encontrados y corregidos durante el desarrollo
-
-### Bug 1: `=<` no funciona en reglas ni en guardias de Jason
-
-Jason evalúa `=<` como unificación estructural, no como comparación aritmética, cuando aparece en reglas `:-` o en guardias de planes. Cualquier regla como `can_carry(robot, W, H, Weight) :- Weight =< 10 & ...` falla en tiempo de parseo. La solución fue eliminar todas las reglas auxiliares con aritmética (`can_carry`, `shelf_type_ok`) e inline todas las condiciones numéricas directamente en los findalls usando únicamente `>` (ej. `not (Weight > 10)` en lugar de `Weight =< 10`).
-
-### Bug 2: Reglas y facts con lookup no se evalúan dentro de `.findall`
-
-Ni las reglas `:-` con aritmética ni los facts como `urgency_of(Type, non_urgent)` se evalúan correctamente dentro del cuerpo de un `.findall` en Jason — devuelven resultados vacíos silenciosamente. La solución fue no usar ningún predicado derivado dentro de findalls; todas las condiciones deben ser directas (comparaciones, accesos a creencias base).
-
-### Bug 3: `not` anidado falla silenciosamente en `.findall`
-
-La condición `not (not A & not B)` (equivalente lógico a `A OR B`) no funciona en Jason dentro de `.findall`. Por ejemplo, para expresar "el contenedor NO es ligero" (es decir, Weight>10 OR H>1) no se puede escribir `not (not (Weight > 10) & not (H > 1))`. La solución fue dividir cada condición OR en `.findall`s separados y concatenar los resultados. Posibles duplicados son inofensivos ya que el planificador selecciona la mejor acción por score.
-
-### Bug 4: Aritmética en `.findall` (`S-Occ` interpretado como resta)
-
-Al intentar construir un functor `shelf(S, Occ)` dentro de un `.findall` como `S-Occ`, Jason lo interpretaba como una resta aritmética en lugar de un término compuesto, produciendo errores en tiempo de ejecución. La solución fue usar el functor `shelf(S, Occ)` con notación de paréntesis en lugar de guion.
-
-### Bug 5: Código huérfano en `supervisor.asl` causaba error de parseo
-
-El supervisor tenía un bloque de código (cuerpo de plan de errores de navegación) sin cabecera de plan, resultado de un refactor incompleto anterior. Jason no podía parsear el fichero. Se eliminaron las líneas huérfanas (el robot_heavy especializado de esta iteración nunca enviaba eventos de navegación al supervisor).
-
-### Bug 6 (crítico): Tipos de contenedor como strings en el entorno vs átomos en el código
-
-El entorno Java construye el percepto `container_info` usando interpolación de strings:
-```java
-"container_info(\"" + containerId + "\"," + ... + ",\"" + container.getType() + "\"," + ...
-```
-Esto hace que `Type` llegue a Jason como una **cadena entre comillas** (`"urgent"`, `"standard"`, `"fragile"`), no como un átomo (`urgent`, `standard`, `fragile`). En Jason, `"urgent" \== urgent`: son tipos distintos.
-
-Consecuencia: todas las guardias y findalls que usaban el átomo `urgent` fallaban silenciosamente — `ps_pending(CId, W, H, Weight, urgent)` nunca unificaba con `ps_pending(CId, W, H, Weight, "urgent")`. El efecto observable era que **todos los contenedores urgentes se asignaban a estanterías non_urgent**: las secciones `AM_U` y `AH_U` devolvían listas vacías, y los contenedores urgentes se colaban en `AM_N`/`AH_N` porque `not (Type == urgent)` evaluaba como `not ("urgent" == urgent)` = `true`.
-
-La solución fue cambiar todos los literales de tipo de contenedor en el código AgentSpeak a strings con comillas: `"urgent"` en los patrones de findall, `not (Type == "urgent")` en los filtros, e `if (Type == "urgent")` en la heurística.
-
----
-
-## Estado del sistema tras estos cambios
-
-- Contenedores `urgent` se asignan correctamente a las estanterías priority (shelf_1, shelf_5, shelf_8).
-- Contenedores `standard` y `fragile` (non_urgent) se asignan a shelf_2–4, shelf_6–7, shelf_9 según peso.
-- La saturación de `shelf_9` (única estantería heavy non_urgent) provoca que contenedores heavy non_urgent queden en zona de expansión y reboten indefinidamente. Este es el límite esperado de la iteración actual: **se resolverá cuando se implemente el ciclo outbound**.
-
----
+| `scheduler.asl` | Sección 8 añadida: trigger `+exit_cycle`, plan `+!run_exit_cycle` con gestión de `active_deadline`, logs EVENT y llamadas a Transport |
+| `robot_{light,medium,heavy}.asl` | `work_cycle` (idle): `request_task` → `!check_exit_cycle`; nueva sección "Ciclo de salida" con `!check_exit_cycle`, `!select_for_exit/2`, log `EVENT container_delivered` |
 
 # Cambios realizados — 2ª semana (pull model + robot_heavy2)
 
-## Ticket resuelto: adaptación del comportamiento de los robots (pull-based architecture)
 
-### Problema que resolvía
+### Mejora: robots no vuelven a la base si hay contenedor pendiente
 
-El modelo anterior era push: el scheduler asignaba tareas a robots de forma proactiva llamando a `.send(Robot, tell, task(...))` directamente desde `!execute_plan`. Los robots eran receptores pasivos, sin capacidad de decidir cuándo estaban listos para aceptar trabajo. Esto contradecía el objetivo de que los robots no dependieran de asignaciones explícitas del scheduler.
+**Comportamiento anterior:** al terminar una tarea, `!check_queue` siempre navegaba de vuelta a la base y solo entonces `!work_cycle` comprobaba si había contenedores que reclamar.
 
-### Cambios en scheduler.asl
+**Primera implementación (scheduler-based, commit `ba48854`):** `!check_queue` enviaba `request_task` al scheduler y esperaba 2s. Obsoleta desde el refactor a pull protocol.
 
-**`!execute_plan`** dejó de enviar `task(CId, ShelfId)` directamente al robot. En su lugar almacena la asignación como una creencia local:
-
-```agentspeak
-+ready_task(Robot, CId, ShelfId);
-```
-
-**Sección 12 — Protocolo pull** (añadida al final del archivo): el scheduler reacciona cuando un robot envía `request_task`:
-
-- Si existe un `ready_task` pendiente para ese robot, lo consume y responde con `task(CId, ShelfId)`.
-- Si no hay tarea pero hay pendientes sin planificar (`planner_pending`), lanza el planificador y vuelve a intentarlo.
-- Si no hay nada disponible, responde con un mensaje de log y no hace nada.
-
-### Cambios en los robots (robot_light, robot_medium, robot_heavy)
-
-El plan `+!work_cycle : state(idle)` pasó de esperar pasivamente a enviar activamente una petición al scheduler:
+**Implementación actual (pull protocol):** `!check_queue` comprueba la belief base antes de decidir si navegar. Si hay un contenedor compatible esperando, setea `state(idle)` inmediatamente sin navegar — `!work_cycle` lo reclamará en la siguiente iteración. Si no hay nada, usa un estado intermedio `state(returning)` para navegar a base sin riesgo de race condition:
 
 ```agentspeak
-+!work_cycle : state(idle) <-
-    .send(scheduler, tell, request_task);
-    .wait(3000);   // 4000 para heavy
-    !work_cycle.
-```
-
-Los robots siguen manteniendo creencias locales de estado: `state(idle/working/picking/carrying/dropping)`, `carrying(CId)`, `position(X,Y)` y `robot_pos(X,Y)`.
-
-### Bug crítico resuelto: string vs. átomo en tipos de contenedor
-
-`WarehouseArtifact.java` emite el tipo de contenedor como string Java → Jason lo recibe como `"urgent"` (con comillas). Todos los findalls y guardas del planificador usaban el átomo `urgent` (sin comillas), que nunca unificaba. Efecto: los contenedores urgentes se asignaban siempre a estanterías non-urgent.
-
-Corrección: todos los literales de tipo en scheduler.asl cambiados a strings:
-
-```agentspeak
-not (Type == "urgent")   // antes: not (Type == urgent)
-if (Type == "urgent")    // ídem
-```
-
-Verificado: `container_10` (urgent, 2×3, 89.3 kg) → `shelf_8` ✅
-
-### Nueva instancia: robot_heavy2
-
-Se añadió una segunda instancia del robot pesado con posición base (4,3):
-
-- **`src/agt/robot_heavy2.asl`** — copia de robot_heavy con `position(4,3)` y prefijo `[HEAVY2]` en todos los prints. Mismo protocolo pull, misma lógica de navegación y manejo de errores.
-- **`src/env/warehouse/WarehouseArtifact.java`** — objeto `Robot heavy2` inicializado en (4,3) y percepción `robot_pos(4,3)` emitida al agente.
-- **`warehouse.mas2j`** — entrada `robot_heavy2` con las mismas creencias de capacidad que `robot_heavy`.
-- **`src/agt/supervisor.asl`** — creencia inicial `robot_status(robot_heavy2, idle)` añadida; `!print_robot_status` actualizado para imprimir su estado.
-- **`src/agt/scheduler.asl`** — `robot_capacity(robot_heavy2, 100, 2, 3, 1)` y `robot_available(robot_heavy2)` añadidos como creencias iniciales.
-
-### Bug resuelto: robot_heavy2 nunca recibía tareas
-
-El planificador tenía dos sitios hardcodeados con la lista de robots:
-
-1. Las creencias `robot_capacity` / `robot_available` — faltaba `robot_heavy2`.
-2. El bucle `for (.member(R, [robot_light, robot_medium, robot_heavy]))` en `!snapshot_state` — tampoco lo incluía, por lo que `robot_heavy2` nunca aparecía en `ps_robot_free` y el planificador lo ignoraba.
-
-### Mejora de diseño: eliminación de hardcoding en el planificador
-
-El bucle de construcción del snapshot se reescribió para derivar la lista de robots directamente de `robot_capacity`, que actúa como única fuente de verdad:
-
-```agentspeak
-.findall(R, robot_capacity(R, _, _, _, _), AllRobots);
-for (.member(R, AllRobots)) {
-    if (not assigned(R, _, _)) { +ps_robot_free(R); }
-};
-```
-
-Añadir un nuevo robot ahora solo requiere una línea en `robot_capacity`.
-
-### Mejora: robots no vuelven a la base si hay tarea disponible
-
-**Comportamiento anterior:** al terminar una tarea, `!check_queue` comprobaba la cola local del robot. Como en el modelo pull nunca hay tarea local pre-encolada, siempre navegaba de vuelta a la base antes de pedir trabajo.
-
-**Comportamiento nuevo:** `!check_queue : not task(_, _)` envía primero `request_task` al scheduler y espera 2 segundos. Si el scheduler responde con una tarea, el robot la ejecuta directamente desde donde está. Solo navega a la base si no hay ninguna tarea disponible:
-
-```agentspeak
-+!check_queue : not task(_, _) & position(InitX, InitY) <-
-    .send(scheduler, tell, request_task);
-    .wait(2000);
-    if (task(CId, ShelfId)) {
-        -task(CId, ShelfId)[source(scheduler)];
-        accept_task(CId);
-        -+state(working);
-        -+carrying(CId);
-        !execute_task(CId, ShelfId);
+// robot_heavy / robot_heavy2
++!check_queue : position(InitX, InitY) <-
+    .abolish(error(_, _));
+    !release_zone(inbound);
+    !release_zone(expansion);
+    if (container_at_entrance(_, _, Weight, W, H) &
+            (Weight > 30 | W > 1 | H > 2) &
+            Weight <= 100 & W <= 2 & H <= 3) {
+        -+state(idle)
     } else {
+        -+state(returning);
         !navigate(InitX, InitY);
-        -+state(idle);
+        -+state(idle)
     }.
 ```
 
-Aplicado en los cuatro robots: `robot_light`, `robot_medium`, `robot_heavy`, `robot_heavy2`.
+**Por qué `state(returning)` en lugar de `state(idle)` durante la navegación a base**: si se setea `state(idle)` antes de completar la navegación, el trigger reactivo `+container_at_entrance : state(idle)` puede disparar mientras `!navigate` está en curso, creando dos intenciones enviando `move_step` en paralelo — oscilación. `state(returning)` bloquea los triggers reactivos durante la navegación a base. Es funcionalmente idéntico al comportamiento original cuando no hay contenedor disponible; la diferencia real es solo cuando hay contenedor esperando (rama `if`).
 
-### Mejora: desempate por orden de declaración en `robot_capacity`
+Cada robot usa los guards de capacidad propios (medium: `Weight>10 | H>1`; light: `not(Weight>10) & not(W>1) & not(H>1)`). No se llama a `!try_claim` desde `!check_queue` para evitar cadena de llamadas anidadas.
 
-**Problema:** cuando dos robots tienen el mismo score heurístico para un contenedor, `!pick_best_action` usaba `.sort` + `.reverse` sobre términos `s(Score, Action)`. Jason ordena términos compuestos alfabéticamente, por lo que `robot_heavy2 > robot_heavy` → `robot_heavy2` ganaba siempre el desempate, independientemente del orden deseado.
-
-**Solución:** se añade un segundo campo `Priority` al término de score, calculado como el índice negado del robot en la lista `robot_capacity`:
-
-```agentspeak
-+!score_actions([assign(R, CId, ShelfId)|Rest], [s(Score, Priority, assign(R, CId, ShelfId))|SRest]) <-
-    !heuristic(assign(R, CId, ShelfId), Score);
-    .findall(Rx, robot_capacity(Rx, _, _, _, _), AllRobots);
-    .nth(Idx, AllRobots, R);
-    Priority = -Idx;
-    !score_actions(Rest, SRest).
-
-+!pick_best_action(Actions, Best) <-
-    !score_actions(Actions, Scored);
-    .sort(Scored, Sorted);
-    .reverse(Sorted, [s(_, _, Best)|_]).
-```
-
-`robot_heavy` está en índice 2 → `Priority = -2`. `robot_heavy2` está en índice 3 → `Priority = -3`. Como el sort es ascendente y se invierte, `s(10, -2, ...)` queda por delante de `s(10, -3, ...)` → `robot_heavy` gana el desempate.
-
-El orden de preferencia entre robots con igual score queda determinado por su posición en `robot_capacity`, que actúa como única fuente de verdad.
+**Verificado en runtime**: robot_medium encadenó 6 tareas consecutivas sin volver a base (container_1→2→4→6→5→8); robot_light encadenó 3 (container_7→9→10).
 
 ### Corrección: oscilación del backoff horizontal (robot bloqueado por otro robot)
 
@@ -955,138 +1073,597 @@ Aplicado en los cuatro robots: `robot_light`, `robot_medium`, `robot_heavy`, `ro
 
 ---
 
-### Corrección: crash al fallar la navegación a la zona de expansión tras `shelf_full`
-
-**Causa raíz:** el plan `-!execute_task : error(shelf_full, _)` incluía `!navigate(TX, TY)` directamente en su cuerpo. Si esa navegación fallaba (p. ej. `path_blocked` por bloqueo permanente), Jason intentaba generar un nuevo evento de fallo para `-!execute_task` — pero ya estábamos dentro de un plan de fallo de ese mismo goal, por lo que Jason no podía generar otro y abortaba con `"No failure event was generated"`. El estado `carrying(CId)` quedaba activo y el robot no enviaba `task_failed` al scheduler, dejando el sistema en un estado inconsistente permanente.
-
-**Solución:** se extrae la recuperación a un sub-goal independiente `!go_to_expansion(CId)`, que tiene su propio plan de fallo `-!go_to_expansion(CId)`. Cualquier fallo dentro de la recuperación (incluyendo la navegación) se captura en ese plan de fallo y limpia el estado correctamente:
-
-```agentspeak
--!execute_task(CId, ShelfId) : error(shelf_full, _) & carrying(CId) <-
-    .abolish(error(shelf_full, _));
-    !go_to_expansion(CId);
-    !check_queue.
-
-+!go_to_expansion(CId) <-
-    move_to_expansion;
-    ?nav_target(TX, TY);
-    !navigate(TX, TY);
-    drop_in_expansion(CId);
-    -+carrying(none);
-    release_task(CId);
-    .send(scheduler, tell, container_in_expansion(CId)).
-
--!go_to_expansion(CId) <-
-    -+carrying(none);
-    release_task(CId);
-    .send(scheduler, tell, task_failed(CId)).
-```
-
-El plan de fallo de `-!execute_task : shelf_full` ya no puede romperse: si `!go_to_expansion` tiene éxito, el contenedor queda en la zona de expansión; si falla, `-!go_to_expansion` limpia el estado y libera la tarea. En ningún caso el robot queda con `carrying(CId)` activo sin que el scheduler sea notificado.
-
-| Archivo | Cambio |
-|---|---|
-| `robot_{light,medium,heavy,heavy2}.asl` | Extraída navegación a expansión al sub-goal `!go_to_expansion(CId)` con su plan de fallo `-!go_to_expansion(CId)` |
 
 ---
 
-# Ciclo outbound — extracción de contenedores saturados a zona de salida
+## Semana 3 — Refactorización y corrección de bugs
 
-## Motivación
+### Objetivos cumplidos
 
-Cuando todas las estanterías de un tipo (urgent / non_urgent) están llenas, el sistema bloqueaba nuevas asignaciones de ese tipo (`blocked_type`) pero no hacía nada para liberar espacio. Los contenedores se acumulaban en la zona de expansión o generaban fallos de `shelf_full` indefinidamente. El ciclo outbound activa el vaciado activo de las estanterías saturadas hacia la zona de salida (roja, x=0–2, y=0–1) para reanudar el inbound.
+1. **Scheduler sin asignación inbound**: el scheduler no asigna tareas ni robots durante el ciclo de entrada. Los robots reclaman contenedores autónomamente desde `+container_at_entrance`.
+2. **Estanterías por tipo**: S1, S5, S8 almacenan contenedores urgentes; S2, S3, S4, S6, S7, S9 almacenan standard y frágiles. Implementado en `common.asl` (`shelf_urgency`) y respetado en `!pick_shelf`.
+3. **Supervisor detecta saturación**: dos vías de detección — via `container_error(CId, no_shelf_space)` de los robots, y reactivamente via `-shelf_available(ShelfId)` cuando el entorno retira el percept. Ambas emiten `EVENT | type=no_space_detected` y notifican al scheduler con `storage_full(Type, T0)`.
+4. **Scheduler bloquea el tipo saturado**: añade `blocked_type(Type)` y lo difunde a todos los robots. Los robots comprueban `not blocked_type(Type)` antes de reclamar nuevos contenedores de ese tipo.
+5. **Robots autónomos durante ciclo de salida**: cada robot consulta su propia base de creencias (`active_deadline`, `stored`) y selecciona qué contenedor evacuar sin asignación explícita del scheduler ni del supervisor.
 
-## Flujo completo
+---
 
+### Arquitectura: scheduler sin asignación inbound
+
+El scheduler dejó de gestionar el ciclo inbound por completo. Los robots reclaman contenedores autónomamente desde `+container_at_entrance` y seleccionan estanterías con `!pick_shelf` (`common.asl`). El scheduler solo gestiona el ciclo de salida.
+
+Archivos afectados: `scheduler.asl` reescrito (eliminado planificador formal inbound), `common.asl` ampliado, todos los robots refactorizados.
+
+---
+
+### Fix: selección de estantería con urgencia y categoría (`common.asl`)
+
+**Problema**: `!pick_shelf` asignaba estanterías solo por peso/tamaño, ignorando la urgencia del contenedor. Contenedores standard acababan en estanterías urgentes (S1/S5/S8) y viceversa.
+
+**Solución**: `!pick_shelf` usa `claimed_type(CId, "urgent")` para distinguir entre planes urgentes (→ S1, S5, S8) y no urgentes (→ S2-S4, S6-S7, S9). Los fallbacks también respetan urgencia y categoría física:
+- Peso > 30kg → solo estanterías `heavy`
+- 10 < Peso ≤ 30kg → `medium` o `heavy`
+- Peso ≤ 10kg → cualquiera
+
+`!pick_least_occupied_shelf` recibe ahora `(CId, Cat, Urg)` para filtrar por ambos criterios.
+
+---
+
+### Fix: planes compartidos movidos a `common.asl`
+
+`!try_claim` y `!select_shelf_and_execute` eran idénticos en los 4 robots. Movidos a `common.asl` eliminando ~40 líneas duplicadas. El label del print usa `.my_name(Me)` para mantener trazabilidad.
+
+---
+
+### Fix: supervisor stats — race condition en `container_at_entrance`
+
+**Problema**: `claim_container` retira `container_at_entrance` atómicamente. Si el supervisor no procesó el percept antes, nunca incrementa `total_received`.
+
+**Solución**: robots envían `.send(supervisor, tell, container_claimed(CId, Type, Weight))` tras un claim exitoso. Supervisor tiene handler `+container_claimed` como ruta principal y mantiene `+container_at_entrance` como fallback. La creencia `container_received(CId)` previene doble conteo.
+
+---
+
+### Fix: paths `storage_full` y `no_shelf_space` unificados (`scheduler.asl`, `supervisor.asl`)
+
+**Problema**: el path `+storage_full` (vía robot container_error) no añadía `blocked_type` ni emitía `EVENT | type=output_phase_started`. Solo `+no_shelf_space` lo hacía.
+
+**Solución**: `+storage_full` ahora añade `+blocked_type(Type)` y emite el evento obligatorio, igual que `+no_shelf_space`. Ambos paths son ahora equivalentes.
+
+Además, `storage_saturated(Type)` en supervisor ahora se elimina cuando una estantería del mismo tipo recupera disponibilidad (`+shelf_available` handler), permitiendo que el path `container_error` dispare de nuevo en futuras saturaciones.
+
+---
+
+### Fix: cooldown `shelf_wait` para contenedores sin estantería (`common.asl`, todos los robots)
+
+**Problema**: cuando `!pick_shelf` fallaba definitivamente o un robot alcanzaba `expansion_drop_final`, `unclaim_container` re-emitía `container_at_entrance` y los robots lo re-reclamaban inmediatamente, generando un bucle de retries rápido y errores falsos en el supervisor.
+
+**Solución**: se añade `+shelf_wait(CId)` en dos puntos:
+- `!pick_shelf` final (N ≥ 3 retries): en `common.asl`
+- `expansion_drop_final`: en los 4 robots
+
+`shelf_wait` tiene auto-clear a los 20s (`+shelf_wait(CId) <- .wait(20000); -shelf_wait(CId)`) y se limpia antes si otro robot reclama el contenedor. Los guards de `+container_at_entrance` y `!check_pending_containers` incluyen `not shelf_wait(CId)`.
+
+---
+
+### Fix: error count correcto para errores repetidos (`supervisor.asl`)
+
+**Problema**: si dos robots reportaban `container_error(CId, no_shelf_space)` para el mismo contenedor, el segundo reporte no incrementaba el contador porque `error_occurred(CId, ErrorType)` ya existía en la base de creencias.
+
+**Solución**: el handler `+container_error` solo añade `error_occurred` y actualiza el contador si `not error_occurred(CId, ErrorType)`. El print de trazabilidad sigue apareciendo siempre.
+
+### Fix: `blocked_type` propagado a robots durante el ciclo de salida (`scheduler.asl`, todos los robots)
+
+**Problema**: `blocked_type(Type)` solo existía en la base de creencias del scheduler. Los robots no lo conocían, por lo que seguían intentando reclamar contenedores del tipo bloqueado durante el exit cycle. Con dos robots pesados compitiendo por el mismo contenedor sin estantería disponible, se generaba un bucle alternante: mientras uno tenía `shelf_wait` activo el otro lo reclamaba, impidiendo que el ciclo de salida tuviera el tiempo necesario para liberar espacio.
+
+**Solución** (dos partes):
+
+- **`scheduler.asl` — `!run_exit_cycle`**: al inicio del ciclo se hace broadcast `tell blocked_type(Type)` a todos los robots; al finalizar (antes de limpiar la belief base), broadcast `untell blocked_type(Type)`.
+
+```agentspeak
++!run_exit_cycle(Type, T0) : delta_t(DT) <-
+    .findall(R, robot_capacity(R, _, _, _, _), AllRobots);
+    for (.member(R, AllRobots)) { .send(R, tell, blocked_type(Type)); };
+    // ... fases urgente y no_urgente ...
+    for (.member(R, AllRobots)) { .send(R, untell, blocked_type(Type)); };
+    .abolish(exit_cycle(_, _));
+    .abolish(blocked_type(_));
+    -active_exit_cycle.
 ```
-supervisor detecta estantería llena
-    → -shelf_available(ShelfId) → .findall de misma categoría vacía
-    → if vacía: no_space_notified, EVENT, .send(scheduler, no_shelf_space(Type))
 
-scheduler recibe no_shelf_space(Type)
-    → +blocked_type(Type)   ← planificador ignorará ese tipo
-    → EVENT output_phase_started
-    → !dispatch_outbound(Type)
-        → .findall de stored_at(CId, ShelfId) del tipo
-        → para cada (CId, ShelfId) × para cada robot:
-              .send(robot, tell, outbound_available(CId, ShelfId, W, H, Weight))
-        (broadcast: el scheduler anuncia, NO asigna)
+- **Todos los robots — planes reactivos y `!check_pending_containers`**: añadido `not blocked_type(Type)` como guard en todos los puntos de reclamación. También se aprovechó para añadir `not shelf_wait(CId)` en los `!check_pending_containers` de `robot_heavy` y `robot_heavy2`, donde faltaba.
 
-robot recibe outbound_available(CId, ShelfId, W, H, Weight)
-    → si state(idle) & compatible (max_weight, max_size):
-          -outbound_available, accept_task, -+state(working), !execute_outbound_task
-    → si not state(idle) & compatible:
-          mantiene creencia en BB (la procesará al terminar tarea actual)
-    → si incompatible:
-          -outbound_available (descarta)
-    (decisión autónoma: el scheduler no decide qué robot extrae qué contenedor)
+**Resultado**: durante el exit cycle, ningún robot intentará reclamar contenedores del tipo bloqueado. Cuando el ciclo termina y se libera espacio en estantería, el `untell` reactiva los robots y el contenedor pendiente se almacena directamente.
 
-robot ejecuta !execute_outbound_task
-    → move_to_shelf → navigate → pickup_from_shelf → move_to_outbound → navigate → drop_in_outbound
-    → release_task(CId), .send(scheduler, container_shipped(CId, ShelfId))
+### Fix: Bug 2 — contenedor perdido tras fallo en `!execute_exit` (`WarehouseArtifact.java`, todos los robots)
 
-pickup_from_shelf (Java)
-    → shelf.remove(container)
-    → si shelf estaba llena: emitShelfAvailable(shelfId) → +shelf_available percept
+**Problema**: si `pickup_from_shelf` tenía éxito (contenedor físicamente recogido de la estantería, `exit_picked(CId)` activado) pero la navegación posterior hacia la zona outbound fallaba, el handler `-!execute_exit : exit_picked(CId)` intentaba devolver el contenedor a la estantería con `!return_to_shelf`. Si esta también fallaba, el plan de fallo `-!return_to_shelf` llamaba a `!safe_expand_drop`, que depositaba el contenedor en la zona de expansión sin emitir ningún percept `container_at_entrance`. El contenedor quedaba abandonado: no estaba en estantería, no estaba en outbound y ningún robot podía reclamarlo.
 
-condición de carrera: dos robots intentan el mismo contenedor
-    → el primero en llamar pickup_from_shelf gana (atómico en Java)
-    → el segundo recibe container_not_on_shelf → -!execute_outbound_task dispara
-          → release_task (sin args), .send(scheduler, outbound_failed(CId, ShelfId))
+**Solución** (dos partes):
 
-+shelf_available en scheduler
-    → si blocked_type(Type) & shelf_for(Type, _, ShelfId): -blocked_type(Type)
-    → inbound de ese tipo se reanuda
+- **`WarehouseArtifact.java`**: añadido método helper `findFreeEntranceCell()` que localiza una celda libre de tipo `ENTRANCE` (o devuelve `(5,0)` como fallback). Modificado `executeUnclaimContainer` para, cuando el robot lleva físicamente el contenedor, resetear su posición a una celda de entrada tras el `robot.drop()`:
 
-+shelf_available en supervisor
-    → si no_space_notified(Type): -no_space_notified(Type)
-    → el ciclo de detección puede dispararse de nuevo si es necesario
+```java
+private int[] findFreeEntranceCell() {
+    List<int[]> cells = new ArrayList<>();
+    for (int x = 0; x < GRID_WIDTH; x++)
+        for (int y = 0; y < GRID_HEIGHT; y++)
+            if (grid[x][y] == CellType.ENTRANCE && !hayContenedorEn(x, y))
+                cells.add(new int[]{x, y});
+    return cells.isEmpty() ? new int[]{5, 0} : cells.get(0);
+}
+// En executeUnclaimContainer, tras robot.drop() + setPicked(false):
+int[] cell = findFreeEntranceCell();
+carried.setPosition(cell[0], cell[1]);
 ```
 
-## Cambios por archivo
+  Este cambio inicia la corrección del **Bug 3** para el caso en que el robot lleva el contenedor.
 
-### `Shelf.java`
+- **Todos los robots — `-!return_to_shelf(CId, _)`**: reemplazado `!safe_expand_drop(CId)` por `unclaim_container(CId)`. La acción Java re-emite `container_at_entrance` con el contenedor reposicionado en la entrada, reintroduciéndolo en el ciclo inbound normal:
 
-Nuevo método `remove(Container)` — inverso de `store`: decrementa `currentWeight` y `currentVolume` y elimina el ID de `storedContainers`. Necesario para que `pickup_from_shelf` libere el espacio de la estantería correctamente.
+```agentspeak
+// Antes:
+-!return_to_shelf(CId, _) <-
+    !safe_expand_drop(CId);
+    .abolish(stored(CId, _));
+    .abolish(claimed_type(CId, _)).
 
-### `WarehouseArtifact.java`
+// Después:
+-!return_to_shelf(CId, _) <-
+    unclaim_container(CId);
+    .abolish(stored(CId, _));
+    .abolish(claimed_type(CId, _)).
+```
 
-Tres nuevas acciones:
+**Flujo corregido**:
+```
+pickup_from_shelf ✓ → navegar a outbound ✗ → return_to_shelf ✗
+                                                    ↓
+                                          unclaim_container(CId)
+                                          → drop en Java
+                                          → posición reseteada a ENTRANCE
+                                          → container_at_entrance emitido
+                                          → otro robot lo reclama ✓
+```
 
-- **`pickup_from_shelf(ShelfId, CId)`** — recoge un contenedor almacenado en una estantería. Comprueba proximidad (≤3), compatibilidad de peso/tamaño, y que el contenedor está efectivamente en la estantería. Llama a `shelf.remove(container)`, hace `robot.pickup`, y si la estantería estaba llena re-emite `shelf_available` al scheduler y al supervisor. Actualiza `shelf_occupancy`.
+## Semana 4 — Control temporal y detección de deadline_missed
 
-- **`move_to_outbound`** — calcula la celda OUTBOUND más cercana al robot (zona roja, x=0–2, y=0–1) y emite `nav_target(X,Y)`. Análogo a `move_to_expansion`.
+### Objetivos cumplidos
 
-- **`drop_in_outbound(CId)`** — el robot deposita el contenedor en la zona outbound y lo elimina de `containers` (enviado; no vuelve a aparecer en la simulación). Análogo a `drop_in_expansion` pero sin zona de clasificación.
+1. **Supervisor conoce T0 y los deadlines activos**: recibe `active_deadline(Phase, Cat, T0)` del scheduler al inicio de cada fase; retira la creencia al final.
+2. **Acceso al tiempo actual**: usa `.time(H, M, S)` para calcular `Tnow = H*3600 + M*60 + S` en el monitor periódico.
+3. **Supervisor consulta estado completo de contenedores**: combina `container_stored_fact`, `container_received_type` y `container_delivered_fact` para saber qué contenedores están en estantería y cuáles han sido entregados.
+4. **Criterio de incumplimiento explícito**:
+   - Urgente: `Tnow >= T0 + DT` y contenedor urgente en estantería sin entregar.
+   - No urgente: `Tnow >= T1 + 2·DT` y contenedor standard/fragile en estantería sin entregar.
+5. **Detección periódica**: `!monitor_deadline` comprueba el criterio cada 5 segundos desde que llega `+active_deadline`.
+6. **Un evento por contenedor incumplido**: `!report_deadline_missed` itera la lista de incumplidos y emite `EVENT | type=deadline_missed | data=container_id` por cada uno.
+7. **No interfiere con la ejecución**: el monitor corre como intención separada, no envía mensajes a robots, no llama acciones Java, y tiene handlers de fallo (`-!monitor_deadline`, `-!report_deadline_missed`) que absorben cualquier error interno silenciosamente.
 
-### `scheduler.asl`
+---
 
-- **`+container_stored`**: añadido `+stored_at(CId, ShelfId)` para rastrear qué contenedores están en qué estantería.
-- **`+no_shelf_space`**: llama a `!dispatch_outbound(Type)` tras fijar `blocked_type`.
-- **`+!dispatch_outbound(Type)`**: broadcast puro — con `.findall` recoge todos los `stored_at(CId, ShelfId)` del tipo y envía `outbound_available(CId, ShelfId, W, H, Weight)` a **todos** los robots. No asigna ningún robot concreto.
-- **`+shelf_available`**: nuevo plan reactivo — si `blocked_type(Type)` y la estantería es de ese tipo, elimina `blocked_type` y reanuda el inbound.
-- **Protocolo `request_task`**: sin cambios respecto al inbound — el outbound ya no pasa por `request_task`; los robots reciben `outbound_available` directamente y deciden de forma autónoma.
-- **`+container_shipped`**: elimina `stored_at` y `container_info` al confirmar envío.
-- **`+outbound_failed`** (2 planes): si el contenedor sigue en la estantería (`container_info` existe) → re-broadcast a todos los robots; si ya no existe → elimina `stored_at`.
+### Semana 4 — Infraestructura de seguimiento de deadlines
 
-### `supervisor.asl`
+**Objetivo**: adaptar el supervisor para que conozca T0, los deadlines activos, el tiempo actual y el estado completo de los contenedores.
 
-- **`+shelf_available`**: nuevo plan reactivo — si `no_space_notified(Type)` y la estantería es de ese tipo, retira `no_space_notified` para que el ciclo de detección pueda volver a dispararse si se vuelve a llenar.
+- **`scheduler.asl` — `!run_exit_cycle`**: el scheduler envía `active_deadline` también al supervisor (tell al inicio de cada fase, untell al final), además de a los robots. El supervisor recibe así T0 y la categoría (urgent/non_urgent) de cada deadline.
 
-### `robot_{light,medium,heavy,heavy2}.asl`
+- **4 robots — `+!execute_exit`**: tras depositar en outbound, cada robot envía `.send(supervisor, tell, container_delivered(CId))`. Permite al supervisor saber qué contenedores han sido efectivamente entregados.
 
-- **`+outbound_available(CId, ShelfId, W, H, Weight)`** (3 planes):
-  1. `state(idle) & compatible` → elimina la creencia, `accept_task`, `-+state(working)`, `!execute_outbound_task`.
-  2. `not state(idle) & compatible` → mantiene la creencia en BB para procesarla al quedar idle.
-  3. `true` (incompatible) → elimina la creencia (`-outbound_available[source(scheduler)]`).
-- **`+!execute_outbound_task(CId, ShelfId)`**: 4 fases — navegar a estantería, `pickup_from_shelf`, navegar a outbound, `drop_in_outbound`. Al completar: `release_task(CId)`, envía `container_shipped` al scheduler.
-- **`-!execute_outbound_task`**: limpia estado, llama `release_task` **sin args** (evita re-encolar el contenedor al inbound) y notifica `outbound_failed`.
-- **`+!check_queue`**: comprueba `outbound_available` compatible *antes* que `task` inbound. El plan de "pedir tarea" solo se activa si no hay ni `task` ni `outbound_available` pendiente (eliminado el `else if outbound_task` del bloque inline).
+- **`supervisor.asl`**: nueva sección "Seguimiento de ciclo de salida":
+  - `+active_deadline(Phase, Cat, T0)[source(scheduler)]` — log de recepción con tiempo actual.
+  - `+container_delivered(CId)[source(Robot)]` — almacena `container_delivered_fact(CId)`.
 
-| Archivo | Cambio |
+El supervisor puede ahora consultar el ciclo de vida completo de cada contenedor:
+
+| Creencia | Significado |
 |---|---|
-| `Shelf.java` | Añadido `remove(Container)` |
-| `WarehouseArtifact.java` | Nuevas acciones `pickup_from_shelf`, `move_to_outbound`, `drop_in_outbound` |
-| `scheduler.asl` | `stored_at`, `dispatch_outbound` (broadcast), `shelf_available` reactivo, `container_shipped`, `outbound_failed` (re-broadcast) |
-| `supervisor.asl` | `+shelf_available` reactivo para resetear `no_space_notified` |
-| `robot_{light,medium,heavy,heavy2}.asl` | 3 planes `+outbound_available` (idle+compatible / busy+compatible / incompatible), `execute_outbound_task`, `check_queue` actualizado |
+| `container_received(CId)` | Contenedor llegó al sistema |
+| `container_stored_fact(CId, ShelfId)` | Contenedor en estantería |
+| `container_delivered_fact(CId)` | Contenedor entregado a outbound |
+| `active_deadline(Phase, Cat, T0)` | Deadline activo con T0 en segundos |
+
+### Semana 4 — Criterio de incumplimiento de deadline (`supervisor.asl`)
+
+**Objetivo**: detectar y registrar contenedores que no fueron entregados a outbound antes de que expirara su deadline.
+
+El supervisor reacciona a `-active_deadline` (creencia retirada por el scheduler tras el `.wait` de cada fase) y aplica el criterio explícito:
+
+- **Deadline urgente** (`-active_deadline(_, urgent, T0)`):  
+  `Tnow >= T0 + DT` AND existen contenedores de tipo `urgent` en estantería sin entregar.
+
+- **Deadline no urgente** (`-active_deadline(_, non_urgent, T1)`):  
+  `Tnow >= T1 + 2·DT` AND existen contenedores `standard`/`fragile` en estantería sin entregar.
+
+Por cada contenedor incumplido se emite el evento obligatorio:
+```
+EVENT | time=T | agent=supervisor | type=deadline_missed | data=container_id
+```
+
+La detección usa las creencias acumuladas durante el ciclo:
+- `container_stored_fact(CId, _)` — contenedor estuvo en estantería
+- `container_received_type(CId, Type)` — tipo del contenedor
+- `not container_delivered_fact(CId)` — no fue entregado a outbound
+
+El check `if (Tnow >= Deadline)` hace el criterio explícito aunque en la práctica siempre se cumple al dispararse el trigger (el scheduler retira la creencia justo al expirar el plazo).
+
+### Semana 4 — Detección periódica de incumplimientos (`supervisor.asl`)
+
+**Objetivo**: el supervisor comprueba activamente cada 5 segundos si el deadline ha expirado, en lugar de esperar solo al evento reactivo de fin de fase.
+
+**Diseño**: dos mecanismos en paralelo previenen tanto la detección tardía como el doble reporte:
+
+- **Monitor periódico** (`+!monitor_deadline`): arranca cuando el supervisor recibe `+active_deadline`. Comprueba cada 5s si `Tnow >= Deadline`. En cuanto se cumple, establece `deadline_checked(Cat)`, busca contenedores incumplidos y emite los eventos. El loop para.
+
+- **Backup reactivo** (`-active_deadline`): se dispara cuando el scheduler retira la creencia (fin de fase). Si el monitor ya actuó (`deadline_checked` presente), solo limpia el flag. Si el monitor estaba en `.wait` cuando expiró el plazo, hace la comprobación definitiva.
+
+**Flujo completo**:
+```
++active_deadline recibido
+        ↓
+!monitor_deadline (loop cada 5s)
+        ↓
+   Tnow < Deadline → .wait(5000) → vuelve a comprobar
+        ↓
+   Tnow >= Deadline → +deadline_checked → !report_deadline_missed → para
+
+        ↓ (scheduler hace untell → -active_deadline)
+   • monitor YA detectó → solo limpia deadline_checked
+   • monitor en .wait    → comprobación definitiva aquí
+```
+
+El flag `deadline_checked(Cat)` garantiza que los eventos `deadline_missed` se emiten exactamente una vez por fase, independientemente de qué mecanismo actúe primero.
+
+### Semana 4 — Registro de errores de deadline en estadísticas (`supervisor.asl`)
+
+**Objetivo**: cada contenedor que incumple su deadline queda registrado en el sistema de estadísticas del supervisor, igual que cualquier otro error de contenedor.
+
+- **Creencia inicial**: añadido `errors_by_type(deadline_missed, 0)`. El reporte periódico (`!print_errors_by_type`) ya itera `errors_by_type`, por lo que `deadline_missed` aparece automáticamente en el resumen de estadísticas.
+
+- **`+!report_deadline_missed`**: por cada contenedor incumplido, si no existe ya `error_occurred(CId, deadline_missed)`, se añade la creencia, se recalculan `total_errors` y las tasas derivadas (`!update_rates`). El guard `not error_occurred` previene doble conteo si el mismo contenedor aparece en ambas fases del ciclo.
+
+El reporte periódico mostrará:
+```
+Errores por tipo:
+  deadline_missed: N
+  no_shelf_space: M
+```
+
+### Semana 4 — No interferencia: detección de deadlines aislada del sistema (`supervisor.asl`)
+
+La detección y registro de incumplimientos de deadline cumple las tres propiedades de no interferencia por construcción:
+
+| Propiedad | Garantía |
+|---|---|
+| **No detiene la ejecución** | El monitor corre como intención separada con `.wait(5000)`. Se añadieron handlers de fallo `-!monitor_deadline(_, _, _) : true <- true` para ambas variantes (urgent/non_urgent): si el cuerpo del monitor falla internamente (p.ej. `?delta_t(DT)` no encuentra la creencia, o `.findall` lanza excepción), Jason propagaría el fallo hacia `+active_deadline` que lo lanzó con `!monitor_deadline(...)`, pudiendo afectar la intención del supervisor. El handler absorbe el fallo silenciosamente. Idem `-!report_deadline_missed : true <- true`. |
+| **No cancela tareas de robots** | El supervisor no envía ningún mensaje a los robots desde el código de deadline. No invoca `unclaim_container`, `release_task` ni ninguna acción que afecte al ciclo de trabajo de los robots. |
+| **No modifica el entorno ni decisiones** | No se llama ninguna acción Java. Las creencias `error_occurred(CId, deadline_missed)` y `deadline_checked(Cat)` son internas al supervisor. Los robots no perciben ni reciben nada de esta lógica. |
+
+Las propiedades son estructurales — no requieren validación en tiempo de ejecución porque no existe ningún mecanismo de interferencia en el código.
+
+### Fix: Bug 3 — unclaim resetea posición solo cuando el robot llevaba el contenedor (`WarehouseArtifact.java`)
+
+**Problema original**: `executeUnclaimContainer` no reseteaba la posición cuando el robot llevaba físicamente el contenedor al llamarse (p. ej., `path_blocked` en mitad de la navegación). El contenedor caía en la posición actual del robot (arbitraria dentro del almacén) y otro robot no podía recogerlo porque `pickup` verifica distancia.
+
+**Solución**: `executeUnclaimContainer` resetea a una celda libre de entrada **únicamente si el robot llevaba el contenedor** (`wasCarrying`). Si el contenedor ya fue depositado intencionalmente en otro lugar (p. ej., zona de expansión vía `drop_in_expansion`), su posición se respeta — ese caso tiene su propia semántica correcta.
+
+```java
+boolean wasCarrying = false;
+if (robot != null && robot.isCarrying()) {
+    Container carried = robot.getCarriedContainer();
+    if (carried != null && containerId.equals(carried.getId())) {
+        robot.drop();
+        carried.setPicked(false);
+        wasCarrying = true;
+    }
+}
+
+Container container = containers.get(containerId);
+if (container == null || container.isBroken()) return true;
+
+if (wasCarrying) {
+    int[] cell = findFreeEntranceCell();
+    container.setPosition(cell[0], cell[1]);
+}
+addPercept(...container_at_entrance...);
+```
+
+**Casos cubiertos**:
+- Robot llevando el contenedor (path_blocked, execute_exit failure): drop + reset a entrada ✓
+- Contenedor en expansión (safe_expand_drop + unclaim): posición de expansión respetada ✓
+- Contenedor ya en entrada (pick_shelf failure sin pickup): posición respetada ✓
+
+### Fix: `select_for_exit` usa `shelf_urgency` en lugar de `claimed_type` (4 robots)
+
+**Problema**: `+!select_for_exit` filtraba contenedores candidatos usando `claimed_type(CId, "urgent")`, una creencia per-robot que solo existe en el robot que originalmente almacenó el contenedor. Si ese robot estaba ocupado, ningún otro robot podía sacar el contenedor durante el ciclo de salida, aunque estuviese idle.
+
+**Solución**: sustituir `claimed_type(CId, "urgent")` por `shelf_urgency(ShelfId, urgent)` (y `claimed_type(...) & non_urgent_container_type(...)` por `shelf_urgency(ShelfId, non_urgent)`). `shelf_urgency` es una creencia estática en `common.asl` disponible para todos los robots. Ahora cualquier robot idle puede mover cualquier contenedor de la categoría correcta independientemente de quién lo almacenó:
+
+```agentspeak
+// Antes:
++!select_for_exit([pair(CId, ShelfId)|_], urgent) : claimed_type(CId, "urgent") & state(idle) <- ...
+
+// Después:
++!select_for_exit([pair(CId, ShelfId)|_], urgent) : shelf_urgency(ShelfId, urgent) & state(idle) <- ...
+```
+
+### Fix: `delta_t` aumentado de 60 a 120 segundos (`common.asl`)
+
+**Motivo**: con `delta_t(60)`, robots pesados (velocidad 1) que recogen un contenedor de una estantería lejana no tienen tiempo suficiente para llegar a outbound antes de que expire el deadline, especialmente con congestión de navegación. Un robot heavy desde shelf_9 (x≈18, y≈10) hasta outbound (x=0-2, y=0-1) necesita ~100 pasos con posibles backoffs → ~90-100 segundos reales.
+
+**Justificación**: `delta_t(120)` da margen suficiente para el robot más lento en el peor caso de distancia. El enunciado especifica que ΔT es configurable y debe justificarse en la memoria.
+
+### Fix: navegación a outbound bloqueada por zona de entrada (`common.asl`)
+
+**Problema**: el layout del grid tiene el outbound en x=0-2, la clasificación/expansión en x=3-4, y la entrada en x=5-7, todas en y=0-1. Cuando un robot navegaba hacia outbound desde las estanterías (lado derecho), la ruta greedy cruzaba y=0-1 horizontalmente pasando por la zona de entrada (x=5-7) donde podían estar contenedores re-encolados. Si cuatro robots bloqueaban las cuatro celdas adyacentes al robot, éste quedaba atrapado indefinidamente.
+
+**Solución final — regla de 3 pasos** en `common.asl`: garantiza que el robot **nunca entra en y=0-1 mientras está en x≥3** de camino a outbound. Solo aplica a outbound (TX<3); la expansión (x=3-4) se excluye deliberadamente para evitar congestión en y=2 cuando varios robots hacen expansion_drop simultáneamente.
+
+```agentspeak
+// Paso 1: subir a y=2 en la columna actual   → (X, 2)
+// Paso 2: deslizarse a la columna destino    → (TX, 2)
+// Paso 3: bajar al destino                  → (TX, TY)
++!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & (X \== TX | Y \== 2) <-
+    !navigate(X, 2);
+    !navigate(TX, 2);
+    !navigate(TX, TY).
+```
+
+La guarda `(X \== TX | Y \== 2)` detiene la recursión cuando el robot ya está en `(TX, 2)`.
+
+Se añadieron dos reglas simétricas para salir de la zona izquierda (x<5, y<2):
+
+```agentspeak
+// Hacia el este con cualquier destino: subir a y=2 antes de cruzar x=5-7.
+// Sin esta regla, el robot intentaba cruzar y=0-1 en x=5-7 (zona de entrada),
+// bloqueado por contenedores re-encolados si el robot está en expansión (x=3-4).
++!navigate(TX, TY) : TX >= 5 & robot_pos(X, Y) & X < 5 & Y < 2 <-
+    !navigate(X, 2);
+    !navigate(TX, TY).
+```
+
+### Mejoras de documentación y calidad de código (`WarehouseArtifact.java`, todos los `.asl`)
+
+Revisión completa de comentarios en todos los ficheros del proyecto:
+
+- **Traducción**: todos los comentarios en inglés traducidos al castellano en `WarehouseArtifact.java` y en los cuatro robots (`robot_heavy`, `robot_heavy2`, `robot_medium`, `robot_light`), `common.asl`, `scheduler.asl` y `supervisor.asl`.
+
+- **Comentarios explicativos añadidos** (solo donde el WHY no es obvio):
+  - `WarehouseArtifact.java`: bloque `synchronized` en `executeMoveStep` (qué protege y por qué el check externo queda fuera), `setDaemon(true)` (terminación automática con JVM), `putIfAbsent` en `executeClaimContainer` (atomicidad frente a reclamaciones concurrentes), drop de seguridad en `executeReleaseTask` (sincronización Java cuando Jason ya reseteó `carrying`), sort por distancia en `executeMoveToExpansion` (minimizar trayecto), no re-emit en `executeDropInExpansion` (cadena de responsabilidad va por scheduler), `emitShelfAvailable` en `executePickupFromShelf` (restaurar disponibilidad tras retirada).
+  - `common.asl`: `.wait(zone_granted)` — patrón Jason de suspensión por creencia sin polling; `!release_zone : true <- true` — idempotencia.
+  - Robots (×4): `nav_limit` — contador anti-bucle infinito en navigate; `corridor_row` — marcado como legacy sin uso en ninguna regla actual.
+  - `scheduler.asl`: conversión `DT*1000` a ms para `.wait`; semántica de `T1 = T0+DT` (fase no urgente arranca al terminar la urgente); ventana `2·ΔT` para la fase no urgente; `active_exit_cycle` — exclusión mutua entre ciclos.
+  - `supervisor.asl`: mecanismo de cola del mutex de zona (concesión directa, encolado único, transferencia sin pasar por `zone_free`); `deadline_checked` — previene doble notificación entre monitor periódico y handler de retracción.
+
+### Fix: Bug 6 (parcial) — desincronización Java-Jason durante ciclo de salida y expansion_drop (`common.asl`, 4 robots)
+
+**Problema**: cuando `path_blocked` u otro error de navegación ocurría mientras un robot portaba un contenedor en dos contextos críticos, el handler reactivo genérico reseteaba `state(idle)` y `carrying(none)` en Jason sin acción Java correspondiente, causando:
+- Durante `!execute_exit` (ciclo de salida): el robot quedaba físicamente portando el contenedor indefinidamente. La zona `outbound` nunca se liberaba, bloqueando a cualquier otro robot que esperase adquirirla.
+- Durante `!safe_expand_drop`: misma desincronización pero con la zona `expansion`.
+
+**Solución**: handlers contextuales que inhiben el reset de estado según el contexto activo, dejando que la jerarquía de planes gestione el fallo:
+
+```agentspeak
+// Durante ciclo de salida: no resetear — propaga a -!execute_exit : exit_picked
++error(path_blocked, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
+
+// Durante expansion_drop: no resetear — propaga a -!safe_expand_drop
++error(path_blocked, Data) : holding_zone(expansion) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
+
+// Caso general: reset normal
++error(path_blocked, Data) : true <-
+    .my_name(Me);
+    .send(supervisor, tell, robot_error(Me, path_blocked, Data));
+    -+state(idle); -+carrying(none).
+```
+
+Aplica a `path_blocked`, `route_blocked`, `too_far` e `illegal_move` en los 4 robots.
+
+`drop_at_outbound` añade límite de 3 reintentos: al agotarse propaga `.fail` a `!execute_exit`, cuyo handler de fallo (`exit_picked`) devuelve el contenedor a la estantería o llama `unclaim_container`.
+
+### Fix: `check_queue` ignora contenedores bloqueados durante ciclo de salida (4 robots)
+
+**Problema**: al terminar una tarea durante el ciclo de salida (`blocked_type(standard)` activo), `check_queue` detectaba contenedores en entrada que encajaban en capacidad pero estaban bloqueados. Decidía no volver a base (había trabajo "disponible"), pero luego `check_pending_containers` no podía reclamarlos. El robot quedaba parado en su posición actual hasta que el ciclo terminase.
+
+**Solución**: añadir `not blocked_type(Type)` a la condición de `check_queue` en los 4 robots:
+
+```agentspeak
+if (container_at_entrance(_, Type, Weight, W, H) &
+        not blocked_type(Type) &          // ← nuevo
+        not (Weight > 10) & ...) {
+    -+state(idle)
+} else {
+    -+state(returning); !navigate(InitX, InitY); -+state(idle)
+}.
+```
+
+### Fix: restauración de tracking de errores de robot (`supervisor.asl`, 4 robots, `WarehouseArtifact.java`)
+
+**Problema**: el refactor a pull-protocol (`ba48854`) eliminó el handler `+robot_error[source(Robot)]` del supervisor que populaba `navigation_error_occurred`, dejando las queries (`.findall`, `.count`) como código muerto. Adicionalmente, los handlers para `not_carrying`, `invalid_pickup`, `invalid_drop` y `robot_not_found` en los robots no enviaban al supervisor, y Java no emitía `robot_not_found`.
+
+**Solución**:
+- **Supervisor**: handler `+robot_error(Robot, ErrorType, Data)[source(_)]` que añade `navigation_error_occurred` y recalcula `total_errors` combinando errores de contenedor y de robot. Sección de impresión `!print_nav_error_list` restaurada en el reporte periódico.
+- **4 robots**: handlers específicos para `robot_not_found`, `not_carrying`, `invalid_pickup` e `invalid_drop` que envían `robot_error` al supervisor antes de resetear estado.
+- **Java**: `addError(agName, "robot_not_found", agName)` en `executeMoveStep` y `executePickup` cuando `robots.get(agName)` devuelve null.
+
+El reporte periódico ahora diferencia errores de contenedor (p.ej. `no_shelf_space`) de errores de robot (p.ej. `path_blocked (robot): N`).
+
+### Fix: posiciones base de robots desplazadas a y=4 (`WarehouseArtifact.java`, 4 robots)
+
+**Problema**: las bases de los 4 robots estaban en y=3 (1,3), (2,3), (3,3), (4,3). El corredor y=3 es la ruta principal de regreso a base. Con robots idle aparcados en ese corredor, los demás robots navegando de vuelta al home lo encontraban bloqueado, lo que causaba que `step_with_retry` agotase sus intentos, `check_queue` fallase y el robot quedase parado lejos de su base.
+
+**Solución**: desplazar todas las bases a y=4: (1,4), (2,4), (3,4), (4,4). y=4 es un corredor libre entre las estanterías pequeñas (y=2-3) y las medianas (y=6-7), sin conflicto con ninguna ruta de navegación.
+
+### Fix: navegación a outbound bloqueada por celdas SHELF en columnas de estanterías (`common.asl`)
+
+**Problema**: la regla de 3 pasos para X≥9 usaba `!navigate(9,2)` como primer paso desde cualquier posición. Cuando el robot estaba en, por ejemplo, (10,9) —adyacente a shelf_8— `step_with_retry` priorizaba la dirección Y (más larga), intentaba subir por X=10. Las celdas (10,2) y (10,3) son SHELF → bloqueado → path_backoff enviaba el robot hacia abajo → bucle vertical arriba-abajo sin llegar nunca a outbound.
+
+**Solución**: regla de 4 pasos que garantiza entrada limpia al corredor x=9 antes de ascender:
+
+```agentspeak
++!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & X >= 9 <-
+    !navigate(9, Y);   // paso horizontal puro al corredor x=9 (sin estanterías)
+    !navigate(9, 2);   // sube por x=9 (siempre libre)
+    !navigate(TX, 2);  // desliza a la columna destino por y=2
+    !navigate(TX, TY). // baja al outbound
+```
+
+### Fix: `move_to_outbound` llena y=0 primero para no bloquear el acceso (`WarehouseArtifact.java`)
+
+**Problema inicial**: con la navegación de 4 pasos el robot llegaba siempre por y=2, por lo que y=1 era el primer paso natural. Se invirtió el comparador para preferir y=1 (`Integer.compare(b[1], a[1])`), evitando el paso extra hacia y=0.
+
+**Problema derivado**: al llenarse y=1 primero, las celdas de y=0 quedaban inaccesibles físicamente — los containers en y=1 bloqueaban el único camino desde y=2 hacia y=0. El outbound efectivo pasaba de 6 a 3 celdas útiles.
+
+**Solución**: revertir a preferir y=0 primero (`Integer.compare(a[1], b[1])`). El fondo se llena antes y y=1 queda libre como pasillo de acceso. El bucle arriba-abajo en reintento ya no ocurre gracias al guard `Y>=2` añadido en la regla de navegación para X<9 (ver entrada siguiente).
+
+### Fix: guard `Y>=2` en regla navigate para X<9 hacia outbound (`common.asl`)
+
+**Problema**: al reintentar `drop_at_outbound` desde una posición ya en outbound (y=0 o y=1), la regla de 3 pasos para X<9 disparaba igualmente porque solo comprobaba `TX<3 & TY<2 & X<9`. El robot subía innecesariamente a y=2 antes de volver a bajar — bucle arriba-abajo visible en logs como movimientos repetidos en la misma columna.
+
+**Solución**: añadir guard `Y>=2` a la regla para que solo dispare cuando el robot se aproxima desde arriba del corredor, no cuando ya está dentro del outbound:
+
+```agentspeak
++!navigate(TX, TY) : TX < 3 & TY < 2 & robot_pos(X, Y) & X < 9 & Y >= 2 & (X \== TX | Y \== 2) <-
+    !navigate(X, 2);
+    !navigate(TX, 2);
+    !navigate(TX, TY).
+```
+
+Cuando el robot está en y=0 o y=1 (Y<2), la regla no dispara y `step_with_retry` lleva directamente al destino sin subir.
+
+### Fix: `shelf_wait` se borraba prematuramente al reclamar otro robot (`common.asl`)
+
+**Problema**: existía la regla:
+
+```agentspeak
+-container_at_entrance(CId,_,_,_,_) : shelf_wait(CId) <- -shelf_wait(CId).
+```
+
+Esta regla disparaba cuando **cualquier** robot reclamaba el container (retractando `container_at_entrance`), borrando el cooldown del robot que lo había soltado. El robot sin cooldown volvía a reclamar el mismo container inmediatamente, sin estantería disponible, entrando en un ciclo infinito de fallo-reclamación-fallo.
+
+**Solución**: eliminar esa regla completamente. El cooldown expira únicamente por tiempo (`.wait(20000)`), independientemente de qué robot reclame el container.
+
+### Fix: doble-cleanup en `pick_shelf` / `select_shelf_and_execute` (`common.asl`)
+
+**Problema**: cuando `!pick_shelf` agotaba 3 reintentos, su handler de fallo hacía el cleanup completo (unclaim, release, check_queue) pero no llamaba `.fail`. Esto hacía que `?shelf_selected` fallase en `!select_shelf_and_execute`, que también ejecutaba su propio handler de fallo con el mismo cleanup. Resultado: `unclaim_container` y `release_task` llamados dos veces, el mensaje "Container re-queued" aparecía duplicado.
+
+**Solución**: el handler N≥3 de `pick_shelf` solo notifica al supervisor, activa `shelf_wait` y llama `.fail`. Todo el cleanup (unclaim, release, check_queue) queda consolidado únicamente en `-!select_shelf_and_execute`.
+
+### Fix: `pick_shelf` reducido a 1 reintento con 3s de espera (`common.asl`)
+
+**Problema**: los 3 reintentos con 5s de espera (~15s total) retrasaban la detección de saturación y bloqueaban la celda de entrada durante ese tiempo. Sin reintentos (fallo inmediato), múltiples robots fallaban simultáneamente antes de que `blocked_type` se propagase, congestionando la zona inbound con containers re-encolados y causando Bug 6 cuando un robot portando un container no podía salir de la zona.
+
+**Solución**: 1 reintento con 3s de espera. Durante esos 3s el robot retiene el container (no lo devuelve a la entrada), evitando la congestión. `blocked_type` llega en <1s, así que el reintento ya lo ve activo. El ciclo de salida empieza como máximo 3s después del primer fallo. `shelf_wait` reducido de 20s a 5s — margen suficiente para que `blocked_type` se propague antes de que `container_at_entrance` re-dispare el claim.
+
+### Fix: `exit_cycle` solo elimina el ciclo completado, re-dispara pendientes (`scheduler.asl`)
+
+**Problema**: `.abolish(exit_cycle(_, _))` borraba TODOS los ciclos de salida al terminar el primero. Si dos tipos saturaban simultáneamente, el segundo ciclo se perdía aunque `blocked_type` seguía activo para ese tipo.
+
+**Solución**: `-exit_cycle(Type, T0)` elimina solo el ciclo completado. Al terminar, `.findall` recoge los ciclos pendientes de otros tipos y los re-dispara con `-exit_cycle(PT, PT0); +exit_cycle(PT, PT0)` para que `+exit_cycle` vuelva a activarse.
+
+### Fix: `shelf_available` desbloquea correctamente el tipo saturado (`scheduler.asl`)
+
+**Problema**: el plan `+shelf_available(ShelfId) : blocked_type(Type) & shelf_for(Type, _, ShelfId)` nunca disparaba. `shelf_for` usa átomos (`urgent`/`non_urgent`) pero `blocked_type` usa strings de tipo de contenedor (`"standard"`, `"fragile"`). La unificación `blocked_type(Type) & shelf_for(Type, _, ShelfId)` fallaba silenciosamente — el desbloqueo automático al liberar espacio nunca funcionaba.
+
+**Solución**: separar en dos planes usando `urgent_container_type`/`non_urgent_container_type` de `common.asl` para el mapeo correcto entre átomos de urgencia y strings de tipo. Añadido `untell blocked_type` a todos los robots al desbloquear (el scheduler había enviado `tell` a todos al inicio del ciclo).
+
+### Fix: `run_exit_cycle` ejecuta solo la fase relevante al tipo saturado (`scheduler.asl`)
+
+**Problema**: el ciclo siempre ejecutaba ambas fases (urgente ΔT + non_urgent 2·ΔT) independientemente del tipo que saturó. Cuando saturaba `standard` (estanterías non_urgent), la fase urgente evacuaba estanterías urgent (zona diferente), sin liberar espacio para standard. Los robots heavy quedaban idle durante ΔT=120s sin nada que evacuar.
+
+**Solución**: dos planes `!run_exit_cycle` separados por contexto:
+- `urgent_container_type(Type)` → solo fase urgente (ΔT)
+- `non_urgent_container_type(Type)` → solo fase non_urgent (2·ΔT) directamente
+
+Los robots pesados empiezan a evacuar shelf_9 inmediatamente cuando standard satura, sin esperar 120s.
+
+### Fix: `move_to_outbound` excluye celdas ocupadas por robots (`WarehouseArtifact.java`)
+
+**Problema**: `move_to_outbound` seleccionaba celdas outbound libres de containers (`!hayContenedorEn`) pero no comprobaba si había un robot parado en esa celda. Un robot idle en outbound tras entregar su container bloqueaba la celda físicamente. Otro robot navegaba hacia esa celda como target, fallaba `drop_in_outbound`, y el handler genérico reseteaba `state(idle)` + `carrying(none)` en Jason mientras Java seguía viendo al robot portando el container → Bug 6 desync.
+
+**Solución**: añadir `!hayRobotCerca(x, y)` a la condición de selección de celda. El método ya existía en el código. Una línea cambiada.
+
+### Limitación identificada: desbordamiento de zona de entrada durante ciclos largos (`WarehouseArtifact.java`)
+
+Cuando el ciclo de salida bloquea un tipo de container durante 2·ΔT (240s) y la generación de containers es continua, la zona de entrada (6 celdas, x=5-7, y=0-1) puede recibir más containers de los que puede alojar físicamente. El fallback de Java (`container.setPosition(5,0)`) apila todos los excedentes en la misma celda — `hayContenedorEn` solo detecta uno por celda, por lo que los demás quedan invisibles para los robots o se solapan físicamente.
+
+No se corrige porque el problema está en el diseño del generador del entorno Java, fuera del alcance de la lógica de agentes. Los robots, supervisor y scheduler funcionan correctamente — el tipo está bloqueado, los robots no intentan guardar containers bloqueados. La pérdida ocurre en la capa de percepción del entorno. Documentado como limitación de diseño del enunciado.
+
+### Fix: secondary path de detección de saturación corregido (`supervisor.asl`)
+
+**Problema**: el plan `-shelf_available(ShelfId)` usaba `shelf_type(ShelfId, Type)` que devuelve átomos de urgencia (`urgent`/`non_urgent`), pero el scheduler espera strings de tipo de contenedor (`"standard"`, `"fragile"`, `"urgent"`). El secondary path enviaba `no_shelf_space(urgent)` (átomo) que no unificaba con ningún handler útil — la detección de saturación por percept del entorno llevaba rota desde su introducción en `ce07742`.
+
+**Solución**: separado en dos planes con lógica diferenciada:
+- **urgent**: mapea directamente a `storage_full("urgent", T)`
+- **non_urgent**: busca con `.findall` qué tipos de container están realmente almacenados en estanterías non_urgent (`container_stored_fact` + `container_received_type`) y notifica solo esos. Fallback a ambos tipos (`"standard"` y `"fragile"`) si la lista está vacía.
+- **Deduplicación**: plan auxiliar `!notify_unique_types` con acumulador `Seen` evita notificar el mismo tipo dos veces cuando hay mezcla de standard y fragile en las mismas estanterías.
+
+### Limitación identificada: generador de containers apila excedentes en (5,0) (`WarehouseArtifact.java`)
+
+Cuando la zona de entrada (x=5-7, y=0-1, 6 celdas) está completamente ocupada, el generador coloca el nuevo container en (5,0) como fallback (`351fe3a`, originalmente en (0,0)). `hayContenedorEn` solo detecta un container por celda, por lo que los containers apilados quedan invisibles para los robots.
+
+La solución obvia (pausar el generador hasta que haya celda libre) cambiaría la tasa de generación definida en el enunciado, enmascarando la presión real del sistema. Se decide no corregir: el desbordamiento solo ocurre en escenarios extremos y con el ciclo reducido a 2·ΔT la ventana de riesgo es menor. Limitación de diseño del entorno Java aceptada.
+
+### Limitación identificada: Bug 6 — desincronización Java-Jason en tránsito normal (`common.asl`, 4 robots)
+
+El caso de `execute_task` durante tránsito normal a estantería tiene dos rutas de cleanup solapadas: cuando `path_blocked` llega tras pickup, el handler genérico resetea `carrying(none)` en Jason sin drop Java; luego `-!execute_task : not carrying(CId)` detecta la inconsistencia y llama `unclaim_container`, que en Java encuentra al robot portando el container (`wasCarrying=true`) y lo deposita en entrada correctamente. El resultado final es correcto — ningún container se pierde, ningún robot queda atascado — pero la doble ruta es un smell de diseño.
+
+---
+
+### Revert: capacidad de estanterías heavy restaurada al valor original del profesor (`WarehouseArtifact.java`, `common.asl`)
+
+**Contexto**: el commit `c83f02b` cambió las estanterías heavy (shelf_8, shelf_9) de 200kg/20 contenedores a 350kg/6 contenedores "for testing". El valor nunca se revirtió y quedó en el código.
+
+**Cambio**: restauradas a los valores del primer commit del repositorio (`ba10c8c`): **200kg, 20 contenedores**. Actualizado también el belief estático `shelf_max_weight` en `common.asl` (lines 62-63) de 350 a 200 para que la selección autónoma de estantería (`pick_shelf`) use el mismo límite que Java.
+
+**Impacto**: con 200kg de capacidad, las estanterías heavy saturan antes (2-3 contenedores pesados consecutivos pueden llenarlas), lo que activa el ciclo de salida con mayor frecuencia. Es el comportamiento correcto según el enunciado.
+
+---
+
+### Fix: entrega directa a outbound durante ciclo de salida — Mejora 4 (`common.asl`)
+
+**Problema**: cuando un ciclo de salida (`active_deadline`) estaba activo para un tipo de contenedor, los robots seguían intentando almacenar contenedores de ese tipo en estanterías llenas, entrando en un loop de reclaim→fallo→unclaim sin contribuir al ciclo. En el caso base ("store-then-exit"), un robot almacenaba un contenedor y lo sacaba inmediatamente en el mismo ciclo, generando dos viajes innecesarios.
+
+**Solución — tres puntos de intercepción en `common.asl`**:
+
+1. **Guard en `select_shelf_and_execute`**: plan con mayor especificidad que comprueba `active_deadline` para el tipo del contenedor antes de buscar estantería. Si hay deadline activo, llama directamente a `execute_task(CId, direct_outbound)` sin pasar por `pick_shelf`.
+
+2. **Handler en `-!pick_shelf`**: para contenedores que ya estaban en el loop de reintentos cuando arrancó el deadline, el failure handler detecta el deadline activo, limpia `shelf_retried` y pone `shelf_selected(CId, direct_outbound)` — tiene éxito en lugar de fallar, permitiendo que `select_shelf_and_execute` continúe hacia `execute_task(CId, direct_outbound)`.
+
+3. **Plan compartido `execute_task(CId, direct_outbound)`**: el robot va al contenedor en inbound, lo recoge, y lo entrega directamente al outbound. Envía `container_stored(CId, direct_outbound)` al supervisor y al scheduler (para mantener la contabilidad de pendientes correcta) y `container_delivered(CId)` al supervisor.
+
+**Resultado observable**: los logs muestran `[Robot] Exit cycle activo para tipo X: entrega directa de container_Y` y `[Robot] Entrega directa: container_Y → outbound`. El transport recoge esos contenedores en el siguiente ciclo.
+
+**Caso pendiente**: cuando el scheduler reasigna un contenedor re-encolado con ShelfId específico, el robot acepta via `+state(idle) : task(CId, ShelfId)` y llama `execute_task(CId, ShelfId)` directamente, saltando los tres puntos de intercepción. Documentado en FUTURE_CHANGES.md (Mejora 4, caso pendiente).
+
+---
+
+### Limitación identificada: deadlock de contenedores small/fragile en zona de entrada durante ciclos largos
+
+**Síntoma**: durante el ciclo de salida non_urgent (2·ΔT = 180s), los contenedores fragile y de tamaño pequeño (≤10kg, 1x1) que llegan al inbound se acumulan sin que ningún robot pueda alcanzarlos. robot_light entra en un bucle de `nav_failed` indefinido: intenta llegar a un contenedor, falla 3 veces, espera 20s, reintenta — y vuelve a fallar porque el camino sigue bloqueado.
+
+**Causa encadenada**:
+
+1. `blocked_type("standard")` activo durante el ciclo bloquea los contenedores standard en el inbound (6 celdas). Nadie los mueve.
+2. Los contenedores fragile y small que llegan al inbound (container_6, container_14, container_17, container_18...) tampoco están bloqueados — pero sus celdas adyacentes están ocupadas por los standard bloqueados.
+3. Solo robot_light puede manejar contenedores ≤10kg, 1x1. robot_medium/heavy/heavy2 no los reclamarán aunque tengan espacio.
+4. Cuando robot_light hace `!get_to_container(CId, 3)` para llegar al fragile, las celdas adyacentes al contenedor están todas ocupadas (otros contenedores o robots) → 3 intentos fallidos → `nav_failed(CId)` (20s cooldown) → `release_task` (container re-encolado) → pero la situación no cambia → nuevo intento → nuevo fallo.
+5. Cuando el deadline termina y `blocked_type` se elimina, heavy/medium/heavy2 recogen los standard — pero entretanto llegaron más fragile que siguen bloqueando la posición de los anteriores. El deadlock se perpetúa porque los fragile solo los puede mover robot_light, y están todos apilados bloqueándose entre sí.
+
+**Ejemplo observado en logs** (T0=43119s, deadline non_urgent, 2·ΔT=180s):
+- container_6 (fragile, 9.8kg) bloqueado durante ~170s
+- Tras deadline_ended (t=43299): el path sigue bloqueado por containers 14, 17, 18 (todos fragile, solo robot_light los puede mover)
+- robot_light aparece como `working` durante más de 200 segundos sin completar ninguna entrega
+
+**Por qué no se corrige**: la raíz es que el generador del entorno Java sigue produciendo contenedores al mismo ritmo durante el ciclo de salida, y la zona de entrada (6 celdas) no puede absorber 180s de llegadas cuando `blocked_type` retiene los standard. La solución real requeriría pausar/ralentizar el generador durante el ciclo (cambiaría la tasa definida en el enunciado) o dar a robot_light prioridad para evacuar pequeños fragile durante el ciclo (añadiría complejidad al ciclo de salida). Se acepta como limitación de diseño del entorno.
+
+---
+
+### Mejora: log de recogida de outbound visible en consola MAS (`WarehouseArtifact.java`)
+
+**Contexto**: `view.logMessage` solo aparece en la GUI del warehouse, no en la consola del MAS. La recogida periódica del camión era invisible en la consola.
+
+**Cambio**: añadido `System.out.println` junto al `view.logMessage` existente en `executeCollectOutboundContainers`. Solo imprime cuando hay contenedores recogidos (`!collected.isEmpty()`). Formato: `[TRANSPORT] Camión recogió X contenedor(es) del outbound`.
+
+No se corrige: añadir contexto para `execute_task` tránsito (análogo a `exit_picked` o `holding_zone`) requeriría modificar la jerarquía de planes con riesgo de regresiones, sin beneficio observable ya que el comportamiento resultante es correcto. La manifestación visible de Bug 6 (robots con "Busy: NO, Carrying: container_X" atascados en outbound) fue resuelta por el fix de `hayRobotCerca` en `move_to_outbound`.

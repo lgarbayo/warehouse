@@ -1,7 +1,20 @@
 package warehouse;
 
 /**
- * Representa un robot reponedor en el almacén
+ * Representa un robot reponedor en el almacén.
+ *
+ * Los robots son agentes BDI (Jason) que interactúan con el entorno Java a través
+ * de acciones primitivas (move_step, pickup, drop_at, etc.). Esta clase mantiene el
+ * estado físico del robot visible para el entorno:
+ * posición (x, y): actualizada en cada move_step exitoso.
+ * carriedContainer: el contenedor que transporta actualmente (null si libre).
+ * busy: true mientras el robot tiene una tarea asignada.
+ *
+ * La diferenciación de velocidad entre robots (speed: light=3, medium=2, heavy=1)
+ * es solo metadato informativo. La velocidad de navegación (move_step) es igual para
+ * todos (300ms/paso en Java). Las diferencias de timing reales están en los .wait()
+ * de execute_task: light=500ms, medium=600ms, heavy=800ms entre fases de recogida
+ * y depósito, simulando el tiempo proporcional al peso del contenedor manipulado.
  */
 public class Robot {
     private final String id;
@@ -9,9 +22,7 @@ public class Robot {
     private final double maxWeight;
     private final int maxWidth;
     private final int maxHeight;
-    private final int speed; // velocidad (alta=3, media=2, baja=1) — metadato informativo,
-                                // el BFS no usa este valor; las diferencias de timing se
-                                // aplican en los .wait() de los archivos .asl de cada robot
+    private final int speed; // metadato: alta=3 (light), media=2 (medium), baja=1 (heavy)
     private int x, y;
     private Container carriedContainer;
     private boolean busy;

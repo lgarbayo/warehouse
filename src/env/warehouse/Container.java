@@ -3,7 +3,18 @@ package warehouse;
 import java.util.*;
 
 /**
- * Representa un contenedor en el almacén
+ * Representa un contenedor en el almacén.
+ *
+ * Ciclo de vida:
+ * generado por el hilo ContainerGenerator con posición en zona ENTRANCE.
+ * reclamado atómicamente por un robot (picked=true durante el transporte).
+ * depositado en una estantería (assignedShelf != null) o en zona de expansión.
+ * recogido de la estantería durante el ciclo de salida y entregado a OUTBOUND.
+ * eliminado del sistema por el agente transport (collect_outbound_containers).
+ *
+ * El campo broken=true marca contenedores destruidos por la mecánica de aplastamiento
+ * (robot ocupa la misma celda que el contenedor). Estos contenedores se eliminan del mapa
+ * pero la percepción container_broken se mantiene para auditoría.
  */
 public class Container {
     private final String id;
@@ -11,21 +22,21 @@ public class Container {
     private final int height;
     private final double weight;
     private final String type; // "standard", "fragile", "urgent"
-    private boolean picked;
-    private boolean broken;
+    private boolean picked;    // true mientras un robot lo transporta físicamente
+    private boolean broken;    // true si fue aplastado (destruido permanentemente)
     private String assignedShelf;
-    private int x, y; // posición actual
-    
+    private int x, y; // posición actual en el grid (−1 hasta la primera colocación)
+
     public Container(String id, int width, int height, double weight, String type) {
         this.id = id;
         this.width = width;
         this.height = height;
         this.weight = weight;
         this.type = type;
-        this.picked = false;   // true mientras un robot lo transporta
-        this.broken = false;   // true si fue aplastado (destruido permanentemente)
+        this.picked = false;
+        this.broken = false;
         this.assignedShelf = null;
-        this.x = -1;           // -1 hasta que el generador lo coloca en una celda ENTRANCE
+        this.x = -1; // -1 hasta que el generador lo coloca en una celda ENTRANCE
         this.y = -1;
     }
     
