@@ -533,6 +533,8 @@ nav_limit(300).
     .my_name(Me); .send(supervisor, tell, robot_error(Me, too_far, Data)).
 +error(too_far, Data) : exit_picked(_) <-
     .my_name(Me); .send(supervisor, tell, robot_error(Me, too_far, Data)).
++error(too_far, Data) : exit_claimed(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, too_far, Data)).
 +error(too_far, Data) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_error(Me, too_far, Data));
@@ -541,6 +543,8 @@ nav_limit(300).
 +error(route_blocked, Data) : holding_zone(expansion) <-
     .my_name(Me); .send(supervisor, tell, robot_error(Me, route_blocked, Data)).
 +error(route_blocked, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, route_blocked, Data)).
++error(route_blocked, Data) : exit_claimed(_) <-
     .my_name(Me); .send(supervisor, tell, robot_error(Me, route_blocked, Data)).
 +error(route_blocked, Data) : true <-
     .my_name(Me);
@@ -551,6 +555,8 @@ nav_limit(300).
     .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
 +error(path_blocked, Data) : exit_picked(_) <-
     .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
++error(path_blocked, Data) : exit_claimed(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, path_blocked, Data)).
 +error(path_blocked, Data) : true <-
     .my_name(Me);
     .send(supervisor, tell, robot_error(Me, path_blocked, Data));
@@ -559,6 +565,8 @@ nav_limit(300).
 +error(illegal_move, Data) : holding_zone(expansion) <-
     .my_name(Me); .send(supervisor, tell, robot_error(Me, illegal_move, Data)).
 +error(illegal_move, Data) : exit_picked(_) <-
+    .my_name(Me); .send(supervisor, tell, robot_error(Me, illegal_move, Data)).
++error(illegal_move, Data) : exit_claimed(_) <-
     .my_name(Me); .send(supervisor, tell, robot_error(Me, illegal_move, Data)).
 +error(illegal_move, Data) : true <-
     .my_name(Me);

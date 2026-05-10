@@ -189,7 +189,7 @@ public class WarehouseArtifact extends Environment {
 
         // Fila de estanterías grandes
         for (int x = 10; x < 16; x += 4) {
-            Shelf shelf = new Shelf("shelf_" + shelfId++, x, 10, 4, 3, 350, 6);
+            Shelf shelf = new Shelf("shelf_" + shelfId++, x, 10, 4, 3, 200, 20);
             shelves.put(shelf.getId(), shelf);
             for (int dx = 0; dx < 4; dx++) {
                 for (int dy = 0; dy < 3; dy++) {
@@ -335,10 +335,20 @@ public class WarehouseArtifact extends Environment {
                 }
             }
         }
-        if (entranceCells.isEmpty()) {
-            // ENTRANCE llena, colocar en (5,0) como fallback (primera celda de la zona de entrada)
-            container.setPosition(5, 0);
-        } else {
+        // Si no hay celdas libres, esperar hasta que se libere una en lugar de apilar
+        // en (5,0). El apilado hace el container invisible para los robots (hayContenedorEn
+        // solo detecta uno por celda), efectivamente perdiéndolo del sistema.
+        while (entranceCells.isEmpty() && running) {
+            try { Thread.sleep(500); } catch (InterruptedException e) { break; }
+            entranceCells.clear();
+            for (int x = 0; x < GRID_WIDTH; x++) {
+                for (int y = 0; y < GRID_HEIGHT; y++) {
+                    if (grid[x][y] == CellType.ENTRANCE && !hayContenedorEn(x, y))
+                        entranceCells.add(new int[]{x, y});
+                }
+            }
+        }
+        if (!entranceCells.isEmpty()) {
             int[] cell = entranceCells.get(rand.nextInt(entranceCells.size()));
             container.setPosition(cell[0], cell[1]);
         }
@@ -1080,7 +1090,10 @@ public class WarehouseArtifact extends Environment {
                     }
                 }
             }
-            if (cells.isEmpty()) return false;
+            if (cells.isEmpty()) {
+                addPercept("transport", ASSyntax.parseLiteral("outbound_full"));
+                return false;
+            }
 
             cells.sort((a, b) -> {
                 // Preferir y=0 sobre y=1: se llena el fondo primero para que y=1 quede
@@ -1159,9 +1172,12 @@ public class WarehouseArtifact extends Environment {
                 claimedContainers.remove(cId);
                 removePerceptsByUnif(ASSyntax.parseLiteral("container_at_entrance(\"" + cId + "\",_,_,_,_)"));
             }
-            if (!collected.isEmpty() && view != null) {
-                view.logMessage("🚛 [TRANSPORT] Camión recogió " + collected.size() + " contenedor(es) del outbound");
-                view.update();
+            if (!collected.isEmpty()) {
+                System.out.println("🚛 [TRANSPORT] Camión recogió " + collected.size() + " contenedor(es) del outbound");
+                if (view != null) {
+                    view.logMessage("🚛 [TRANSPORT] Camión recogió " + collected.size() + " contenedor(es) del outbound");
+                    view.update();
+                }
             }
             return true;
         } catch (Exception e) {

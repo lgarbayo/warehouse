@@ -1573,4 +1573,40 @@ La solución obvia (pausar el generador hasta que haya celda libre) cambiaría l
 
 El caso de `execute_task` durante tránsito normal a estantería tiene dos rutas de cleanup solapadas: cuando `path_blocked` llega tras pickup, el handler genérico resetea `carrying(none)` en Jason sin drop Java; luego `-!execute_task : not carrying(CId)` detecta la inconsistencia y llama `unclaim_container`, que en Java encuentra al robot portando el container (`wasCarrying=true`) y lo deposita en entrada correctamente. El resultado final es correcto — ningún container se pierde, ningún robot queda atascado — pero la doble ruta es un smell de diseño.
 
+---
+
+### Revert: capacidad de estanterías heavy restaurada al valor original del profesor (`WarehouseArtifact.java`, `common.asl`)
+
+**Contexto**: el commit `c83f02b` cambió las estanterías heavy (shelf_8, shelf_9) de 200kg/20 contenedores a 350kg/6 contenedores "for testing". El valor nunca se revirtió y quedó en el código.
+
+**Cambio**: restauradas a los valores del primer commit del repositorio (`ba10c8c`): **200kg, 20 contenedores**. Actualizado también el belief estático `shelf_max_weight` en `common.asl` (lines 62-63) de 350 a 200 para que la selección autónoma de estantería (`pick_shelf`) use el mismo límite que Java.
+
+**Impacto**: con 200kg de capacidad, las estanterías heavy saturan antes (2-3 contenedores pesados consecutivos pueden llenarlas), lo que activa el ciclo de salida con mayor frecuencia. Es el comportamiento correcto según el enunciado.
+
+---
+
+### Fix: entrega directa a outbound durante ciclo de salida — Mejora 4 (`common.asl`)
+
+**Problema**: cuando un ciclo de salida (`active_deadline`) estaba activo para un tipo de contenedor, los robots seguían intentando almacenar contenedores de ese tipo en estanterías llenas, entrando en un loop de reclaim→fallo→unclaim sin contribuir al ciclo. En el caso base ("store-then-exit"), un robot almacenaba un contenedor y lo sacaba inmediatamente en el mismo ciclo, generando dos viajes innecesarios.
+
+**Solución — tres puntos de intercepción en `common.asl`**:
+
+1. **Guard en `select_shelf_and_execute`**: plan con mayor especificidad que comprueba `active_deadline` para el tipo del contenedor antes de buscar estantería. Si hay deadline activo, llama directamente a `execute_task(CId, direct_outbound)` sin pasar por `pick_shelf`.
+
+2. **Handler en `-!pick_shelf`**: para contenedores que ya estaban en el loop de reintentos cuando arrancó el deadline, el failure handler detecta el deadline activo, limpia `shelf_retried` y pone `shelf_selected(CId, direct_outbound)` — tiene éxito en lugar de fallar, permitiendo que `select_shelf_and_execute` continúe hacia `execute_task(CId, direct_outbound)`.
+
+3. **Plan compartido `execute_task(CId, direct_outbound)`**: el robot va al contenedor en inbound, lo recoge, y lo entrega directamente al outbound. Envía `container_stored(CId, direct_outbound)` al supervisor y al scheduler (para mantener la contabilidad de pendientes correcta) y `container_delivered(CId)` al supervisor.
+
+**Resultado observable**: los logs muestran `[Robot] Exit cycle activo para tipo X: entrega directa de container_Y` y `[Robot] Entrega directa: container_Y → outbound`. El transport recoge esos contenedores en el siguiente ciclo.
+
+**Caso pendiente**: cuando el scheduler reasigna un contenedor re-encolado con ShelfId específico, el robot acepta via `+state(idle) : task(CId, ShelfId)` y llama `execute_task(CId, ShelfId)` directamente, saltando los tres puntos de intercepción. Documentado en FUTURE_CHANGES.md (Mejora 4, caso pendiente).
+
+---
+
+### Mejora: log de recogida de outbound visible en consola MAS (`WarehouseArtifact.java`)
+
+**Contexto**: `view.logMessage` solo aparece en la GUI del warehouse, no en la consola del MAS. La recogida periódica del camión era invisible en la consola.
+
+**Cambio**: añadido `System.out.println` junto al `view.logMessage` existente en `executeCollectOutboundContainers`. Solo imprime cuando hay contenedores recogidos (`!collected.isEmpty()`). Formato: `[TRANSPORT] Camión recogió X contenedor(es) del outbound`.
+
 No se corrige: añadir contexto para `execute_task` tránsito (análogo a `exit_picked` o `holding_zone`) requeriría modificar la jerarquía de planes con riesgo de regresiones, sin beneficio observable ya que el comportamiento resultante es correcto. La manifestación visible de Bug 6 (robots con "Busy: NO, Carrying: container_X" atascados en outbound) fue resuelta por el fix de `hayRobotCerca` en `move_to_outbound`.
