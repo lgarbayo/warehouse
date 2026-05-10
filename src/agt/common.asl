@@ -122,8 +122,12 @@ shelf_max_weight("shelf_9", 200).
 // Si hay deadline activo para el tipo del contenedor atrapado en el retry loop,
 // señalizar outbound como destino: select_shelf_and_execute continuará con
 // ShelfId=direct_outbound y llamará a execute_task(CId, direct_outbound).
+// not shelf_wait(CId): si el contenedor tiene cooldown activo es porque fue él quien causó
+// el no_shelf_space. Esos no van al outbound — esperan a que el ciclo libere espacio.
+// Solo van al outbound los contenedores que llegan durante un deadline ya activo.
 -!pick_shelf(CId, Weight, W, H) :
     claimed_type(CId, Type) &
+    not shelf_wait(CId) &
     ((urgent_container_type(Type) & active_deadline(_, urgent, _)) |
      (non_urgent_container_type(Type) & active_deadline(_, non_urgent, _))) <-
     .my_name(Me);
@@ -394,11 +398,12 @@ shelf_max_weight("shelf_9", 200).
     -reached_outbound(CId);
     !release_zone(outbound).
 
-// Outbound lleno (move_to_outbound no emitió nav_target): esperar sin gastar
-// reintento — el transport limpiará el outbound y se reintentará libremente.
+// Outbound lleno (move_to_outbound no emitió nav_target): Java ya emitió outbound_full
+// y el transport reacciona en < 1s. Esperar 1500ms es suficiente para que la recogida
+// complete antes del reintento, sin bloquear innecesariamente a otros robots.
 -!drop_at_outbound(CId) : not nav_target(_, _) <-
     !release_zone(outbound);
-    .wait(5000);
+    .wait(1500);
     !drop_at_outbound(CId).
 
 // Navegación interrumpida (nav_target existe pero no llegó a celda outbound):

@@ -21,8 +21,8 @@ Se corrigió un bucle de recursión infinita en la regla de navegación `+!navig
 ### Objetivos cumplidos
 
 1. Ciclo de salida activado por tipo de contenedor con instante inicial T0.
-2. Deadline corto (urgentes, T0+ΔT) y deadline largo (no urgentes, T0+3ΔT) no solapados.
-3. Solo un deadline activo en cada instante.
+2. Deadline corto (urgentes, ΔT) y deadline largo (no urgentes, 2·ΔT) implementados y no solapados. **Decisión de diseño**: el ciclo activa solo la fase correspondiente al tipo que saturó — si saturan no urgentes, la fase urgente no se ejecuta porque no libera espacio en estanterías non_urgent. Esta decisión está documentada en detalle más adelante (Fix: `run_exit_cycle` ejecuta solo la fase relevante).
+3. Solo un deadline activo en cada instante (mutex `active_exit_cycle`).
 4. Robots deciden autónomamente qué contenedor transportar sin asignaciones explícitas.
 5. Agente Transport creado para simular recogida de contenedores del OUTBOUND.
 6. Fix bug #4 (iteración 2): `askOne` eliminado del ciclo de salida.
@@ -229,14 +229,24 @@ Los tres robots reescriben su arquitectura de tareas:
 Los eventos obligatorios se emiten por consola con `.print()` siguiendo el formato:
 
 ```
-EVENT | time=T | agent=scheduler   | type=deadline_started    | data=urgent
-EVENT | time=T | agent=scheduler   | type=deadline_ended      | data=urgent
-EVENT | time=T | agent=scheduler   | type=output_phase_started| data=container_type
-EVENT | time=T | agent=supervisor  | type=no_space_detected   | data=container_type
-EVENT | time=T | agent=robot_id    | type=container_delivered | data=container_id
+EVENT | time=T | agent=scheduler   | type=output_phase_started | data=container_type
+EVENT | time=T | agent=supervisor  | type=no_space_detected    | data=container_type
+EVENT | time=T | agent=scheduler   | type=deadline_started     | data=urgent|non_urgent
+EVENT | time=T | agent=scheduler   | type=deadline_ended       | data=urgent|non_urgent
+EVENT | time=T | agent=robot_id    | type=container_delivered  | data=container_id
+EVENT | time=T | agent=supervisor  | type=deadline_missed      | data=container_id
 ```
 
 `T` es el tiempo en segundos desde medianoche (`H*3600 + M*60 + S`). Formato consistente en todos los agentes.
+
+| Evento | Agente | Cuándo |
+|---|---|---|
+| `output_phase_started` | scheduler | Al activar el ciclo de salida (receipt de `storage_full`) |
+| `no_space_detected` | supervisor | Al detectar que no quedan estanterías disponibles del tipo |
+| `deadline_started` | scheduler | Al iniciar cada fase (urgente o no urgente) |
+| `deadline_ended` | scheduler | Al finalizar cada fase (tras `.wait(DT)`) |
+| `container_delivered` | robot | Tras depositar cada contenedor en zona outbound |
+| `deadline_missed` | supervisor | Por cada contenedor no entregado antes del deadline |
 
 ## Sustitución del algoritmo de pathfinding: BFS → Navegación distribuida en agentes ASL
 
@@ -1068,6 +1078,16 @@ Aplicado en los cuatro robots: `robot_light`, `robot_medium`, `robot_heavy`, `ro
 
 ## Semana 3 — Refactorización y corrección de bugs
 
+### Objetivos cumplidos
+
+1. **Scheduler sin asignación inbound**: el scheduler no asigna tareas ni robots durante el ciclo de entrada. Los robots reclaman contenedores autónomamente desde `+container_at_entrance`.
+2. **Estanterías por tipo**: S1, S5, S8 almacenan contenedores urgentes; S2, S3, S4, S6, S7, S9 almacenan standard y frágiles. Implementado en `common.asl` (`shelf_urgency`) y respetado en `!pick_shelf`.
+3. **Supervisor detecta saturación**: dos vías de detección — via `container_error(CId, no_shelf_space)` de los robots, y reactivamente via `-shelf_available(ShelfId)` cuando el entorno retira el percept. Ambas emiten `EVENT | type=no_space_detected` y notifican al scheduler con `storage_full(Type, T0)`.
+4. **Scheduler bloquea el tipo saturado**: añade `blocked_type(Type)` y lo difunde a todos los robots. Los robots comprueban `not blocked_type(Type)` antes de reclamar nuevos contenedores de ese tipo.
+5. **Robots autónomos durante ciclo de salida**: cada robot consulta su propia base de creencias (`active_deadline`, `stored`) y selecciona qué contenedor evacuar sin asignación explícita del scheduler ni del supervisor.
+
+---
+
 ### Arquitectura: scheduler sin asignación inbound
 
 El scheduler dejó de gestionar el ciclo inbound por completo. Los robots reclaman contenedores autónomamente desde `+container_at_entrance` y seleccionan estanterías con `!pick_shelf` (`common.asl`). El scheduler solo gestiona el ciclo de salida.
@@ -1204,6 +1224,22 @@ pickup_from_shelf ✓ → navegar a outbound ✗ → return_to_shelf ✗
                                           → container_at_entrance emitido
                                           → otro robot lo reclama ✓
 ```
+
+## Semana 4 — Control temporal y detección de deadline_missed
+
+### Objetivos cumplidos
+
+1. **Supervisor conoce T0 y los deadlines activos**: recibe `active_deadline(Phase, Cat, T0)` del scheduler al inicio de cada fase; retira la creencia al final.
+2. **Acceso al tiempo actual**: usa `.time(H, M, S)` para calcular `Tnow = H*3600 + M*60 + S` en el monitor periódico.
+3. **Supervisor consulta estado completo de contenedores**: combina `container_stored_fact`, `container_received_type` y `container_delivered_fact` para saber qué contenedores están en estantería y cuáles han sido entregados.
+4. **Criterio de incumplimiento explícito**:
+   - Urgente: `Tnow >= T0 + DT` y contenedor urgente en estantería sin entregar.
+   - No urgente: `Tnow >= T1 + 2·DT` y contenedor standard/fragile en estantería sin entregar.
+5. **Detección periódica**: `!monitor_deadline` comprueba el criterio cada 5 segundos desde que llega `+active_deadline`.
+6. **Un evento por contenedor incumplido**: `!report_deadline_missed` itera la lista de incumplidos y emite `EVENT | type=deadline_missed | data=container_id` por cada uno.
+7. **No interfiere con la ejecución**: el monitor corre como intención separada, no envía mensajes a robots, no llama acciones Java, y tiene handlers de fallo (`-!monitor_deadline`, `-!report_deadline_missed`) que absorben cualquier error interno silenciosamente.
+
+---
 
 ### Semana 4 — Infraestructura de seguimiento de deadlines
 
