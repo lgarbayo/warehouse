@@ -126,12 +126,13 @@ shelf_max_weight("shelf_9", 200).
 // El robot retiene el container durante el reintento (3s) → la celda de entrada
 // no se libera, evitando congestión en la zona inbound cuando varios robots fallan
 // a la vez. blocked_type llega en <1s, así que el reintento ya lo ve activo.
--!pick_shelf(CId, Weight, W, H) : shelf_retried(CId) <-
+-!pick_shelf(CId, Weight, W, H) : shelf_retried(CId) & claimed_type(CId, Type) <-
     .my_name(Me);
     .print("❌ [", Me, "] Sin estantería disponible para ", CId, ". Liberando.");
     -shelf_retried(CId);
     .abolish(expansion_failed_shelf(CId, _));
     +shelf_wait(CId);
+    +blocked_type(Type);
     .send(supervisor, tell, container_error(CId, no_shelf_space));
     .wait(1500);
     .fail.
@@ -186,7 +187,9 @@ shelf_max_weight("shelf_9", 200).
     !acquire_zone(expansion);
     -nav_limit(_); +nav_limit(200);
     move_to_expansion;
-    ?nav_target(TX, TY);
+    .findall(d(D, X, Y), expansion_free_cell(D, X, Y), Pairs);
+    .sort(Pairs, [d(_, TX, TY)|_]);
+    .abolish(expansion_free_cell(_, _, _));
     !navigate(TX, TY);
     drop_in_expansion(CId);
     !release_zone(expansion);

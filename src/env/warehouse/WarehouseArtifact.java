@@ -867,13 +867,11 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: move_to_expansion
-     * Encuentra la celda libre más cercana de la zona CLASSIFICATION y emite nav_target(X,Y).
+     * Emite expansion_free_cell(X,Y) para cada celda libre de la zona CLASSIFICATION.
+     * El agente elige la más cercana usando su robot_pos (principio de entorno delgado).
      */
     private boolean executeMoveToExpansion(String agName) {
         try {
-            Robot robot = robots.get(agName);
-            if (robot == null) return false;
-
             List<int[]> cells = new ArrayList<>();
             for (int x = 0; x < GRID_WIDTH; x++) {
                 for (int y = 0; y < GRID_HEIGHT; y++) {
@@ -884,15 +882,13 @@ public class WarehouseArtifact extends Environment {
             }
             if (cells.isEmpty()) return false;
 
-            // Celda más cercana al robot: minimiza el trayecto y reduce la probabilidad
-            // de que el corredor y=2 esté saturado durante la navegación de expansión.
-            cells.sort((a, b) -> {
-                int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
-                int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
-                return Integer.compare(da, db);
-            });
-
-            emitNavTarget(agName, cells.get(0)[0], cells.get(0)[1]);
+            Robot robot = robots.get(agName);
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("expansion_free_cell(_,_,_)"));
+            for (int[] cell : cells) {
+                int dist = Math.abs(cell[0] - robot.getX()) + Math.abs(cell[1] - robot.getY());
+                addPercept(agName, ASSyntax.parseLiteral(
+                    "expansion_free_cell(" + dist + "," + cell[0] + "," + cell[1] + ")"));
+            }
             return true;
         } catch (Exception e) {
             e.printStackTrace();
