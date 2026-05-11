@@ -5,7 +5,6 @@ import jason.environment.Environment;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collectors;
 
 /**
  * Artefacto del almacén automatizado Proporciona la API para que los agentes
@@ -26,12 +25,6 @@ public class WarehouseArtifact extends Environment {
     private ConcurrentLinkedQueue<Container> pendingContainers;
     private Map<String, String> taskAssignments; // containerId -> robotId
 
-    // Mapa de destinos activos: clave "(X,Y)" → nombre del robot que lo ha reservado.
-    // Evita que dos robots calculen BFS al mismo destino simultáneamente y lleguen
-    // a la misma celda. La clave es la coordenada (no el agente) para que el bloque
-    // finally de doMoveTo la libere correctamente aunque el robot cambie de ruta.
-    private Map<String, String> activeDestinations;
-
     // GUI visual
     private WarehouseView view;
 
@@ -41,6 +34,12 @@ public class WarehouseArtifact extends Environment {
     // Métricas
     private int totalContainersProcessed = 0;
     private long startTime;
+
+    // Contenedores reclamados atómicamente por robots (containerId → robotId)
+    private ConcurrentHashMap<String, String> claimedContainers = new ConcurrentHashMap<>();
+    // Reserva de celdas outbound: robotId → "x,y". Evita que dos robots obtengan
+    // la misma celda cuando liberamos el mutex antes de navegar.
+    private ConcurrentHashMap<String, String> outboundReservations = new ConcurrentHashMap<>();
 
     // Gestión del thread generador de contenedores
     private ExecutorService containerGeneratorExecutor;
@@ -57,7 +56,6 @@ public class WarehouseArtifact extends Environment {
         shelves = new ConcurrentHashMap<>();
         pendingContainers = new ConcurrentLinkedQueue<>();
         taskAssignments = new ConcurrentHashMap<>();
-        activeDestinations = new ConcurrentHashMap<>();
 
         // Inicializar grid
         initializeGrid();
@@ -106,19 +104,27 @@ public class WarehouseArtifact extends Environment {
             }
         }
 
-        // Zona de entrada (arriba izquierda)
+        // Zona de salida / outbound (x=0-2, y=0-1)
         for (int x = 0; x < 3; x++) {
+            for (int y = 0; y < 2; y++) {
+                grid[x][y] = CellType.OUTBOUND;
+            }
+        }
+
+        // Zona de clasificación (x=3-4, y=0-1)
+        for (int x = 3; x < 5; x++) {
+            for (int y = 0; y < 2; y++) {
+                grid[x][y] = CellType.CLASSIFICATION;
+            }
+        }
+
+        // Zona de entrada / inbound (x=5-7, y=0-1)
+        for (int x = 5; x < 8; x++) {
             for (int y = 0; y < 2; y++) {
                 grid[x][y] = CellType.ENTRANCE;
             }
         }
 
-        // Zona de clasificación
-        for (int x = 3; x < 7; x++) {
-            for (int y = 0; y < 2; y++) {
-                grid[x][y] = CellType.CLASSIFICATION;
-            }
-        }
     }
 
     /**
@@ -126,16 +132,31 @@ public class WarehouseArtifact extends Environment {
      */
     private void initializeRobots() {
         Robot light = new Robot("robot_light", "light", 10, 1, 1, 3);
-        light.setPosition(1, 3);
+        light.setPosition(1, 4);
         robots.put("robot_light", light);
 
         Robot medium = new Robot("robot_medium", "medium", 30, 1, 2, 2);
-        medium.setPosition(2, 3);
+        medium.setPosition(2, 4);
         robots.put("robot_medium", medium);
 
         Robot heavy = new Robot("robot_heavy", "heavy", 100, 2, 3, 1);
-        heavy.setPosition(3, 3);
+        heavy.setPosition(3, 4);
         robots.put("robot_heavy", heavy);
+
+        Robot heavy2 = new Robot("robot_heavy2", "heavy", 100, 2, 3, 1);
+        heavy2.setPosition(4, 4);
+        robots.put("robot_heavy2", heavy2);
+
+        // Emitir posición inicial de cada robot para que sus planes de navegación
+        // tengan robot_pos disponible desde el primer ciclo.
+        try {
+            addPercept("robot_light",   ASSyntax.parseLiteral("robot_pos(1,4)"));
+            addPercept("robot_medium",  ASSyntax.parseLiteral("robot_pos(2,4)"));
+            addPercept("robot_heavy",   ASSyntax.parseLiteral("robot_pos(3,4)"));
+            addPercept("robot_heavy2",  ASSyntax.parseLiteral("robot_pos(4,4)"));
+        } catch (jason.asSyntax.parser.ParseException e) {
+            e.printStackTrace();
+        }
     }
 
     /**
@@ -153,6 +174,8 @@ public class WarehouseArtifact extends Environment {
             grid[x + 1][2] = CellType.SHELF;
             grid[x][3] = CellType.SHELF;
             grid[x + 1][3] = CellType.SHELF;
+            emitShelfAvailable(shelf.getId());
+            emitShelfOccupancy(shelf.getId(), shelf);
         }
 
         // Fila de estanterías medianas
@@ -163,6 +186,8 @@ public class WarehouseArtifact extends Environment {
                 grid[x + dx][6] = CellType.SHELF;
                 grid[x + dx][7] = CellType.SHELF;
             }
+            emitShelfAvailable(shelf.getId());
+            emitShelfOccupancy(shelf.getId(), shelf);
         }
 
         // Fila de estanterías grandes
@@ -174,6 +199,8 @@ public class WarehouseArtifact extends Environment {
                     grid[x + dx][10 + dy] = CellType.SHELF;
                 }
             }
+            emitShelfAvailable(shelf.getId());
+            emitShelfOccupancy(shelf.getId(), shelf);
         }
     }
 
@@ -183,7 +210,7 @@ public class WarehouseArtifact extends Environment {
     private void startContainerGenerator() {
         containerGeneratorExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "ContainerGenerator");
-            t.setDaemon(true);
+            t.setDaemon(true); // Daemon: se termina automáticamente al salir la JVM sin bloquear el shutdown
             return t;
         });
 
@@ -209,8 +236,15 @@ public class WarehouseArtifact extends Environment {
                                 container.getId(), container.getWeight(), container.getType()));
                     }
 
-                    // Notificar a los agentes
-                    addPercept(ASSyntax.parseLiteral("new_container(\"" + container.getId() + "\")"));
+                    // Notificar a los agentes con propiedades completas del contenedor
+                    addPercept(ASSyntax.parseLiteral(
+                        "container_at_entrance(\"" + container.getId() + "\",\"" +
+                        container.getType() + "\"," + container.getWeight() + "," +
+                        container.getWidth() + "," + container.getHeight() + ")"));
+
+                    // Notificar al scheduler para activar el planificador formal
+                    addPercept("scheduler", ASSyntax.parseLiteral(
+                        "new_container(\"" + container.getId() + "\")"));
 
                     if (view != null) {
                         view.update();
@@ -304,10 +338,20 @@ public class WarehouseArtifact extends Environment {
                 }
             }
         }
-        if (entranceCells.isEmpty()) {
-            // ENTRANCE llena, colocar en (0,0) como fallback
-            container.setPosition(0, 0);
-        } else {
+        // Si no hay celdas libres, esperar hasta que se libere una en lugar de apilar
+        // en (5,0). El apilado hace el container invisible para los robots (hayContenedorEn
+        // solo detecta uno por celda), efectivamente perdiéndolo del sistema.
+        while (entranceCells.isEmpty() && running) {
+            try { Thread.sleep(500); } catch (InterruptedException e) { break; }
+            entranceCells.clear();
+            for (int x = 0; x < GRID_WIDTH; x++) {
+                for (int y = 0; y < GRID_HEIGHT; y++) {
+                    if (grid[x][y] == CellType.ENTRANCE && !hayContenedorEn(x, y))
+                        entranceCells.add(new int[]{x, y});
+                }
+            }
+        }
+        if (!entranceCells.isEmpty()) {
             int[] cell = entranceCells.get(rand.nextInt(entranceCells.size()));
             container.setPosition(cell[0], cell[1]);
         }
@@ -325,20 +369,36 @@ public class WarehouseArtifact extends Environment {
                     return executeMoveToShelf(agName, action);
                 case "move_to_container":
                     return executeMoveToContainer(agName, action);
+                case "move_step":
+                    return executeMoveStep(agName, action);
                 case "pickup":
                     return executePickup(agName, action);
                 case "drop_at":
                     return executeDropAt(agName, action);
                 case "get_container_info":
                     return executeGetContainerInfo(agName, action);
-                case "get_free_shelf":
-                    return executeGetFreeShelf(agName, action);
                 case "release_task":
                     return executeReleaseTask(agName, action);
                 case "accept_task":
                     return executeAcceptTask(agName, action);
-                case "return_to_base":
-                    return executeReturnToBase(agName, action);
+                case "move_to_expansion":
+                    return executeMoveToExpansion(agName);
+                case "drop_in_expansion":
+                    return executeDropInExpansion(agName, action);
+                case "claim_container":
+                    return executeClaimContainer(agName, action);
+                case "unclaim_container":
+                    return executeUnclaimContainer(agName, action);
+                case "pickup_from_shelf":
+                    return executePickupFromShelf(agName, action);
+                case "move_to_outbound":
+                    return executeMoveToOutbound(agName);
+                case "drop_in_outbound":
+                    return executeDropInOutbound(agName, action);
+                case "discard_container":
+                    return executeDiscardContainer(agName, action);
+                case "collect_outbound_containers":
+                    return executeCollectOutboundContainers(agName);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
@@ -350,49 +410,26 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
-     * Acción: return_to_base(X, Y)
-     * Mueve el robot a su posición inicial cuando no tiene tareas pendientes.
-     */
-    private boolean executeReturnToBase(String agName, Structure action) {
-        try {
-            int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
-            int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
-            return doMoveTo(agName, targetX, targetY);
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
-
-    /**
      * Acción: move_to_shelf(ShelfId)
-     * Navega a la celda adyacente libre más cercana a la estantería indicada,
-     * descartando celdas ocupadas por robots o contenedores. Prueba todas las
-     * adyacentes en orden antes de reportar path_blocked. Los errores parciales
-     * de intentos fallidos se limpian antes de emitir el error definitivo.
+     * Calcula la primera celda adyacente a la estantería y emite nav_target(X,Y).
+     * La navegación real la realiza el agente usando !navigate y move_step.
      */
     private boolean executeMoveToShelf(String agName, Structure action) {
         try {
             String shelfId = action.getTerm(0).toString().replace("\"", "");
             Shelf shelf = shelves.get(shelfId);
             if (shelf == null) {
-                addError(agName, "robot_not_found", "Shelf " + shelfId + " not found");
+                System.err.println("[" + agName + "] Shelf not found: " + shelfId);
                 return false;
             }
             List<int[]> adyacentes = getAdyacentes(shelf.getX(), shelf.getY(), shelf.getWidth(), shelf.getHeight());
             for (int[] cell : adyacentes) {
-                if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
-                    // Limpiar errores de path_blocked de intentos anteriores
-                    removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
-                    if (doMoveTo(agName, cell[0], cell[1])) {
-                        return true;
-                    }
-                    // doMoveTo falló (sin ruta BFS), probar siguiente celda adyacente
+                if (!hayContenedorEn(cell[0], cell[1])) {
+                    emitNavTarget(agName, cell[0], cell[1]);
+                    return true;
                 }
             }
-            // Limpiar errores intermedios antes de añadir el definitivo
-            removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
-            addError(agName, "path_blocked", "No free adjacent cell for shelf " + shelfId);
+            System.err.println("[" + agName + "] All adjacent cells occupied for shelf " + shelfId);
             return false;
         } catch (Exception e) {
             e.printStackTrace();
@@ -402,36 +439,119 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: move_to_container(ContainerId)
-     * Igual que executeMoveToShelf pero usa container.getAdyacentes() (lógica
-     * encapsulada en Container.java) en lugar de la versión local para estanterías.
-     * Los contenedores se tratan siempre como 1×1 en el grid.
+     * Calcula la primera celda adyacente al contenedor y emite nav_target(X,Y).
+     * La navegación real la realiza el agente usando !navigate y move_step.
      */
     private boolean executeMoveToContainer(String agName, Structure action) {
         try {
             String containerId = action.getTerm(0).toString().replace("\"", "");
             Container container = containers.get(containerId);
             if (container == null) {
-                addError(agName, "robot_not_found", "Container " + containerId + " not found");
+                System.err.println("[" + agName + "] Container not found: " + containerId);
+                addError(agName, "container_not_found", containerId);
                 return false;
             }
             List<int[]> adyacentes = container.getAdyacentes(grid, GRID_WIDTH, GRID_HEIGHT);
             for (int[] cell : adyacentes) {
-                if (!hayRobotCerca(cell[0], cell[1]) && !hayContenedorEn(cell[0], cell[1])) {
-                    // Limpiar errores de path_blocked de intentos anteriores
-                    removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
-                    if (doMoveTo(agName, cell[0], cell[1])) {
-                        return true;
-                    }
-                    // doMoveTo falló (sin ruta BFS), probar siguiente celda adyacente
+                if (!hayContenedorEn(cell[0], cell[1])) {
+                    emitNavTarget(agName, cell[0], cell[1]);
+                    return true;
                 }
             }
-            // Limpiar errores intermedios antes de añadir el definitivo
-            removePerceptsByUnif(agName, ASSyntax.parseLiteral("error(path_blocked,_)"));
-            addError(agName, "path_blocked", "No free adjacent cell for container " + containerId);
+            System.err.println("[" + agName + "] All adjacent cells occupied for container " + containerId);
             return false;
         } catch (Exception e) {
             e.printStackTrace();
             return false;
+        }
+    }
+
+    /**
+     * Acción: move_step(X, Y)
+     * Primitiva de movimiento atómico: mueve el robot exactamente una celda a (X,Y).
+     * Falla (devuelve false) si la celda está ocupada por otro robot o es un obstáculo
+     * fijo (SHELF, BLOCKED). Si hay un contenedor no recogido en la celda destino,
+     * lo aplasta y continúa (mecánica de aplastamiento).
+     * Emite robot_pos(X,Y) tras el movimiento para que el agente actualice su posición.
+     */
+    private boolean executeMoveStep(String agName, Structure action) {
+        try {
+            int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
+            int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
+
+            Robot robot = robots.get(agName);
+            if (robot == null) { addError(agName, "robot_not_found", agName); return false; }
+
+            if (!estaDentroDelMapa(targetX, targetY)) return false;
+            if (grid[targetX][targetY] == CellType.SHELF || grid[targetX][targetY] == CellType.BLOCKED) return false;
+            // Evitar pisar contenedores durante la navegación: el agente elige otra dirección.
+            // La mecánica de aplastamiento dentro del synchronized cubre solo la carrera
+            // en que un contenedor aparece en la celda entre esta comprobación y el movimiento.
+            if (hayContenedorEn(targetX, targetY)) return false;
+
+            // El synchronized protege solo la comprobación robot+aplastamiento para evitar
+            // que dos robots acaben en la misma celda por una carrera entre el check y el move.
+            // El check hayContenedorEn anterior queda fuera del sync intencionalmente: es
+            // la barrera "rápida" que evita el 99% de los conflictos sin bloquear el hilo.
+            synchronized (this) {
+                if (hayRobotCerca(targetX, targetY)) return false;
+
+                // Mecánica de aplastamiento (carrera: contenedor apareció tras el check anterior)
+                List<String> aplastados = new ArrayList<>();
+                for (Container c : containers.values()) {
+                    if (!c.isPicked() && !c.isBroken()
+                            && c.getX() == targetX && c.getY() == targetY) {
+                        aplastados.add(c.getId());
+                    }
+                }
+                for (String crushedId : aplastados) {
+                    containers.remove(crushedId);
+                    claimedContainers.remove(crushedId);
+                    System.err.println("[WARNING] " + agName + " aplastó " + crushedId
+                            + " en (" + targetX + "," + targetY + ")");
+                    if (view != null) view.logMessage("💥 " + agName + " aplastó " + crushedId);
+                    try {
+                        removePerceptsByUnif(ASSyntax.parseLiteral(
+                            "container_at_entrance(\"" + crushedId + "\",_,_,_,_)"));
+                        addPercept(ASSyntax.parseLiteral("container_broken(\"" + crushedId + "\")"));
+                    } catch (jason.asSyntax.parser.ParseException e) {
+                        e.printStackTrace();
+                    }
+                }
+
+                robot.setPosition(targetX, targetY);
+            }
+
+            // Actualizar percepción de posición del robot
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("robot_pos(_,_)"));
+            addPercept(agName, ASSyntax.parseLiteral("robot_pos(" + targetX + "," + targetY + ")"));
+
+            if (view != null) view.update();
+
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Emite/actualiza la percepción nav_target(X, Y) al agente.
+     * move_to_shelf y move_to_container la usan para comunicar el destino
+     * al agente sin navegar ellos mismos.
+     */
+    private void emitNavTarget(String agName, int x, int y) {
+        try {
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("nav_target(_,_)"));
+            addPercept(agName, ASSyntax.parseLiteral("nav_target(" + x + "," + y + ")"));
+        } catch (jason.asSyntax.parser.ParseException e) {
+            e.printStackTrace();
         }
     }
 
@@ -470,237 +590,6 @@ public class WarehouseArtifact extends Environment {
         return result;
     }
 
-    /**
-     * Núcleo de navegación: mueve el robot agName hasta (targetX, targetY).
-     *
-     * Estrategia en dos fases:
-     *   Fase 1 (optimista): BFS ignorando robots en movimiento. Más eficiente
-     *     y evita que robots se bloqueen mutuamente al calcular rutas simultáneas.
-     *   Fase 2 (reactiva): Si un paso lleva 3 s bloqueado, recalcula con
-     *     avoidRobots=true para esquivar robots que están parados. Se resetea
-     *     tras cada recálculo exitoso para volver a modo optimista.
-     *
-     * La mecánica de aplastamiento ocurre dentro del bucle paso a paso:
-     * si un contenedor no recogido ocupa la celda destino del paso, se elimina
-     * del mapa y se emite container_broken globalmente antes de mover el robot.
-     */
-    private boolean doMoveTo(String agName, int targetX, int targetY) {
-        String destKey = targetX + "," + targetY;
-        try {
-            Robot robot = robots.get(agName);
-            if (robot == null) {
-                addError(agName, "robot_not_found", "Robot " + agName + " not found");
-                return false;
-            }
-
-            // Verificar límites
-            if (targetX < 0 || targetX >= GRID_WIDTH || targetY < 0 || targetY >= GRID_HEIGHT) {
-                addError(agName, "illegal_move", "Position out of bounds: (" + targetX + "," + targetY + ")");
-                return false;
-            }
-
-            // Verificar si hay obstáculos (excepto estanterías que son destinos válidos)
-            if (grid[targetX][targetY] == CellType.BLOCKED) {
-                addError(agName, "route_blocked", "Position blocked: (" + targetX + "," + targetY + ")");
-                return false;
-            }
-
-            /*
-             * // Verificar conflictos finales con otros robots
-             * for (Robot other : robots.values()) {
-             * if (!other.getId().equals(agName) && other.getX() == targetX && other.getY()
-             * == targetY) {
-             * addError(agName, "conflict", "Conflict with " + other.getId() +
-             * " at destination");
-             * return false;
-             * }
-             * }
-             */
-
-            // Verificar conflictos de destino con otros robots en movimiento
-            if (activeDestinations != null) {
-                String claimingRobot = activeDestinations.putIfAbsent(destKey, agName);
-                if (claimingRobot != null && !claimingRobot.equals(agName)) {
-                    addError(agName, "destination_conflict", "Another robot is moving to this exact destination");
-                    return false;
-                }
-            }
-
-            // 1. CÁLCULO INICIAL: Optimista (ignorando robots en movimiento)
-            boolean avoidRobots = false;
-            List<int[]> pos = calcularRuta(robot.getX(), robot.getY(), targetX, targetY, avoidRobots);
-
-            // Si no hay ruta y el robot no está ya en el destino, fallo
-            if (pos.isEmpty() && (robot.getX() != targetX || robot.getY() != targetY)) {
-                addError(agName, "path_blocked", "No route found to (" + targetX + "," + targetY + ")");
-                if (activeDestinations != null) {
-                    activeDestinations.remove(destKey, agName);
-                }
-                return false;
-            }
-
-            // 2. MOVIMIENTO PASO A PASO (Reactivo)
-            while (!pos.isEmpty()) {
-                // Miramos cuál es nuestro próximo paso inmediato
-                int[] siguientePaso = pos.get(0);
-                int cont = 0;
-
-                boolean moved = false;
-                while (!moved && cont < 3) {
-                    synchronized (this) {
-                        if (!hayRobotCerca(siguientePaso[0], siguientePaso[1])) {
-                            // Comprobar si hay un container en la celda destino y destruirlo
-                            List<String> crushedIds = new ArrayList<>();
-                            for (Container c : containers.values()) {
-                                if (!c.isPicked() && !c.isBroken()
-                                        && c.getX() == siguientePaso[0] && c.getY() == siguientePaso[1]) {
-                                    crushedIds.add(c.getId());
-                                }
-                            }
-                            for (String crushedId : crushedIds) {
-                                containers.remove(crushedId);
-                                System.err.println("[WARNING] " + agName + " aplastó " + crushedId
-                                        + " en (" + siguientePaso[0] + "," + siguientePaso[1] + ")");
-                                if (view != null) {
-                                    view.logMessage("💥 " + agName + " aplastó " + crushedId);
-                                }
-                                addPercept(ASSyntax.parseLiteral(
-                                        "container_broken(\"" + crushedId + "\")"));
-                            }
-                            robot.setPosition(siguientePaso[0], siguientePaso[1]);
-                            moved = true;
-                        }
-                    }
-
-                    if (!moved) {
-                        try {
-                            Thread.sleep(1000);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-                        cont++;
-                    }
-                }
-
-                // Si pasaron los 3 segundos y el obstáculo sigue ahí, recalculamos
-                if (!moved) {
-                    avoidRobots = true; // Ahora sí, buscamos ruta esquivando robots fijos
-                    List<int[]> nuevaRuta = calcularRuta(robot.getX(), robot.getY(), targetX, targetY, avoidRobots);
-
-                    if (nuevaRuta.isEmpty()) {
-                        addError(agName, "path_blocked", "Ruta totalmente bloqueada, imposible avanzar.");
-                        if (activeDestinations != null) {
-                            activeDestinations.remove(destKey, agName);
-                        }
-                        return false;
-                    }
-
-                    // Actualizamos nuestra ruta con la nueva y volvemos a evaluar
-                    pos = nuevaRuta;
-                    avoidRobots = false; // Reseteamos por si este obstáculo también se mueve
-                    continue; // Vuelve al inicio del 'while (!pos.isEmpty())'
-                }
-
-                // Eliminamos el paso que acabamos de dar de la lista
-                pos.remove(0);
-
-                if (view != null) {
-                    view.update();
-                }
-
-                try {
-                    // Tiempo de desplazamiento visual (300ms)
-                    Thread.sleep(300);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-
-            // Log a la consola de la GUI al finalizar
-            if (view != null) {
-                view.logMessage(String.format("➡️  %s moved to (%d,%d)", agName, targetX, targetY));
-            }
-
-            // Actualizar percepción final en el agente
-            removePerceptsByUnif(agName, ASSyntax.parseLiteral("robot_at(_,_)"));
-            addPercept(agName, ASSyntax.parseLiteral("robot_at(" + targetX + "," + targetY + ")"));
-
-            if (view != null) {
-                view.update();
-            }
-
-            return true;
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        } finally {
-            if (activeDestinations != null) {
-                activeDestinations.remove(destKey);
-            }
-        }
-    }
-
-    private List<int[]> calcularRuta(int inicioX, int inicioY, int destinoX, int destinoY, boolean avoidRobots) {
-        // 1. Estructuras de control
-        // 'padres' guarda: [Celda Actual] -> [Celda de la que venimos]
-        Map<List<Integer>, List<Integer>> mapaPadres = new HashMap<>();
-        Deque<List<Integer>> colaExploracion = new ArrayDeque<>();
-
-        // 2. Preparar puntos de inicio y destino
-        List<Integer> celdaInicial = Arrays.asList(inicioX, inicioY);
-        List<Integer> celdaDestino = Arrays.asList(destinoX, destinoY);
-
-        colaExploracion.addLast(celdaInicial);
-        mapaPadres.put(celdaInicial, null); // La celda inicial no tiene predecesor
-
-        boolean rutaEncontrada = false;
-
-        // 3. Algoritmo BFS (Búsqueda en Anchura)
-        while (!colaExploracion.isEmpty()) {
-            List<Integer> actual = colaExploracion.removeFirst();
-            int xActual = actual.get(0);
-            int yActual = actual.get(1);
-
-            // Si llegamos al destino, dejamos de buscar
-            if (xActual == destinoX && yActual == destinoY) {
-                rutaEncontrada = true;
-                break;
-            }
-
-            // Direcciones: Derecha, Izquierda, Abajo, Arriba
-            int[][] movimientos = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
-
-            for (int[] mov : movimientos) {
-                int sigX = xActual + mov[0];
-                int sigY = yActual + mov[1];
-                List<Integer> vecino = Arrays.asList(sigX, sigY);
-
-                // Verificamos: Límites, Obstáculos, Contenedores y si ya pasamos por ahí
-                if (estaDentroDelMapa(sigX, sigY) &&
-                        grid[sigX][sigY] != CellType.BLOCKED &&
-                        grid[sigX][sigY] != CellType.SHELF &&
-                        !hayContenedorEn(sigX, sigY) &&
-                        !mapaPadres.containsKey(vecino)) {
-
-                    if (avoidRobots) {
-                        if (!hayRobotCerca(sigX, sigY)) {
-                            mapaPadres.put(vecino, actual); // Registramos quién es el "padre" de este vecino
-                            colaExploracion.addLast(vecino);
-                        }
-
-                    } else {
-                        mapaPadres.put(vecino, actual); // Registramos quién es el "padre" de este vecino
-                        colaExploracion.addLast(vecino);
-                    }
-                }
-            }
-        }
-
-        // 4. Reconstrucción de la ruta (de atrás hacia adelante)
-        return construirRutaFinal(rutaEncontrada, celdaDestino, mapaPadres);
-    }
-
     private boolean hayContenedorEn(int x, int y) {
         for (Container c : containers.values()) {
             if (!c.isPicked() && !c.isBroken()) {
@@ -728,26 +617,6 @@ public class WarehouseArtifact extends Environment {
         return x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT;
     }
 
-    private List<int[]> construirRutaFinal(boolean encontrada, List<Integer> destino,
-            Map<List<Integer>, List<Integer>> mapaPadres) {
-        List<int[]> ruta = new ArrayList<>();
-
-        if (encontrada) {
-            List<Integer> pasoActual = destino;
-            while (pasoActual != null) {
-                // Insertamos al principio para que el orden sea Inicio -> Destino
-                ruta.add(0, new int[] { pasoActual.get(0), pasoActual.get(1) });
-                pasoActual = mapaPadres.get(pasoActual);
-            }
-
-            // Quitamos la primera posición (donde ya está el robot)
-            if (!ruta.isEmpty()) {
-                ruta.remove(0);
-            }
-        }
-        return ruta;
-    }
-
     /**
      * Acción: pickup(ContainerId)
      * Recoge un contenedor
@@ -759,8 +628,9 @@ public class WarehouseArtifact extends Environment {
             Robot robot = robots.get(agName);
             Container container = containers.get(containerId);
 
-            if (robot == null || container == null) {
-                addError(agName, "invalid_pickup", "Robot or container not found");
+            if (robot == null) { addError(agName, "robot_not_found", agName); return false; }
+            if (container == null) {
+                addError(agName, "invalid_pickup", "Container not found: " + containerId);
                 return false;
             }
 
@@ -846,13 +716,8 @@ public class WarehouseArtifact extends Environment {
             // El plan -!execute_task del robot notificará task_failed al scheduler,
             // que reintentará assign_shelf hasta shelf_retries >= 3.
             if (!shelf.canStore(container)) {
-                robot.drop();
-                container.setPicked(false);
-                container.setPosition(robot.getX(), robot.getY());
-                robot.setBusy(false);
-
-                addError(agName, "shelf_full",
-                        "Shelf " + shelfId + " full. Dropped at (" + robot.getX() + "," + robot.getY() + ")");
+                // El robot conserva el contenedor: el agente decidirá llevarlo a la zona de expansión.
+                addError(agName, "shelf_full", "Shelf " + shelfId + " full");
                 return false;
             }
 
@@ -861,6 +726,18 @@ public class WarehouseArtifact extends Environment {
             robot.drop();
             robot.setBusy(false);
             container.setAssignedShelf(shelfId);
+
+            // Estantería llena: retirar shelf_available de todos los agentes
+            if (shelf.isFull()) {
+                try {
+                    removePerceptsByUnif(ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+                } catch (jason.asSyntax.parser.ParseException e) {
+                    e.printStackTrace();
+                }
+            }
+
+            // Actualizar ocupación para que el scheduler pueda elegir la menos cargada.
+            emitShelfOccupancy(shelfId, shelf);
 
             totalContainersProcessed++;
 
@@ -889,41 +766,28 @@ public class WarehouseArtifact extends Environment {
 
 
     /**
-     * Encuentra la mejor estantería para un contenedor, priorizando por tipo de
-     * carga.
-     * - Ligero (<= 10kg, 1x1): shelves 1-4 (pequeñas)
-     * - Mediano (<= 30kg, <= 1x2): shelves 5-7 (medianas)
-     * - Pesado (> 30kg o grande): shelves 8-9 (grandes)
+     * Emite shelf_available(ShelfId) a todos los agentes.
+     * Robots la usan para seleccionar estanterías autónomamente.
      */
-    private Shelf findBestShelf(Container container) {
-        List<String> preferredShelves;
-        if (container.getWeight() <= 10 && container.getWidth() <= 1 && container.getHeight() <= 1) {
-            preferredShelves = Arrays.asList("shelf_1", "shelf_2", "shelf_3", "shelf_4");
-        } else if (container.getWeight() <= 30 && container.getWidth() <= 1 && container.getHeight() <= 2) {
-            preferredShelves = Arrays.asList("shelf_5", "shelf_6", "shelf_7");
-        } else {
-            preferredShelves = Arrays.asList("shelf_8", "shelf_9");
+    private void emitShelfAvailable(String shelfId) {
+        try {
+            addPercept(ASSyntax.parseLiteral("shelf_available(\"" + shelfId + "\")"));
+        } catch (jason.asSyntax.parser.ParseException e) {
+            e.printStackTrace();
         }
+    }
 
-        // 1. Intentar buscar en las estanterías preferidas
-        List<Shelf> availableShelves = shelves.values().stream()
-                .filter(s -> preferredShelves.contains(s.getId()))
-                .filter(s -> s.canStore(container))
-                .sorted(Comparator.comparingDouble(Shelf::getOccupancyPercentage))
-                .collect(Collectors.toList());
-
-        if (!availableShelves.isEmpty()) {
-            return availableShelves.get(0);
+    /**
+     * Emite/actualiza shelf_occupancy(ShelfId, Occ) a todos los agentes.
+     */
+    private void emitShelfOccupancy(String shelfId, Shelf shelf) {
+        try {
+            removePerceptsByUnif(ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\",_)"));
+            int occ = (int) Math.round(shelf.getOccupancyPercentage());
+            addPercept(ASSyntax.parseLiteral("shelf_occupancy(\"" + shelfId + "\"," + occ + ")"));
+        } catch (jason.asSyntax.parser.ParseException e) {
+            e.printStackTrace();
         }
-
-        // 2. Fallback: Si no hay espacio en las preferidas, buscar en cualquier otra
-        // (evita starvation)
-        List<Shelf> fallbackShelves = shelves.values().stream()
-                .filter(s -> s.canStore(container))
-                .sorted(Comparator.comparingDouble(Shelf::getOccupancyPercentage))
-                .collect(Collectors.toList());
-
-        return fallbackShelves.isEmpty() ? null : fallbackShelves.get(0);
     }
 
     /**
@@ -958,38 +822,6 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
-     * Acción: get_free_shelf(ContainerId)
-     * Busca una estantería libre para un contenedor
-     */
-    private boolean executeGetFreeShelf(String agName, Structure action) {
-        try {
-            String containerId = action.getTerm(0).toString().replace("\"", "");
-            Container container = containers.get(containerId);
-
-            if (container == null) {
-                return false;
-            }
-
-            Shelf shelf = findBestShelf(container);
-            if (shelf != null) {
-                addPercept(agName, ASSyntax.parseLiteral(
-                        "free_shelf(\"" + containerId + "\",\"" + shelf.getId() + "\")"));
-                return true;
-            }
-
-            // null → no hay estantería disponible → la acción falla en Jason →
-            // dispara -!assign_shelf(CId) en el scheduler, que reintentará
-            // hasta shelf_retries >= 3 antes de notificar no_shelf_space.
-            return false;
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
-
-
-    /**
      * Acción: release_task(ContainerId)
      * El agente libera una tarea fallida: limpia estado busy y re-encola el
      * contenedor
@@ -1010,7 +842,11 @@ public class WarehouseArtifact extends Environment {
                 }
             }
 
-            // Limpiar estado del robot en el entorno
+            // Limpiar estado del robot en el entorno.
+            // El drop físico es un mecanismo de seguridad: si un fallo de plan deja al robot
+            // llevando un contenedor sin llegar a llamar unclaim_container, evita que el
+            // contenedor quede permanentemente perdido. El agente Jason ya habrá reseteado
+            // su creencia carrying(none), pero Java necesita sincronizarse.
             robot.setBusy(false);
             robot.setCurrentTask(null);
             if (robot.isCarrying()) {
@@ -1022,6 +858,371 @@ public class WarehouseArtifact extends Environment {
             }
             taskAssignments.values().remove(agName);
 
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: move_to_expansion
+     *
+     * Implementa el principio de entorno delgado: en lugar de calcular y
+     * devolver la celda óptima (decisión que corresponde al agente), el entorno emite
+     * todas las celdas CLASSIFICATION libres como percepciones
+     * expansion_free_cell(D, X, Y), donde D es la distancia Manhattan
+     * precalculada desde la posición actual del robot.
+     *
+     * El agente selecciona autónomamente la celda más cercana mediante
+     * .sort(Pairs, [d(_, TX, TY)|_]) en common.asl, ejerciendo así su
+     * capacidad deliberativa sin delegar la decisión espacial al entorno Java.
+     *
+     * Si no hay celdas libres, devuelve false y el plan -!safe_expand_drop
+     * reintentará tras 2 segundos (hasta un máximo de 2 reintentos antes de descartar).
+     */
+    private boolean executeMoveToExpansion(String agName) {
+        try {
+            List<int[]> cells = new ArrayList<>();
+            for (int x = 0; x < GRID_WIDTH; x++) {
+                for (int y = 0; y < GRID_HEIGHT; y++) {
+                    if (grid[x][y] == CellType.CLASSIFICATION && !hayContenedorEn(x, y)) {
+                        cells.add(new int[]{x, y});
+                    }
+                }
+            }
+            if (cells.isEmpty()) return false;
+
+            Robot robot = robots.get(agName);
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("expansion_free_cell(_,_,_)"));
+            for (int[] cell : cells) {
+                int dist = Math.abs(cell[0] - robot.getX()) + Math.abs(cell[1] - robot.getY());
+                addPercept(agName, ASSyntax.parseLiteral(
+                    "expansion_free_cell(" + dist + "," + cell[0] + "," + cell[1] + ")"));
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: drop_in_expansion(ContainerId)
+     * Deposita el contenedor en la celda actual del robot (zona CLASSIFICATION).
+     */
+    private boolean executeDropInExpansion(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Robot robot = robots.get(agName);
+            Container container = containers.get(containerId);
+
+            if (robot == null || container == null) return false;
+            if (!robot.isCarrying()) return false;
+
+            int rx = robot.getX(), ry = robot.getY();
+            robot.drop();
+            container.setPicked(false);
+            container.setPosition(rx, ry);
+            // No se re-emite container_at_entrance aquí: el agente Jason notifica
+            // container_in_expansion al scheduler, que decide si reasignar o esperar.
+
+            System.out.println("[" + agName + "] " + containerId + " depositado en zona de expansión (" + rx + "," + ry + ")");
+            if (view != null) {
+                view.logMessage("📦 " + agName + " → expansión: " + containerId + " (" + rx + "," + ry + ")");
+                view.update();
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: claim_container(ContainerId)
+     * Reclama atómicamente un contenedor. Falla si ya fue reclamado.
+     * En éxito, retira container_at_entrance de todos los agentes.
+     */
+    private boolean executeClaimContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Container container = containers.get(containerId);
+            if (container == null || container.isBroken()) return false;
+
+            // putIfAbsent es atómica: garantiza que solo un robot puede reclamar
+            // el contenedor aunque varios ejecuten claim_container simultáneamente.
+            String prev = claimedContainers.putIfAbsent(containerId, agName);
+            if (prev != null) {
+                System.err.println("[CLAIM FAIL] " + agName + " no pudo reclamar " + containerId + " — ya reclamado por: " + prev);
+                return false;
+            }
+
+            removePerceptsByUnif(ASSyntax.parseLiteral(
+                "container_at_entrance(\"" + containerId + "\",_,_,_,_)"));
+
+            if (view != null) view.logMessage("🔒 " + agName + " reclamó " + containerId);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Devuelve una celda libre de la zona ENTRANCE, o (5,0) como fallback.
+     */
+    private int[] findFreeEntranceCell() {
+        List<int[]> cells = new ArrayList<>();
+        for (int x = 0; x < GRID_WIDTH; x++) {
+            for (int y = 0; y < GRID_HEIGHT; y++) {
+                if (grid[x][y] == CellType.ENTRANCE && !hayContenedorEn(x, y)) {
+                    cells.add(new int[]{x, y});
+                }
+            }
+        }
+        return cells.isEmpty() ? new int[]{5, 0} : cells.get(0);
+    }
+
+    /**
+     * Acción: unclaim_container(ContainerId)
+     * Libera el reclamo y re-emite container_at_entrance para otros robots.
+     */
+    private boolean executeUnclaimContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            claimedContainers.remove(containerId);
+
+            // Si el robot lleva físicamente este contenedor, soltarlo y reposicionar
+            // a una celda libre de la zona de entrada (fix Bug 3: evita depositar en
+            // una posición arbitraria del almacén inaccesible para otros robots).
+            // Si el contenedor ya fue colocado intencionalmente en otro lugar (p. ej.
+            // zona de expansión vía drop_in_expansion), no modificar su posición.
+            Robot robot = robots.get(agName);
+            boolean wasCarrying = false;
+            if (robot != null && robot.isCarrying()) {
+                Container carried = robot.getCarriedContainer();
+                if (carried != null && containerId.equals(carried.getId())) {
+                    robot.drop();
+                    carried.setPicked(false);
+                    wasCarrying = true;
+                }
+            }
+
+            Container container = containers.get(containerId);
+            if (container == null || container.isBroken()) return true;
+
+            if (wasCarrying) {
+                int[] cell = findFreeEntranceCell();
+                container.setPosition(cell[0], cell[1]);
+            }
+
+            addPercept(ASSyntax.parseLiteral(
+                "container_at_entrance(\"" + containerId + "\",\"" + container.getType() + "\"," +
+                container.getWeight() + "," + container.getWidth() + "," + container.getHeight() + ")"));
+
+            if (view != null) view.logMessage("🔓 " + agName + " liberó " + containerId);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: pickup_from_shelf(ContainerId, ShelfId)
+     * Recoge un contenedor almacenado en una estantería (ciclo de salida).
+     */
+    private boolean executePickupFromShelf(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            String shelfId = action.getTerm(1).toString().replace("\"", "");
+
+            Robot robot = robots.get(agName);
+            Container container = containers.get(containerId);
+            Shelf shelf = shelves.get(shelfId);
+
+            if (robot == null || container == null || shelf == null) return false;
+            if (robot.isCarrying()) { addError(agName, "already_carrying", "Robot already carrying"); return false; }
+            if (!shelfId.equals(container.getAssignedShelf())) {
+                addError(agName, "not_in_shelf", "Container not assigned to " + shelfId);
+                return false;
+            }
+            if (robot.distanceTo(shelf.getX(), shelf.getY()) > 3) {
+                addError(agName, "too_far", "Shelf too far for exit pickup");
+                return false;
+            }
+            if (!robot.canCarry(container)) {
+                addError(agName, "container_too_heavy", "Container too heavy for exit pickup");
+                return false;
+            }
+
+            if (!shelf.remove(container)) {
+                addError(agName, "not_in_shelf", "Container not found in shelf storage");
+                return false;
+            }
+
+            // Al retirar un contenedor la estantería recupera espacio: re-emitir
+            // shelf_available aunque no estuviera llena (idempotente) y actualizar
+            // ocupación para que los robots puedan volver a elegirla como destino.
+            emitShelfAvailable(shelf.getId());
+            emitShelfOccupancy(shelf.getId(), shelf);
+
+            container.setAssignedShelf(null);
+            robot.pickup(container);
+
+            addPercept(agName, ASSyntax.parseLiteral("picked(\"" + containerId + "\")"));
+            if (view != null) {
+                view.logMessage("📤 " + agName + " recogió " + containerId + " de " + shelfId + " (salida)");
+                view.update();
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: move_to_outbound
+     * Emite nav_target a la celda libre más cercana de la zona OUTBOUND.
+     */
+    private boolean executeMoveToOutbound(String agName) {
+        try {
+            Robot robot = robots.get(agName);
+            if (robot == null) return false;
+
+            // Celdas reservadas por otros robots (navegando hacia outbound)
+            java.util.Set<String> reservedByOthers = new java.util.HashSet<>();
+            for (Map.Entry<String, String> entry : outboundReservations.entrySet()) {
+                if (!entry.getKey().equals(agName)) reservedByOthers.add(entry.getValue());
+            }
+
+            List<int[]> cells = new ArrayList<>();
+            for (int x = 0; x < GRID_WIDTH; x++) {
+                for (int y = 0; y < GRID_HEIGHT; y++) {
+                    if (grid[x][y] == CellType.OUTBOUND && !hayContenedorEn(x, y) && !hayRobotCerca(x, y)
+                            && !reservedByOthers.contains(x + "," + y)) {
+                        cells.add(new int[]{x, y});
+                    }
+                }
+            }
+            if (cells.isEmpty()) {
+                outboundReservations.remove(agName);
+                addPercept("transport", ASSyntax.parseLiteral("outbound_full"));
+                return false;
+            }
+
+            cells.sort((a, b) -> {
+                // Preferir y=0 sobre y=1: se llena el fondo primero para que y=1 quede
+                // libre como pasillo de acceso. El guard Y>=2 en navigate evita el bucle
+                // arriba-abajo al reintentar desde y=1.
+                if (a[1] != b[1]) return Integer.compare(a[1], b[1]);
+                int da = Math.abs(a[0] - robot.getX()) + Math.abs(a[1] - robot.getY());
+                int db = Math.abs(b[0] - robot.getX()) + Math.abs(b[1] - robot.getY());
+                return Integer.compare(da, db);
+            });
+
+            int tx = cells.get(0)[0], ty = cells.get(0)[1];
+            outboundReservations.put(agName, tx + "," + ty);
+            emitNavTarget(agName, tx, ty);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: drop_in_outbound(ContainerId)
+     * Deposita el contenedor en la zona de salida. Robot debe estar en celda OUTBOUND.
+     */
+    private boolean executeDropInOutbound(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Robot robot = robots.get(agName);
+            Container container = containers.get(containerId);
+
+            if (robot == null || container == null) return false;
+            if (!robot.isCarrying()) { addError(agName, "not_carrying", "Not carrying anything"); return false; }
+
+            int rx = robot.getX(), ry = robot.getY();
+            outboundReservations.remove(agName);
+            if (grid[rx][ry] != CellType.OUTBOUND) {
+                addError(agName, "not_at_outbound", "Robot not in outbound zone");
+                return false;
+            }
+
+            robot.drop();
+            robot.setBusy(false);
+            container.setPicked(false);
+            container.setPosition(rx, ry);
+
+            totalContainersProcessed++;
+            removePerceptsByUnif(agName, ASSyntax.parseLiteral("picked(_)"));
+
+            if (view != null) {
+                view.logMessage("🚚 " + agName + " entregó " + containerId + " a zona de salida");
+                view.update();
+            }
+
+            addPercept("scheduler", ASSyntax.parseLiteral("container_exited(\"" + containerId + "\")"));
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: collect_outbound_containers
+     * El agente transport recoge todos los contenedores de la zona OUTBOUND,
+     * eliminándolos físicamente del grid y del mapa de contenedores.
+     */
+    private boolean executeCollectOutboundContainers(String agName) {
+        try {
+            List<String> collected = new ArrayList<>();
+            for (Map.Entry<String, Container> entry : new ArrayList<>(containers.entrySet())) {
+                Container c = entry.getValue();
+                if (!c.isPicked() && grid[c.getX()][c.getY()] == CellType.OUTBOUND) {
+                    collected.add(entry.getKey());
+                }
+            }
+            for (String cId : collected) {
+                containers.remove(cId);
+                claimedContainers.remove(cId);
+                removePerceptsByUnif(ASSyntax.parseLiteral("container_at_entrance(\"" + cId + "\",_,_,_,_)"));
+            }
+            if (!collected.isEmpty()) {
+                System.out.println("🚛 [TRANSPORT] Camión recogió " + collected.size() + " contenedor(es) del outbound");
+                if (view != null) {
+                    view.logMessage("🚛 [TRANSPORT] Camión recogió " + collected.size() + " contenedor(es) del outbound");
+                    view.update();
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: discard_container(ContainerId)
+     * Elimina permanentemente un contenedor del sistema (inaccesible definitivo).
+     */
+    private boolean executeDiscardContainer(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            containers.remove(containerId);
+            claimedContainers.remove(containerId);
+            try {
+                removePerceptsByUnif(ASSyntax.parseLiteral(
+                    "container_at_entrance(\"" + containerId + "\",_,_,_,_)"));
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            if (view != null) view.logMessage("🗑️ " + containerId + " descartado definitivamente");
             return true;
         } catch (Exception e) {
             e.printStackTrace();
@@ -1066,7 +1267,7 @@ public class WarehouseArtifact extends Environment {
     /**
      * Acción: accept_task(ContainerId)
      * El agente llama esto al aceptar una tarea enviada por el scheduler.
-     * Marca el robot como busy en Java (evita double-assignment via request_task)
+     * Marca el robot como ocupado en Java (evita doble asignación vía request_task)
      * y elimina el contenedor de la cola pendiente.
      */
     private boolean executeAcceptTask(String agName, Structure action) {

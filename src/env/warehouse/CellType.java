@@ -7,6 +7,7 @@ public enum CellType {
     EMPTY,          // Pasillo vacío — navegable por robots
     ENTRANCE,       // Zona de entrada — donde aparecen los contenedores (spawn)
     CLASSIFICATION, // Zona de clasificación — área intermedia entre entrada y estanterías
+    OUTBOUND,       // Zona de salida — lado opuesto a la entrada; destino de drop_in_outbound
     STORAGE,        // Área de almacenamiento genérica (no usada actualmente)
     SHELF,          // Estantería — obstáculo para BFS; destino lógico de drop_at
     BLOCKED,        // Celda inaccesible permanentemente
